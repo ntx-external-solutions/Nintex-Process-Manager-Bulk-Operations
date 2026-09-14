@@ -1015,3 +1015,764 @@ function Import-DependencyPlan {
     }
     return (Get-Content -Path $Path -Raw -Encoding UTF8 | ConvertFrom-Json)
 }
+
+# ============================================================================
+# PROCESS STATE AND LIFECYCLE
+# ============================================================================
+
+$script:NpmThrottleMs = 0
+
+function Start-NpmThrottle {
+    if ($script:NpmThrottleMs -gt 0) { Start-Sleep -Milliseconds $script:NpmThrottleMs }
+}
+
+function Get-NpmProcessIndex {
+    <#
+    .SYNOPSIS
+        One pass over the active and archived process lists, keyed by UniqueId.
+
+    .DESCRIPTION
+        Archive state has to be known before discovery can be trusted, and
+        resolving it per process would be one call each. ListType 0 is active,
+        7 is archived, so two paged sweeps classify the whole tenant.
+    #>
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [int]$PageSize = 200
+    )
+
+    $index = @{}
+
+    foreach ($listType in @(0, 7)) {
+        $isArchived = ($listType -eq 7)
+        $page = 1
+
+        do {
+            $url = "$SiteURL/Bff/Process/api/v1/processes?Page=$page&PageSize=$PageSize&ListType=$listType"
+            $result = Invoke-NpmApi -Url $url -Token $Token -Method Get
+            if (-not $result.Success) { break }
+
+            $items = Get-NodeArray -Node $result.Response -Name 'items'
+            foreach ($item in $items) {
+                $uniqueId = [string](Get-NodeValue -Node $item -Name 'processUniqueId')
+                if (-not $uniqueId) { continue }
+
+                $index[$uniqueId.ToLowerInvariant()] = [PSCustomObject]@{
+                    UniqueId    = $uniqueId
+                    NumericId   = Get-NodeValue -Node $item -Name 'id'
+                    Name        = [string](Get-NodeValue -Node $item -Name 'processName')
+                    IsArchived  = $isArchived
+                    GroupId     = Get-NodeValue -Node $item -Name 'groupId'
+                }
+            }
+
+            $page++
+        } while ($result.Success -and $items.Count -eq $PageSize)
+    }
+
+    return $index
+}
+
+function Get-NpmIndexEntry {
+    param($Index, [string]$UniqueId)
+
+    if (-not $UniqueId) { return $null }
+    $key = $UniqueId.ToLowerInvariant()
+    if ($Index.ContainsKey($key)) { return $Index[$key] }
+    return $null
+}
+
+function Get-NpmProcessModelAnyState {
+    # Picks the endpoint that matches the process's state. Using the wrong one
+    # returns nothing, which a caller would otherwise read as "no references".
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [string]$UniqueId,
+        [bool]$IsArchived
+    )
+
+    if ($IsArchived) {
+        $models = @(Get-NpmArchivedProcessModel -SiteURL $SiteURL -Token $Token -ProcessUniqueIds @($UniqueId))
+        if ($models.Count -gt 0) { return $models[0] }
+        return $null
+    }
+
+    return (Get-NpmProcessModel -SiteURL $SiteURL -Token $Token -ProcessUniqueId $UniqueId)
+}
+
+function Restore-NpmProcess {
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [string]$ProcessUniqueId,
+        $ProcessGroupId
+    )
+
+    Start-NpmThrottle
+    $result = Invoke-NpmApi -Url "$SiteURL/Process/Edit/RestoreProcess" -Token $Token -Method Post -Body @{
+        processUniqueId = $ProcessUniqueId
+        processGroupId  = [string]$ProcessGroupId
+    }
+    return $result.Success
+}
+
+function Set-NpmProcessArchived {
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [string]$ProcessUniqueId,
+        [string]$Comment = 'Bulk operation',
+        [bool]$ApprovalsEnabled = $false
+    )
+
+    Start-NpmThrottle
+    $result = Invoke-NpmApi -Url "$SiteURL/Process/Edit/ArchiveProcess" -Token $Token -Method Post -Body @{
+        processUniqueId = $ProcessUniqueId
+        comment         = $Comment
+    }
+    if (-not $result.Success) { return $false }
+
+    # With approvals on, archiving lands in a pending state and needs an explicit
+    # publish to take effect.
+    if ($ApprovalsEnabled) {
+        $model = Get-NpmProcessModel -SiteURL $SiteURL -Token $Token -ProcessUniqueId $ProcessUniqueId
+        $revisionId = Get-NodeValue -Node $model -Name 'ProcessRevisionEditId'
+        if ($revisionId) {
+            [void](Invoke-NpmApi -Url "$SiteURL/Api/v1/Processes/$ProcessUniqueId/Publish" -Token $Token -Method Post -Body @{
+                ProcessRevisionEditId = [string]$revisionId
+                IsPublishNow          = $true
+            })
+        }
+    }
+
+    return $true
+}
+
+function Remove-NpmProcess {
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [string]$ProcessUniqueId,
+        [string]$ProcessGroupUniqueId = ''
+    )
+
+    $body = @{ processUniqueId = $ProcessUniqueId }
+    if ($ProcessGroupUniqueId) { $body.processGroupUniqueId = $ProcessGroupUniqueId }
+
+    Start-NpmThrottle
+    $result = Invoke-NpmApi -Url "$SiteURL/Process/Edit/DeleteProcess" -Token $Token -Method Post -Body $body
+    return $result.Success
+}
+
+function Find-HiddenInputOutputReference {
+    <#
+    .SYNOPSIS
+        Scans archived processes for Input/Output references to the targets.
+
+    .DESCRIPTION
+        Covers the one blind spot the dependency API cannot: an archived process
+        whose ONLY reference to a target is an Input or Output is absent from
+        every response, so it can never be discovered by querying. Discovering it
+        would require restoring it, and knowing to restore it would require
+        discovering it.
+
+        Narrowed to Input and Output deliberately. Linked Process edges are
+        reported by the API regardless of archive state, so re-scanning for them
+        would be redundant work over the whole archive.
+
+    .PARAMETER IncludeActive
+        Also scan ACTIVE processes. Off by default because it costs one fetch per
+        active process, which is 700+ calls on a typical tenant.
+
+        It is not merely thoroughness. If Input/Output rows report only the
+        queried process's own collections (reading (a) of the open question in
+        API_ARCHITECTURE.md), then an ACTIVE process whose only reference to a
+        target is an Input is invisible to the API too, exactly like an archived
+        one. Under reading (b) it would be reported and this scan is redundant.
+
+        Until that question is settled, leaving this off risks leaving a dangling
+        input on a surviving process. Turning it on is slow but complete.
+    #>
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [string[]]$TargetUniqueIds,
+        $Index,
+        [bool]$IncludeActive = $false,
+        [int]$BatchSize = 25
+    )
+
+    $sites = @()
+    $archivedIds = @()
+    $activeIds = @()
+
+    foreach ($entry in $Index.Values) {
+        if ($entry.IsArchived) { $archivedIds += $entry.UniqueId }
+        elseif ($IncludeActive) { $activeIds += $entry.UniqueId }
+    }
+
+    if ($activeIds.Count -gt 0) {
+        Write-Host "  Scanning $($activeIds.Count) ACTIVE process(es) for Input/Output references (slow)..." -ForegroundColor Gray
+        $done = 0
+        foreach ($id in $activeIds) {
+            $done++
+            if ($done % 25 -eq 0) {
+                Write-Host "`r    Scanned $done of $($activeIds.Count)..." -NoNewline -ForegroundColor Gray
+            }
+            # Active processes must use the individual endpoint; the mobile API
+            # is for archived processes and returns nothing useful here.
+            $model = Get-NpmProcessModel -SiteURL $SiteURL -Token $Token -ProcessUniqueId $id
+            if ($null -eq $model) { continue }
+            $found = @(Find-ProcessReferenceSite -ProcessObject $model -TargetUniqueIds $TargetUniqueIds)
+            $sites += @($found | Where-Object { $_.Category -eq 'Input' -or $_.Category -eq 'Output' })
+        }
+        Write-Host ""
+    }
+
+    if ($archivedIds.Count -eq 0) { return $sites }
+    Write-Host "  Scanning $($archivedIds.Count) archived process(es) for Input/Output references..." -ForegroundColor Gray
+
+    for ($i = 0; $i -lt $archivedIds.Count; $i += $BatchSize) {
+        $end = [Math]::Min($i + $BatchSize - 1, $archivedIds.Count - 1)
+        $models = @(Get-NpmArchivedProcessModel -SiteURL $SiteURL -Token $Token `
+            -ProcessUniqueIds $archivedIds[$i..$end] -BatchSize $BatchSize)
+
+        foreach ($model in $models) {
+            $found = @(Find-ProcessReferenceSite -ProcessObject $model -TargetUniqueIds $TargetUniqueIds)
+            $sites += @($found | Where-Object { $_.Category -eq 'Input' -or $_.Category -eq 'Output' })
+        }
+
+        Write-Host "`r    Scanned $([Math]::Min($end + 1, $archivedIds.Count)) of $($archivedIds.Count)..." -NoNewline -ForegroundColor Gray
+    }
+    Write-Host ""
+
+    if ($sites.Count -gt 0) {
+        Write-Host "  Found $($sites.Count) Input/Output reference(s) invisible to the dependency API" -ForegroundColor Yellow
+    }
+    return $sites
+}
+
+# ============================================================================
+# PLAN CONSTRUCTION
+# ============================================================================
+
+function New-ProcessDeletePlan {
+    <#
+    .SYNOPSIS
+        Discovers, locates and reconciles everything that references the targets.
+
+    .DESCRIPTION
+        Ordering here is not cosmetic. Archiving suppresses Input and Output rows
+        naming the archived process, so discovery run against an archived
+        participant silently under-reports. Participants are therefore restored
+        BEFORE discovery is trusted, and discovery is re-run afterwards.
+
+        AllowRestore is false in preview mode, because a preview must not mutate
+        the tenant. The resulting plan is then explicitly marked incomplete
+        rather than being passed off as a full picture.
+    #>
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [string[]]$TargetUniqueIds,
+        $Index,
+        $HoldingGroupId = $null,
+        [bool]$AllowRestore = $true,
+        [bool]$ScanActiveForInputOutput = $false,
+        [int]$MaxPasses = 3
+    )
+
+    $plan = New-DependencyPlan -SiteURL $SiteURL -TargetUniqueIds $TargetUniqueIds
+    $ledger = @{}
+    $allClaims = @()
+    $restoredTotal = 0
+
+    function Add-LedgerEntry {
+        param($UniqueId)
+        $key = $UniqueId.ToLowerInvariant()
+        if ($ledger.ContainsKey($key)) { return $ledger[$key] }
+
+        $entry = Get-NpmIndexEntry -Index $Index -UniqueId $UniqueId
+        if ($null -eq $entry) { return $null }
+
+        $model = Get-NpmProcessModelAnyState -SiteURL $SiteURL -Token $Token `
+            -UniqueId $UniqueId -IsArchived $entry.IsArchived
+
+        $groupUniqueId = [string](Get-NodeValue -Node $model -Name 'GroupUniqueId')
+        $groupId = Get-NodeValue -Node $model -Name 'GroupId'
+        if ($null -eq $groupId) { $groupId = $entry.GroupId }
+
+        $record = [PSCustomObject]@{
+            UniqueId              = $entry.UniqueId
+            Name                  = $entry.Name
+            NumericId             = $entry.NumericId
+            WasArchived           = $entry.IsArchived
+            OriginalGroupUniqueId = $groupUniqueId
+            OriginalGroupId       = $groupId
+            RestoredByThisRun     = $false
+            Denormalized          = $false
+            Model                 = $model
+        }
+        $ledger[$key] = $record
+        return $record
+    }
+
+    # ---- Pass loop: discover, restore, re-discover until the set is stable ----
+    for ($pass = 1; $pass -le $MaxPasses; $pass++) {
+        Write-Host "`n  Discovery pass $pass..." -ForegroundColor Cyan
+
+        $allClaims = @()
+        $failedTargets = @()
+
+        foreach ($target in $TargetUniqueIds) {
+            $claims = Get-ProcessDependencyClaim -SiteURL $SiteURL -Token $Token -ProcessUniqueId $target
+            if ($null -eq $claims) {
+                # A failed check is NOT an empty dependency list. Treating it as
+                # one would delete a process whose references were never examined.
+                $failedTargets += $target
+                continue
+            }
+            $allClaims += $claims
+        }
+
+        if ($failedTargets.Count -gt 0) {
+            $plan.Status = 'Blocked'
+            $plan.Log += "Dependency check failed for $($failedTargets.Count) target(s): $($failedTargets -join ', ')"
+            Write-Host "  Dependency check failed for $($failedTargets.Count) target(s). Cannot plan safely." -ForegroundColor Red
+            return $plan
+        }
+
+        $candidates = @(Get-DependencyCandidate -Claims $allClaims -TargetUniqueIds $TargetUniqueIds)
+        Write-Host "  $($allClaims.Count) claim(s) across $($candidates.Count) process(es)" -ForegroundColor Gray
+
+        foreach ($candidate in $candidates) { [void](Add-LedgerEntry -UniqueId $candidate) }
+
+        # Restore archived participants so their suppressed Input/Output edges
+        # become visible to the next pass.
+        $restoredThisPass = 0
+        if ($AllowRestore -and $null -ne $HoldingGroupId) {
+            foreach ($candidate in $candidates) {
+                $record = $ledger[$candidate.ToLowerInvariant()]
+                if ($null -eq $record -or -not $record.WasArchived -or $record.RestoredByThisRun) { continue }
+
+                # Restore in place. Dependency holders are not being deleted, so
+                # parking them in the temp group would strand them there.
+                $groupId = $record.OriginalGroupId
+                if ($null -eq $groupId) { $groupId = $HoldingGroupId }
+
+                Write-Host "    Restoring archived process: $($record.Name)" -ForegroundColor Yellow
+                if (Restore-NpmProcess -SiteURL $SiteURL -Token $Token -ProcessUniqueId $record.UniqueId -ProcessGroupId $groupId) {
+                    $record.RestoredByThisRun = $true
+                    $restoredThisPass++
+                    $restoredTotal++
+                    $plan.Log += "Restored $($record.UniqueId) ($($record.Name)) to group $groupId for discovery"
+                } else {
+                    $plan.Log += "FAILED to restore $($record.UniqueId) ($($record.Name)); its Input/Output edges stay hidden"
+                    Write-Host "    Failed to restore $($record.Name)" -ForegroundColor Red
+                }
+            }
+        }
+
+        if ($restoredThisPass -eq 0) {
+            Write-Host "  Claim set stable after pass $pass" -ForegroundColor Gray
+            break
+        }
+        Write-Host "  Restored $restoredThisPass process(es); re-running discovery" -ForegroundColor Gray
+    }
+
+    # ---- The API blind spot: archived Input/Output holders ----
+    $freshIndex = $Index
+    if ($restoredTotal -gt 0) {
+        $freshIndex = Get-NpmProcessIndex -SiteURL $SiteURL -Token $Token
+    }
+    $blindSites = @(Find-HiddenInputOutputReference -SiteURL $SiteURL -Token $Token `
+        -TargetUniqueIds $TargetUniqueIds -Index $freshIndex -IncludeActive $ScanActiveForInputOutput)
+
+    foreach ($site in $blindSites) {
+        if (-not $ledger.ContainsKey($site.HolderUniqueId.ToLowerInvariant())) {
+            [void](Add-LedgerEntry -UniqueId $site.HolderUniqueId)
+            $plan.Log += "Archive scan found holder $($site.HolderUniqueId) that the dependency API never reported"
+        }
+    }
+
+    # ---- Locate: walk every participant, both directions ----
+    $participants = @($ledger.Values)
+    foreach ($target in $TargetUniqueIds) { [void](Add-LedgerEntry -UniqueId $target) }
+    $participants = @($ledger.Values)
+
+    $targetLookup = @{}
+    foreach ($t in $TargetUniqueIds) { $targetLookup[$t.ToLowerInvariant()] = $true }
+
+    $allSites = @()
+    foreach ($record in $participants) {
+        if ($null -eq $record.Model) {
+            $plan.Log += "Could not fetch model for $($record.UniqueId) ($($record.Name)); its references were not examined"
+            continue
+        }
+
+        $isTarget = $targetLookup.ContainsKey($record.UniqueId.ToLowerInvariant())
+
+        if ($isTarget) {
+            # Sites inside a target are located for reconciliation only. The
+            # target is about to be deleted, so editing it is wasted work.
+            $others = @($participants | Where-Object { $_.UniqueId -ne $record.UniqueId } | ForEach-Object { $_.UniqueId })
+            $allSites += @(Find-ProcessReferenceSite -ProcessObject $record.Model -TargetUniqueIds $others)
+        } else {
+            $allSites += @(Find-ProcessReferenceSite -ProcessObject $record.Model -TargetUniqueIds $TargetUniqueIds)
+        }
+    }
+
+    # ---- Filter: self-references and target-held sites are not work ----
+    $workSites = @($allSites | Where-Object {
+        $_.HolderUniqueId -ne $_.TargetUniqueId -and
+        -not $targetLookup.ContainsKey($_.HolderUniqueId.ToLowerInvariant()) -and
+        $targetLookup.ContainsKey($_.TargetUniqueId.ToLowerInvariant())
+    })
+
+    $workItems = @(Group-ReferenceSiteByHolder -Sites $workSites)
+
+    # ---- Reconcile per pair ----
+    $reconciliation = @()
+    foreach ($target in $TargetUniqueIds) {
+        $related = @($allClaims | Where-Object { $_.QueriedUniqueId -eq $target } |
+            ForEach-Object { $_.RelatedUniqueId } | Select-Object -Unique)
+
+        foreach ($relatedId in $related) {
+            $record = $ledger[$relatedId.ToLowerInvariant()]
+            $isArchived = $false
+            if ($null -ne $record) { $isArchived = ($record.WasArchived -and -not $record.RestoredByThisRun) }
+
+            $reconciliation += @(Test-DependencyReconciliation -QueriedUniqueId $target -RelatedUniqueId $relatedId `
+                -Claims $allClaims -Sites $allSites -RelatedIsArchived $isArchived)
+        }
+    }
+
+    $plan.Ledger = @($ledger.Values | ForEach-Object {
+        # The model is dropped from the persisted ledger: it is large, it is
+        # re-fetchable, and a stale copy is worse than none on resume.
+        [PSCustomObject]@{
+            UniqueId              = $_.UniqueId
+            Name                  = $_.Name
+            NumericId             = $_.NumericId
+            WasArchived           = $_.WasArchived
+            OriginalGroupUniqueId = $_.OriginalGroupUniqueId
+            OriginalGroupId       = $_.OriginalGroupId
+            RestoredByThisRun     = $_.RestoredByThisRun
+            Denormalized          = $_.Denormalized
+        }
+    })
+    $plan.Claims = $allClaims
+    $plan.Sites = $workSites
+    $plan.WorkItems = $workItems
+    $plan.Reconciliation = $reconciliation
+    $plan.Status = 'Planned'
+
+    if (-not $AllowRestore) {
+        $archivedCount = @($ledger.Values | Where-Object { $_.WasArchived }).Count
+        if ($archivedCount -gt 0) {
+            $plan.Status = 'PlannedIncomplete'
+            $plan.Log += "Preview did not restore $archivedCount archived participant(s); their Input/Output references are hidden and this plan understates the work"
+        }
+    }
+
+    return $plan
+}
+
+# ============================================================================
+# PLAN PREVIEW
+# ============================================================================
+
+function Show-ProcessDeletePlan {
+    param($Plan, $Index)
+
+    Write-Host "`n=== PLAN SUMMARY ===" -ForegroundColor Cyan
+    Write-Host "Targets to delete : $(@($Plan.TargetUniqueIds).Count)" -ForegroundColor White
+    Write-Host "Processes to edit : $(@($Plan.WorkItems).Count)" -ForegroundColor White
+    Write-Host "Reference sites   : $(@($Plan.Sites).Count)" -ForegroundColor White
+
+    $archived = @($Plan.Ledger | Where-Object { $_.WasArchived })
+    if ($archived.Count -gt 0) {
+        Write-Host "Archived involved : $($archived.Count) (restored for the run, re-archived afterwards)" -ForegroundColor Yellow
+    }
+
+    if (@($Plan.WorkItems).Count -gt 0) {
+        Write-Host "`nReferences to remove, by holding process:" -ForegroundColor Yellow
+        foreach ($item in @($Plan.WorkItems)) {
+            $record = @($Plan.Ledger | Where-Object { $_.UniqueId -eq $item.HolderUniqueId })
+            $name = if ($record.Count -gt 0) { $record[0].Name } else { $item.HolderUniqueId }
+            $state = if ($record.Count -gt 0 -and $record[0].WasArchived) { ' [archived]' } else { '' }
+
+            Write-Host "  $name$state" -ForegroundColor White
+            foreach ($site in @($item.Sites)) {
+                Write-Host "      $($site.Action.PadRight(7)) $($site.Path)" -ForegroundColor Gray
+            }
+        }
+    }
+
+    $groupSites = @($Plan.Sites | Where-Object { $_.Action -eq 'Report' })
+    if ($groupSites.Count -gt 0) {
+        Write-Host "`nGroup links (reported, never removed automatically):" -ForegroundColor Yellow
+        foreach ($site in $groupSites) {
+            Write-Host "  $($site.HolderUniqueId) -> $($site.TargetUniqueId)" -ForegroundColor Gray
+        }
+    }
+
+    $problems = @($Plan.Reconciliation | Where-Object { $_.Status -eq 'Mismatch' })
+    if ($problems.Count -gt 0) {
+        Write-Host "`nRECONCILIATION MISMATCHES:" -ForegroundColor Red
+        Write-Host "The dependency API and the process JSON disagree. Investigate before deleting." -ForegroundColor Red
+        foreach ($p in $problems) {
+            Write-Host "  $($p.Category): claimed $($p.Claimed), located $($p.Located) - $($p.Note)" -ForegroundColor Red
+        }
+    }
+
+    $suppressed = @($Plan.Reconciliation | Where-Object { $_.Suppressed -and $_.Located -gt 0 })
+    if ($suppressed.Count -gt 0) {
+        Write-Host "`nSuppressed by archiving (found in JSON, hidden from the API):" -ForegroundColor Yellow
+        foreach ($s in $suppressed) {
+            Write-Host "  $($s.Category): $($s.Located) reference(s) on $($s.RelatedUniqueId)" -ForegroundColor Yellow
+        }
+    }
+
+    if (@($Plan.Log).Count -gt 0) {
+        Write-Host "`nPlan log:" -ForegroundColor Cyan
+        foreach ($line in @($Plan.Log)) { Write-Host "  $line" -ForegroundColor Gray }
+    }
+
+    if ($Plan.Status -eq 'PlannedIncomplete') {
+        Write-Host "`n*** THIS PLAN IS INCOMPLETE ***" -ForegroundColor Yellow
+        Write-Host "Preview mode does not restore archived processes, so their Input and Output" -ForegroundColor Yellow
+        Write-Host "references are hidden. A real run will find more than this preview shows." -ForegroundColor Yellow
+    }
+}
+
+# ============================================================================
+# EXECUTION
+# ============================================================================
+
+function Invoke-ProcessDeletePlan {
+    <#
+    .SYNOPSIS
+        Executes a plan: removes references, verifies, deletes targets, restores state.
+
+    .DESCRIPTION
+        Phase order is load-bearing:
+
+          Remove   one fetch, one save, one publish per HOLDER, carrying every
+                   target at once. Saving per target would publish a holder
+                   repeatedly and leave a window where it is re-archived while
+                   later edits are still pending.
+
+          Verify   BEFORE re-archiving, and by re-walking each holder's JSON
+                   rather than re-querying the API. Archiving suppresses the
+                   very rows that would reveal a missed reference, so a check
+                   run afterwards reports success either way.
+
+          Delete   targets only, after verification passes.
+
+          Restore  re-archive everything the ledger says was archived, back to
+                   its ORIGINAL group. The plan is written to disk after each
+                   one so an interrupted run can be finished from the file.
+    #>
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        $Plan,
+        [string]$PlanPath,
+        [bool]$ApprovalsEnabled = $false,
+        [bool]$SkipVerification = $false
+    )
+
+    $results = @()
+
+    # ---- Remove references, one save per holder ----
+    Write-Host "`n=== REMOVING REFERENCES ===" -ForegroundColor Cyan
+    $workItems = @($Plan.WorkItems)
+
+    if ($workItems.Count -eq 0) {
+        Write-Host "  No references to remove." -ForegroundColor Gray
+    }
+
+    $index = 0
+    foreach ($item in $workItems) {
+        $index++
+        $holderId = $item.HolderUniqueId
+        $record = @($Plan.Ledger | Where-Object { $_.UniqueId -eq $holderId })
+        $name = if ($record.Count -gt 0) { $record[0].Name } else { $holderId }
+
+        Write-Host "  [$index/$($workItems.Count)] $name ($(@($item.Sites).Count) site(s))..." -ForegroundColor Gray
+
+        $model = Get-NpmProcessModel -SiteURL $SiteURL -Token $Token -ProcessUniqueId $holderId
+        if ($null -eq $model) {
+            $results += [PSCustomObject]@{
+                ObjectType = 'Process'; ObjectID = $holderId; Name = $name
+                Operation = 'RemoveReferences'; Status = 'Failed'
+                Message = 'Could not fetch process for editing'
+            }
+            continue
+        }
+
+        $removal = Remove-ProcessReference -ProcessObject $model -TargetUniqueIds @($item.TargetsAffected)
+
+        if ($removal.ReferencesRemoved -eq 0) {
+            $results += [PSCustomObject]@{
+                ObjectType = 'Process'; ObjectID = $holderId; Name = $name
+                Operation = 'RemoveReferences'; Status = 'Skipped'
+                Message = 'No references found at edit time (already removed?)'
+            }
+            continue
+        }
+
+        $save = Save-NpmProcessModel -SiteURL $SiteURL -Token $Token -ProcessUniqueId $holderId `
+            -ProcessObject $removal.CleanedObject -ChangeDescription 'Automated dependency removal' `
+            -ApprovalsEnabled $ApprovalsEnabled -SuppressChangeNotification $true
+
+        $results += [PSCustomObject]@{
+            ObjectType = 'Process'; ObjectID = $holderId; Name = $name
+            Operation = 'RemoveReferences'
+            Status = $(if ($save.Success) { 'Success' } else { 'Failed' })
+            Message = $(if ($save.Success) { "Removed $($removal.ReferencesRemoved) reference(s), $($save.Stage)" }
+                        else { "$($save.Stage) failed: $($save.Error)" })
+        }
+
+        if (-not $save.Success) {
+            Write-Host "      Save failed: $($save.Error)" -ForegroundColor Red
+        }
+    }
+
+    # ---- Verify, while everything is still active ----
+    $verificationFailed = @()
+    if (-not $SkipVerification) {
+        Write-Host "`n=== VERIFYING (all participants still active) ===" -ForegroundColor Cyan
+
+        foreach ($item in $workItems) {
+            $model = Get-NpmProcessModel -SiteURL $SiteURL -Token $Token -ProcessUniqueId $item.HolderUniqueId
+            if ($null -eq $model) { continue }
+
+            $remaining = @(Find-ProcessReferenceSite -ProcessObject $model -TargetUniqueIds @($item.TargetsAffected))
+            $remaining = @($remaining | Where-Object { $_.Action -ne 'Report' })
+
+            if ($remaining.Count -gt 0) {
+                $verificationFailed += [PSCustomObject]@{
+                    HolderUniqueId = $item.HolderUniqueId
+                    Remaining      = $remaining
+                }
+                Write-Host "  $($item.HolderUniqueId): $($remaining.Count) reference(s) still present" -ForegroundColor Red
+                foreach ($site in $remaining) {
+                    Write-Host "      $($site.Path)" -ForegroundColor Red
+                }
+            }
+        }
+
+        if ($verificationFailed.Count -eq 0) {
+            Write-Host "  All references removed." -ForegroundColor Green
+        }
+    }
+
+    return [PSCustomObject]@{
+        Results            = $results
+        VerificationFailed = $verificationFailed
+    }
+}
+
+function Invoke-ProcessTargetDeletion {
+    # Archives then deletes the targets. Split from reference removal so a caller
+    # can stop between verification and the irreversible step.
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        $Plan,
+        [bool]$ApprovalsEnabled = $false
+    )
+
+    $results = @()
+    $targets = @($Plan.TargetUniqueIds)
+
+    Write-Host "`n=== ARCHIVING TARGETS ===" -ForegroundColor Cyan
+    $i = 0
+    foreach ($target in $targets) {
+        $i++
+        $record = @($Plan.Ledger | Where-Object { $_.UniqueId -eq $target })
+        $name = if ($record.Count -gt 0) { $record[0].Name } else { $target }
+        Write-Host "`r  Archiving $i of $($targets.Count)..." -NoNewline -ForegroundColor Gray
+
+        if ($record.Count -gt 0 -and $record[0].WasArchived -and -not $record[0].RestoredByThisRun) { continue }
+        [void](Set-NpmProcessArchived -SiteURL $SiteURL -Token $Token -ProcessUniqueId $target `
+            -Comment 'Pre-delete archive' -ApprovalsEnabled $ApprovalsEnabled)
+    }
+    Write-Host ""
+
+    Write-Host "`n=== DELETING TARGETS ===" -ForegroundColor Red
+    $i = 0
+    foreach ($target in $targets) {
+        $i++
+        $record = @($Plan.Ledger | Where-Object { $_.UniqueId -eq $target })
+        $name = if ($record.Count -gt 0) { $record[0].Name } else { $target }
+        $groupUniqueId = if ($record.Count -gt 0) { [string]$record[0].OriginalGroupUniqueId } else { '' }
+
+        Write-Host "`r  Deleting $i of $($targets.Count)..." -NoNewline -ForegroundColor Red
+
+        $ok = Remove-NpmProcess -SiteURL $SiteURL -Token $Token -ProcessUniqueId $target -ProcessGroupUniqueId $groupUniqueId
+        $results += [PSCustomObject]@{
+            ObjectType = 'Process'; ObjectID = $target; Name = $name
+            Operation = 'Delete'
+            Status = $(if ($ok) { 'Success' } else { 'Failed' })
+            Message = $(if ($ok) { 'Deleted' } else { 'Delete failed' })
+        }
+    }
+    Write-Host ""
+
+    return $results
+}
+
+function Restore-ProcessPlanState {
+    <#
+    .SYNOPSIS
+        Re-archives everything this run restored, back to its original group.
+
+    .DESCRIPTION
+        Idempotent and resumable. The plan is re-written after each entry, so a
+        run interrupted here can be finished by re-importing the plan and calling
+        this again: entries already marked Denormalized are skipped.
+    #>
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        $Plan,
+        [string]$PlanPath,
+        [bool]$ApprovalsEnabled = $false
+    )
+
+    $results = @()
+    $toRestore = @($Plan.Ledger | Where-Object { $_.WasArchived -and $_.RestoredByThisRun -and -not $_.Denormalized })
+
+    if ($toRestore.Count -eq 0) { return $results }
+
+    Write-Host "`n=== RE-ARCHIVING RESTORED PROCESSES ===" -ForegroundColor Cyan
+
+    foreach ($entry in $toRestore) {
+        Write-Host "  Re-archiving $($entry.Name)..." -ForegroundColor Gray
+
+        $ok = Set-NpmProcessArchived -SiteURL $SiteURL -Token $Token -ProcessUniqueId $entry.UniqueId `
+            -Comment 'Re-archiving after dependency cleanup' -ApprovalsEnabled $ApprovalsEnabled
+
+        $entry.Denormalized = $ok
+        $results += [PSCustomObject]@{
+            ObjectType = 'Process'; ObjectID = $entry.UniqueId; Name = $entry.Name
+            Operation = 'ReArchive'
+            Status = $(if ($ok) { 'Success' } else { 'Failed' })
+            Message = $(if ($ok) { "Re-archived to group $($entry.OriginalGroupUniqueId)" }
+                        else { 'Re-archive failed; this process is still ACTIVE' })
+        }
+
+        if (-not $ok) {
+            Write-Host "    Failed. $($entry.Name) is still active and must be archived manually." -ForegroundColor Red
+        }
+
+        if ($PlanPath) { [void](Export-DependencyPlan -Plan $Plan -Path $PlanPath) }
+    }
+
+    return $results
+}

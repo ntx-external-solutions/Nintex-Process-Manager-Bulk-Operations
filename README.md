@@ -266,18 +266,34 @@ Enter CSV file path: update-ownership.csv
 
 **WARNING: This is a DESTRUCTIVE operation that permanently deletes processes.**
 
-This mode performs a comprehensive deletion workflow:
+Delegates all dependency work to `NintexProcessDependencies.ps1`. The phase order
+is dictated by measured API behaviour, not preference:
 
-1. Identifies processes to delete (from CSV or group)
-2. Creates/uses a temporary holding group
-3. Restores all archived processes temporarily
-4. Scans entire site for references to processes being deleted
-5. Optionally removes references from other processes
-6. Updates ownership of target processes to current user
-7. Archives target processes
-8. Permanently deletes target processes
-9. Re-archives previously archived processes
-10. Cleanup (temp group should be manually deleted if empty)
+1. **Gather** - resolve CSV, group or archived sources to process UniqueIds
+2. **Hold** - restore archived *targets*, so references held against them stop being
+   suppressed from the dependency check
+3. **Plan** - discover claims, restore archived holders *in place*, re-run discovery
+   until the claim set is stable, scan for the API's blind spot, locate every site by
+   walking JSON, reconcile, and write the plan to disk
+4. **Remove** - one fetch, one save, one publish per *holding* process, carrying every
+   target at once
+5. **Verify** - re-walk each holder while everything is still **active**, because
+   archiving suppresses the very rows that would reveal a miss
+6. **Delete** - archive then delete the targets
+7. **Restore** - re-archive whatever the run restored, to its **original** group
+8. **Cleanup** - remove the holding group, optionally the source group folders
+
+The plan file (`Delete_Plan_<timestamp>.json`) is the crash-safety net. It is written
+before the first mutation and updated after each re-archive, so an interrupted run can
+be finished from it rather than leaving processes stranded in the wrong state.
+
+**Reconciliation mismatches and verification failures both stop and ask** before
+anything irreversible happens.
+
+**On the thorough scan.** The run offers to read every active process looking for Input
+and Output references. It is slow (one call per process) but it is the only way to be
+certain none are missed while the open question in API_ARCHITECTURE.md is unsettled.
+Declining it risks leaving a dangling input on a surviving process.
 
 **CSV Format:**
 - Required column: `ProcessID`
@@ -415,9 +431,19 @@ plus one synthetic process covering the buckets the real pair does not contain.
 pwsh -NoProfile -File Tests/Test-Dependencies.ps1
 ```
 
-98 assertions covering the locator, remover, orphan semantics, null and
-single-element shape handling, claim parsing, inversion, reconciliation and plan
-persistence.
+```powershell
+pwsh -NoProfile -File Tests/Test-Executor.ps1
+```
+
+`Test-Dependencies.ps1` has 98 assertions covering the locator, remover, orphan
+semantics, null and single-element shape handling, claim parsing, inversion,
+reconciliation and plan persistence.
+
+`Test-Executor.ps1` has 37 assertions running the whole pipeline against a mocked
+tenant: index sweep, discovery, the restore-and-rediscover loop, site location,
+inversion, reconciliation, reference removal, save contract, verification, deletion
+and the re-archive round trip. It also asserts that a failed dependency check blocks
+the run rather than being read as "no dependencies".
 
 ## API Endpoints Used
 
@@ -467,13 +493,9 @@ Known broken or incomplete as of this revision:
 - **Mode 2 (Restore)** reads `isArchived` / `name` off the unwrapped response, so its
   preview and verification output is unreliable even when the restore itself succeeds.
 - **Document operations** are deferred and partially implemented. Do not rely on them.
-- **Mode 5 dependency handling** calls `CheckProcessDependencies` twice with contradictory
-  assumptions about direction, and deduplicates results in a way that drops removal sites.
-  See the caveats under "API Endpoints Used".
-- The reference locator does not cover `EmbeddedProcessLink`, `ProcessGroupLink`, their
-  orphan variants, or `EmbeddedLinkedProcessId`, and only recurses one level into
-  `ChildProcessProcedures` off `Activity`.
-- Process group creation for Mode 5 requires manual setup.
+- **Mode 5 Input/Output completeness** depends on the open question in
+  API_ARCHITECTURE.md. Until it is settled, only the thorough scan guarantees no
+  Input or Output reference is missed.
 - Large-scale operations (1000+ items) may take significant time. Only
   `Update-ProcessOwnership.ps1` implements retry/backoff and throttling.
 
