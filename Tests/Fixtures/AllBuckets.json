@@ -1,0 +1,113 @@
+{
+  "Id": 9001,
+  "UniqueId": "aaaaaaaa-0000-0000-0000-000000000001",
+  "Name": "All Buckets Fixture",
+  "StateId": 1,
+  "GroupId": 700,
+  "GroupUniqueId": "92d1e6ca-0534-4273-8124-7f838a1e335a",
+  "ProcessProcedures": {
+    "Activity": [
+      {
+        "Id": 100,
+        "Text": "Activity linking the target directly",
+        "LinkedProcessId": 1540,
+        "EmbeddedLinkedProcessId": 77,
+        "LinkedProcessUniqueId": "TARGET-A",
+        "LinkedProcessName": "Target A",
+        "LinkedProcessDisplayName": "Target A",
+        "LinkedProcessGroupId": 5,
+        "LinkedProcessGroupName": "G",
+        "LinkedProcessGroupUniqueId": "GROUP-1",
+        "DecisionLinkType": 0,
+        "ChildProcessProcedures": {
+          "Note": [
+            {
+              "Id": 101,
+              "Text": "note one",
+              "LinkedProcessUniqueId": "TARGET-A",
+              "LinkedProcessName": "Target A",
+              "LinkedProcessDisplayName": "Target A",
+              "ChildProcessProcedures": {
+                "WebLink": [
+                  {
+                    "Id": 102,
+                    "Text": "nested two deep",
+                    "LinkedProcessUniqueId": "TARGET-B",
+                    "LinkedProcessName": "Target B",
+                    "LinkedProcessDisplayName": "Target B",
+                    "ChildProcessProcedures": null
+                  }
+                ]
+              }
+            }
+          ],
+          "Task": [
+            {
+              "Id": 103,
+              "Text": "unrelated task",
+              "LinkedProcessUniqueId": "SOMETHING-ELSE",
+              "ChildProcessProcedures": null
+            }
+          ]
+        }
+      }
+    ],
+    "Decision": [
+      {
+        "Id": 200,
+        "Text": "live decision link",
+        "LinkedProcessId": 1540,
+        "LinkedProcessUniqueId": "TARGET-A",
+        "LinkedProcessName": "Target A",
+        "LinkedProcessDisplayName": "Target A",
+        "DecisionLinkType": 4,
+        "ChildProcessProcedures": null
+      },
+      {
+        "Id": 201,
+        "Text": "decision to somewhere else",
+        "LinkedProcessUniqueId": "SOMETHING-ELSE",
+        "LinkedProcessDisplayName": "Other",
+        "DecisionLinkType": 4,
+        "ChildProcessProcedures": null
+      }
+    ],
+    "ProcessLink": [
+      { "Id": 300, "LinkedProcessUniqueId": "TARGET-A", "LinkedProcessName": "Target A", "ChildProcessProcedures": null },
+      { "Id": 301, "LinkedProcessUniqueId": "SOMETHING-ELSE", "LinkedProcessName": "Other", "ChildProcessProcedures": null },
+      { "Id": 302, "LinkedProcessUniqueId": "TARGET-B", "LinkedProcessName": "Target B", "ChildProcessProcedures": null }
+    ],
+    "OrphanProcessLink": [
+      { "Id": 400, "LinkedProcessUniqueId": "TARGET-A", "ChildProcessProcedures": null }
+    ],
+    "EmbeddedProcessLink": [
+      { "Id": 500, "LinkedProcessUniqueId": "TARGET-B", "ChildProcessProcedures": null }
+    ],
+    "OrphanEmbeddedProcessLink": [
+      { "Id": 600, "LinkedProcessUniqueId": "TARGET-A", "ChildProcessProcedures": null }
+    ],
+    "ProcessGroupLink": [
+      { "Id": 700, "LinkedProcessGroupUniqueId": "GROUP-1", "LinkedProcessGroupName": "Library & History Services" }
+    ],
+    "OrphanProcessGroupLink": []
+  },
+  "Inputs": {
+    "Input": [
+      { "Id": 800, "FromProcessUniqueId": "TARGET-A", "FromProcess": "Target A" },
+      { "Id": 801, "FromProcessUniqueId": "SOMETHING-ELSE", "FromProcess": "Other" }
+    ]
+  },
+  "Outputs": {
+    "Output": [
+      { "Id": 900, "ToProcessUniqueId": "TARGET-B", "ToProcess": "Target B" }
+    ]
+  },
+  "LinkedStakeholders": {
+    "LinkedStakeholder": [
+      { "ProcessId": 1540, "Link": "Target A" },
+      { "ProcessId": 1541, "Link": "Target B" }
+    ]
+  },
+  "Version": "2.0",
+  "ProcessRevisionEditId": 1
+}

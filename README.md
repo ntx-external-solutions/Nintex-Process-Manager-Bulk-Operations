@@ -266,18 +266,34 @@ Enter CSV file path: update-ownership.csv
 
 **WARNING: This is a DESTRUCTIVE operation that permanently deletes processes.**
 
-This mode performs a comprehensive deletion workflow:
+Delegates all dependency work to `NintexProcessDependencies.ps1`. The phase order
+is dictated by measured API behaviour, not preference:
 
-1. Identifies processes to delete (from CSV or group)
-2. Creates/uses a temporary holding group
-3. Restores all archived processes temporarily
-4. Scans entire site for references to processes being deleted
-5. Optionally removes references from other processes
-6. Updates ownership of target processes to current user
-7. Archives target processes
-8. Permanently deletes target processes
-9. Re-archives previously archived processes
-10. Cleanup (temp group should be manually deleted if empty)
+1. **Gather** - resolve CSV, group or archived sources to process UniqueIds
+2. **Hold** - restore archived *targets*, so references held against them stop being
+   suppressed from the dependency check
+3. **Plan** - discover claims, restore archived holders *in place*, re-run discovery
+   until the claim set is stable, scan for the API's blind spot, locate every site by
+   walking JSON, reconcile, and write the plan to disk
+4. **Remove** - one fetch, one save, one publish per *holding* process, carrying every
+   target at once
+5. **Verify** - re-walk each holder while everything is still **active**, because
+   archiving suppresses the very rows that would reveal a miss
+6. **Delete** - archive then delete the targets
+7. **Restore** - re-archive whatever the run restored, to its **original** group
+8. **Cleanup** - remove the holding group, optionally the source group folders
+
+The plan file (`Delete_Plan_<timestamp>.json`) is the crash-safety net. It is written
+before the first mutation and updated after each re-archive, so an interrupted run can
+be finished from it rather than leaving processes stranded in the wrong state.
+
+**Reconciliation mismatches and verification failures both stop and ask** before
+anything irreversible happens.
+
+**On the thorough scan.** The run offers to read every active process looking for Input
+and Output references. It is slow (one call per process) but it is the only way to be
+certain none are missed while the open question in API_ARCHITECTURE.md is unsettled.
+Declining it risks leaving a dangling input on a surviving process.
 
 **CSV Format:**
 - Required column: `ProcessID`
@@ -381,22 +397,107 @@ Document-related features may vary by Nintex PM version. The script includes pla
 5. **Permissions** - Ensure you have necessary permissions for all operations
 6. **References** - For delete operations, carefully review reference reports
 
+## Dependency Engine (new)
+
+`NintexProcessDependencies.ps1` implements the corrected dependency model. It is
+dot-sourceable and not yet wired into Mode 5.
+
+```powershell
+. .\NintexProcessDependencies.ps1
+```
+
+It splits deliberately in two. **Pure** functions (`Find-`, `Remove-`,
+`ConvertFrom-`, `Group-`, `Test-`) operate on process objects in memory, make no
+network calls, and are covered by the test suite. **API** functions
+(`Get-*Claim`, `Get-Npm*`, `Save-Npm*`) touch the tenant.
+
+| Function | Does |
+|---|---|
+| `Find-ProcessReferenceSite` | Locates every physical reference site in one process, with the removal verb for each |
+| `Remove-ProcessReference` | Clears those sites on a deep clone, leaving the caller's object untouched |
+| `ConvertFrom-DependencyResponse` | Parses a dependency response into one claim per occurrence |
+| `Get-DependencyCandidate` | Both sides of every claim, since the payload never says which side holds the reference |
+| `Group-ReferenceSiteByHolder` | Inverts sites so each holder is saved once for all targets |
+| `Test-DependencyReconciliation` | Compares claims against located sites and flags drift |
+| `Save-NpmProcessModel` | PUT with `ProcessJson` as a string, then publish, notifications suppressed |
+| `Export-/Import-DependencyPlan` | Crash-safe ledger so a failed run can finish denormalising |
+
+### Running the tests
+
+No tenant required. Fixtures are real payloads captured from demo.promapp.com
+plus one synthetic process covering the buckets the real pair does not contain.
+
+```powershell
+pwsh -NoProfile -File Tests/Test-Dependencies.ps1
+```
+
+```powershell
+pwsh -NoProfile -File Tests/Test-Executor.ps1
+```
+
+`Test-Dependencies.ps1` has 98 assertions covering the locator, remover, orphan
+semantics, null and single-element shape handling, claim parsing, inversion,
+reconciliation and plan persistence.
+
+`Test-Executor.ps1` has 37 assertions running the whole pipeline against a mocked
+tenant: index sweep, discovery, the restore-and-rediscover loop, site location,
+inversion, reconciliation, reference removal, save contract, verification, deletion
+and the re-archive round trip. It also asserts that a failed dependency check blocks
+the run rather than being read as "no dependencies".
+
 ## API Endpoints Used
 
-The script uses various Nintex Process Manager API endpoints:
+See **[API_ARCHITECTURE.md](API_ARCHITECTURE.md)** for request/response shapes, the
+active-vs-archived endpoint split, and the verified dependency-checking semantics. That
+document is authoritative; this list is a summary.
 
-- `/oauth2/token` - Authentication
-- `/Api/v1/Processes/*` - Process operations
-- `/BFF/Api/Processes/All/List` - Process listing
-- `/Process/Edit/*` - Archive, restore, delete operations
-- `/user/autocomplete.aspx` - User search
+| Endpoint | Purpose |
+|---|---|
+| `/oauth2/token` | Authentication |
+| `/Api/v1/Processes/{uniqueId}` | Get / update an **active** process |
+| `/Api/v1/Processes/{uniqueId}/CheckProcessDependencies` | Dependency check (see caveats below) |
+| `/Api/v1/Processes/{uniqueId}/Publish` | Publish with approval bypass |
+| `/Bff/Process/api/v1/processes` | Process listing (`ListType=0` active, `7` archived) |
+| `/mobile/api/v1/processes` | Batch fetch **archived** process details |
+| `/Process/Edit/{Archive,Restore,Delete}Process` | Archive, restore, delete |
+| `/Process/Edit/PublishProcessRevisionEdit` | Publish without approval |
+| `/bff/navigation/api/v1/breadcrumb/children` | Group children |
+| `/user/autocomplete.aspx` | User search (legacy) |
+
+### Dependency checking caveats
+
+Three behaviours of `CheckProcessDependencies` are easy to get wrong and have each been
+verified against a live tenant. Full evidence is in API_ARCHITECTURE.md.
+
+1. **The response is bidirectional.** It returns both what the queried process references
+   and what references it, in one undifferentiated list. You cannot tell from the payload
+   which process holds a given reference, so both sides must be fetched and inspected.
+
+2. **Counts are per-occurrence.** The same process appearing three times means three
+   separate references exist. Deduplicating the results silently drops removal sites.
+
+3. **Archiving hides Input and Output references.** A `Process Input` or `Process Output`
+   row is returned only if the process it *names* is active. The references still exist in
+   the archived process's JSON. Consequences: never run dependency discovery while a
+   participant is archived, and never verify a removal after re-archiving. Both return
+   falsely clean results.
 
 ## Limitations
 
-- Document operations are partially implemented (varies by Nintex PM version)
-- Process group creation for Mode 5 requires manual setup
-- Reference removal in Mode 5 is conservative (logs warnings, may need manual review)
-- Large-scale operations (1000+ items) may take significant time
+Known broken or incomplete as of this revision:
+
+- **Mode 3 (Update Location)** and **Mode 4 (Update Ownership)** send the process wrapper
+  object to the update endpoint instead of the required `ProcessJson` string, and never
+  publish. Neither reliably applies changes. Use `Update-ProcessOwnership.ps1` for
+  ownership; it implements the correct pattern.
+- **Mode 2 (Restore)** reads `isArchived` / `name` off the unwrapped response, so its
+  preview and verification output is unreliable even when the restore itself succeeds.
+- **Document operations** are deferred and partially implemented. Do not rely on them.
+- **Mode 5 Input/Output completeness** depends on the open question in
+  API_ARCHITECTURE.md. Until it is settled, only the thorough scan guarantees no
+  Input or Output reference is missed.
+- Large-scale operations (1000+ items) may take significant time. Only
+  `Update-ProcessOwnership.ps1` implements retry/backoff and throttling.
 
 ## Support
 

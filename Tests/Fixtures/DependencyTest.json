@@ -1,0 +1,68 @@
+{
+  "Id": 1540,
+  "UniqueId": "2e917985-9446-4969-bfad-eef7350532a4",
+  "Name": "Dependency Test",
+  "StateId": 1,
+  "State": "Active",
+  "GroupId": 655,
+  "GroupUniqueId": "92d1e6ca-0534-4273-8124-7f838a1e335a",
+  "ProcessProcedures": {
+    "Activity": [
+      {
+        "Id": 29205,
+        "UniqueId": "4eaaf432-721c-4791-a537-23eeec408c2b",
+        "Number": "1.0",
+        "Order": 0,
+        "Text": "Test",
+        "LinkedProcessId": null,
+        "LinkedProcessUniqueId": null,
+        "LinkedProcessDisplayName": null,
+        "DecisionLinkType": 0,
+        "ChildProcessProcedures": null
+      }
+    ],
+    "Decision": [],
+    "ProcessLink": [
+      {
+        "Id": 29213,
+        "UniqueId": "afce0e56-66a1-4f8a-bc21-2da7de4d8478",
+        "Number": "0.0",
+        "Order": 1,
+        "Text": "Action Customer Request ",
+        "LinkedProcessId": 882,
+        "EmbeddedLinkedProcessId": null,
+        "LinkedProcessUniqueId": "b4ac5598-1aae-4b76-aa19-3c1d34c20ffa",
+        "LinkedProcessName": "Action Customer Request ",
+        "LinkedProcessDisplayName": "Action Customer Request ",
+        "DecisionLinkType": 0,
+        "ChildProcessProcedures": null
+      }
+    ],
+    "OrphanProcessLink": [],
+    "ProcessGroupLink": [],
+    "OrphanProcessGroupLink": [],
+    "EmbeddedProcessLink": [],
+    "OrphanEmbeddedProcessLink": []
+  },
+  "Inputs": {
+    "Input": [
+      {
+        "Id": 1221,
+        "FromProcess": "Action Customer Request ",
+        "FromProcessId": 882,
+        "FromProcessUniqueId": "b4ac5598-1aae-4b76-aa19-3c1d34c20ffa",
+        "Resource": "Test",
+        "HowUsed": "Test",
+        "UniqueId": "cdaf344e-9197-4e65-a10e-bd168584c59c"
+      }
+    ]
+  },
+  "Outputs": {},
+  "LinkedStakeholders": {
+    "LinkedStakeholder": [
+      { "ProcessId": 882, "Link": "Action Customer Request " }
+    ]
+  },
+  "Version": "7.0",
+  "ProcessRevisionEditId": 9810
+}
