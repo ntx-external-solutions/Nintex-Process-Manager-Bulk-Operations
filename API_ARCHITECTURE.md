@@ -552,7 +552,7 @@ $dependencies = Invoke-ApiGet -Url $url -Token $Token
 document described it that way. That is wrong, and building on it produces a removal
 plan that edits the wrong process.
 
-The response is an **undifferentiated union** of:
+`Linked Process` rows are an **undifferentiated union** of:
 
 - references the queried process holds **to** other processes (outgoing), and
 - references other processes hold **to** the queried process (incoming).
@@ -560,11 +560,46 @@ The response is an **undifferentiated union** of:
 Nothing in the payload indicates which direction an edge belongs to. Two edges pointing
 in opposite directions are byte-identical in the response.
 
+`Process Input` and `Process Output` rows behave differently and are covered in
+"Link and Input/Output are scoped differently" below. The practical conclusion is the
+same for both: you cannot infer from the payload which process holds a reference.
+
 **Consequence for removal planning:** given a dependency naming process Y, you cannot
 tell whether the reference to remove lives inside Y or inside the queried process.
 **Both sides must be fetched and their JSON walked.** Treat this endpoint strictly as a
 candidate index. The process JSON is the only source of truth for where a reference
 actually lives and which verb removes it.
+
+### Link and Input/Output are scoped differently
+
+The union above is measured for `Linked Process`. It does **not** hold for
+`Process Input` and `Process Output`.
+
+The ACR/DT pair holds one Input in each direction:
+
+| Holder | Location | Names |
+|---|---|---|
+| ACR | `Inputs.Input[]` Id 1220 | DT |
+| DT | `Inputs.Input[]` Id 1221 | ACR |
+
+A union would put two `Process Input` rows on each query. Both queries return
+exactly **one**. So Input and Output are scoped to a single direction while
+`Linked Process` is not.
+
+**Open question.** One symmetric sample cannot distinguish two explanations,
+because both predict a count of one:
+
+- **(a)** the row reports the **queried process's own** `Inputs` / `Outputs` only, or
+- **(b)** it is a union **deduplicated** per related process.
+
+Discriminating experiment, one call: give ACR a **second** Input row also sourced
+from DT, then query ACR. Two rows means (a); one row means (b).
+
+Until that is settled, `Test-DependencyReconciliation` scopes Input and Output to
+the queried process's own sites. That is exactly right under (a), and under (b) it
+reports a mismatch for investigation rather than silently leaving a reference
+behind. Scoping `Linked Process` the same way would under-count and hide real
+sites, so it stays a union.
 
 ### Counts are per-occurrence, summed across both directions
 

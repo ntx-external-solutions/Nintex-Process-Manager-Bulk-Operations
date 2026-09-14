@@ -381,6 +381,44 @@ Document-related features may vary by Nintex PM version. The script includes pla
 5. **Permissions** - Ensure you have necessary permissions for all operations
 6. **References** - For delete operations, carefully review reference reports
 
+## Dependency Engine (new)
+
+`NintexProcessDependencies.ps1` implements the corrected dependency model. It is
+dot-sourceable and not yet wired into Mode 5.
+
+```powershell
+. .\NintexProcessDependencies.ps1
+```
+
+It splits deliberately in two. **Pure** functions (`Find-`, `Remove-`,
+`ConvertFrom-`, `Group-`, `Test-`) operate on process objects in memory, make no
+network calls, and are covered by the test suite. **API** functions
+(`Get-*Claim`, `Get-Npm*`, `Save-Npm*`) touch the tenant.
+
+| Function | Does |
+|---|---|
+| `Find-ProcessReferenceSite` | Locates every physical reference site in one process, with the removal verb for each |
+| `Remove-ProcessReference` | Clears those sites on a deep clone, leaving the caller's object untouched |
+| `ConvertFrom-DependencyResponse` | Parses a dependency response into one claim per occurrence |
+| `Get-DependencyCandidate` | Both sides of every claim, since the payload never says which side holds the reference |
+| `Group-ReferenceSiteByHolder` | Inverts sites so each holder is saved once for all targets |
+| `Test-DependencyReconciliation` | Compares claims against located sites and flags drift |
+| `Save-NpmProcessModel` | PUT with `ProcessJson` as a string, then publish, notifications suppressed |
+| `Export-/Import-DependencyPlan` | Crash-safe ledger so a failed run can finish denormalising |
+
+### Running the tests
+
+No tenant required. Fixtures are real payloads captured from demo.promapp.com
+plus one synthetic process covering the buckets the real pair does not contain.
+
+```powershell
+pwsh -NoProfile -File Tests/Test-Dependencies.ps1
+```
+
+98 assertions covering the locator, remover, orphan semantics, null and
+single-element shape handling, claim parsing, inversion, reconciliation and plan
+persistence.
+
 ## API Endpoints Used
 
 See **[API_ARCHITECTURE.md](API_ARCHITECTURE.md)** for request/response shapes, the
