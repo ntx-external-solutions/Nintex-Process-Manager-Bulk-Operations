@@ -2624,9 +2624,16 @@ function Get-ActiveProcessDependencies {
     $totalChecked = 0
     $totalTargets = $ProcessDeleteMap.Keys.Count
 
-    # Use the CheckProcessDependencies API to find incoming dependencies
-    # This is MUCH faster than scanning all active processes manually
-    # searchBehavior=15 returns processes that reference the target (incoming dependencies)
+    # CheckProcessDependencies returns a BIDIRECTIONAL union: both what the target
+    # references and what references the target, with nothing in the payload to tell
+    # them apart. The "incoming dependencies" framing below is WRONG and is retained
+    # only to describe current behaviour. See API_ARCHITECTURE.md, "Dependency Checking
+    # APIs", before relying on any of this.
+    #
+    # Known-incorrect in this implementation:
+    #   - searchBehavior should be 31, not 15
+    #   - results must NOT be deduplicated; every occurrence is a separate site
+    #   - callers must fetch and walk BOTH sides to learn where a reference lives
     foreach ($processKey in $ProcessDeleteMap.Keys) {
         $totalChecked++
         $processInfo = $ProcessDeleteMap[$processKey]
@@ -3754,6 +3761,10 @@ function Invoke-BulkDeleteProcesses {
     Write-Host "`n=== PHASE 2: Checking Dependencies ===" -ForegroundColor Cyan
 
     $allDependencies = @()  # Array to store all dependencies
+    # WRONG: deduplicating by Type|UniqueId discards the occurrence count, which is
+    # exactly the number of reference sites that have to be cleared. A process referenced
+    # three times collapses to one entry and two references survive the removal.
+    # See API_ARCHITECTURE.md, "Counts are per-occurrence".
     $dependencyMap = @{}    # Map to track unique dependencies by UniqueId
 
     # Part 1: Check active process dependencies
@@ -3814,9 +3825,11 @@ function Invoke-BulkDeleteProcesses {
     }
     Write-Host ""  # New line after progress counter
 
-    # Part 1.5: Check active process incoming dependencies
-    # The above Part 1 checks OUTGOING dependencies (what the target processes reference)
-    # This part checks INCOMING dependencies (what other ACTIVE processes reference the targets)
+    # Part 1.5: WRONG AS WRITTEN. Part 1 above and this part call the SAME endpoint on
+    # the SAME processes, then interpret the result as outgoing in one place and incoming
+    # in the other. The endpoint is bidirectional and does not distinguish the two, so
+    # neither reading is correct and the two passes duplicate each other.
+    # See API_ARCHITECTURE.md, "Dependency Checking APIs".
     Write-Host "`nChecking active process incoming dependencies..." -ForegroundColor Gray
     Write-Host "  NOTE: Searching all active processes for references to the target processes..." -ForegroundColor DarkGray
 
@@ -3976,8 +3989,9 @@ function Invoke-BulkDeleteProcesses {
     foreach ($depKey in $dependencyMap.Keys) {
         $dep = $dependencyMap[$depKey]
 
-        # Only process archived dependencies from PHASE 2.5 (incoming references)
-        # Skip outgoing dependencies from PHASE 2 (things the target process references)
+        # NOTE: this incoming/outgoing split is not real. CheckProcessDependencies
+        # returns both directions in one undifferentiated list.
+        # See API_ARCHITECTURE.md, "Dependency Checking APIs".
         # We only need to restore processes that REFERENCE the targets being deleted, not processes REFERENCED BY the targets
         if ($dep.IsArchived -eq $true) {
             Write-Host "Checking status of dependency: $($dep.Name) ($($dep.UniqueId))" -ForegroundColor White

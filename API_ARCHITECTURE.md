@@ -204,6 +204,42 @@ When removing process dependencies, Nintex Process Manager handles different lin
 
 ---
 
+### Complete list of reference-bearing locations
+
+A process holds references to other processes in more places than the two main arrays.
+A locator that misses any of these will report a clean removal while leaving a live
+reference behind.
+
+| Location | Match field | Action |
+|---|---|---|
+| `ProcessProcedures.ProcessLink[]` | `LinkedProcessUniqueId` | Remove element |
+| `ProcessProcedures.OrphanProcessLink[]` | `LinkedProcessUniqueId` | Remove element |
+| `ProcessProcedures.EmbeddedProcessLink[]` | `LinkedProcessUniqueId` | Remove element |
+| `ProcessProcedures.OrphanEmbeddedProcessLink[]` | `LinkedProcessUniqueId` | Remove element |
+| `ProcessProcedures.ProcessGroupLink[]` | `LinkedProcessGroupUniqueId` | Report only |
+| `ProcessProcedures.OrphanProcessGroupLink[]` | `LinkedProcessGroupUniqueId` | Report only |
+| `ProcessProcedures.Decision[]` | `LinkedProcessUniqueId` | Orphan (see above) |
+| `Inputs.Input[]` | `FromProcessUniqueId` | Remove element |
+| `Outputs.Output[]` | `ToProcessUniqueId` | Remove element |
+| any procedure | `EmbeddedLinkedProcessId` | Clear alongside `LinkedProcessId` |
+| `*.ChildProcessProcedures.{Task,Note,Information,Form,Guide,Image,Policy,Training,Video,WebLink}[]` | `LinkedProcessUniqueId` | Orphan |
+| `LinkedStakeholders.LinkedStakeholder[]` | - | **Never touch** |
+
+**Recursion.** `ChildProcessProcedures` is not exclusive to `Activity`. `ProcessLink` and
+`Decision` nodes carry it too, and child items carry it in turn. The walk must be
+genuinely recursive rather than one level deep off `Activity`.
+
+**Null shapes.** Live payloads use `null`, not empty arrays, for unused collections
+(`"Outputs": null`, `"Triggers": null`, `"Targets": null`). Guard every access before
+indexing.
+
+**Cross-check.** `LinkedStakeholders` mirrors the link-type reference count exactly. In
+the verified sample ACR held two link-type references to DT and two `LinkedStakeholder`
+entries naming it; DT held one of each. Reading it is a free check on the site count, but
+it is derived state and must never be edited.
+
+---
+
 ## Complete Dependency Removal Example
 
 This section shows a complete example of removing all dependency types from a process.
@@ -480,77 +516,161 @@ curl 'https://demo.promapp.com/{tenantId}/Api/v1/Processes/{processUniqueId}' \
 
 ## Dependency Checking APIs
 
-### Check Process Dependencies (INCOMING - Active Processes Only)
+### Check Process Dependencies
 
 **Endpoint:** `/Api/v1/Processes/{processUniqueId}/CheckProcessDependencies`
 
-**Query Parameters:** `searchBehavior=15`
-
 **Method:** GET
+
+**Query Parameters:** `searchBehavior=31`
+
+`searchBehavior` is a bitmask. Earlier revisions of this script used `15`; use `31`.
+The individual bit-to-type mapping has not been confirmed. Probe it per tenant if you
+ever need to filter by type at the API level rather than client-side.
 
 **Usage:**
 ```powershell
-$url = "$SiteURL/Api/v1/Processes/$processUniqueId/CheckProcessDependencies?searchBehavior=15"
+$url = "$SiteURL/Api/v1/Processes/$processUniqueId/CheckProcessDependencies?searchBehavior=31"
 $dependencies = Invoke-ApiGet -Url $url -Token $Token
 ```
 
-**Returns:** What **ACTIVE** processes reference the target process (incoming dependencies)
-
-**Response Example:**
+**Response shape:**
 ```json
 [
-    {
-        "Type": "Linked Process",
-        "Dependencies": [
-            {
-                "Name": "Process A",
-                "UniqueId": "guid-1"
-            },
-            {
-                "Name": "Process B",
-                "UniqueId": "guid-2"
-            }
-        ]
-    }
+    { "Type": "Linked Process",       "Dependencies": [ { "Name": "...", "UniqueId": "guid" } ] },
+    { "Type": "Process Input",        "Dependencies": [ ] },
+    { "Type": "Process Output",       "Dependencies": [ ] },
+    { "Type": "Linked Process Group", "Dependencies": [ ] }
 ]
 ```
 
-**IMPORTANT Notes:**
-- ✅ Returns **INCOMING** dependencies (processes that reference the target)
-- ✅ Only returns **ACTIVE** processes (not archived)
-- ✅ This is the FAST way to find active process dependencies
-- ❌ Does NOT return archived processes - those must be checked manually
+---
 
-**Performance:**
-- **Fast:** 1 API call per target process
-- **Alternative (slow):** Fetching all active processes individually would be 700+ API calls
+### CRITICAL: the response is BIDIRECTIONAL
 
-### Check Incoming Dependencies (Archived Processes)
+**Do not treat this as an "incoming dependencies" API.** Earlier revisions of this
+document described it that way. That is wrong, and building on it produces a removal
+plan that edits the wrong process.
 
-**No Direct API:** The CheckProcessDependencies API only returns active processes.
+The response is an **undifferentiated union** of:
 
-**Solution:** Must manually search through all archived processes:
+- references the queried process holds **to** other processes (outgoing), and
+- references other processes hold **to** the queried process (incoming).
 
-1. Fetch list of archived processes: `/Bff/Process/api/v1/processes?ListType=7`
-2. Batch fetch details using mobile API: `/mobile/api/v1/processes`
-3. Search the JSON for references to target process UniqueId
+Nothing in the payload indicates which direction an edge belongs to. Two edges pointing
+in opposite directions are byte-identical in the response.
 
-**Code Example:**
-```powershell
-# Check if a process has links to a target
-function Find-ProcessLinksInJson {
-    param([string]$ProcessJson, [string]$TargetProcessUniqueId)
+**Consequence for removal planning:** given a dependency naming process Y, you cannot
+tell whether the reference to remove lives inside Y or inside the queried process.
+**Both sides must be fetched and their JSON walked.** Treat this endpoint strictly as a
+candidate index. The process JSON is the only source of truth for where a reference
+actually lives and which verb removes it.
 
-    $processObj = $ProcessJson | ConvertFrom-Json
+### Counts are per-occurrence, summed across both directions
 
-    # Check ProcessProcedures.ProcessLink
-    # Check ProcessProcedures.Decision
-    # Check ChildProcessProcedures
-    # etc.
-}
+Each entry in `Dependencies` is one physical reference, not one related process. The same
+`Name` / `UniqueId` appearing three times means three references exist. **Do not
+deduplicate by `Type|UniqueId`.** That multiplicity is the count of sites to clear, and
+collapsing it is how a partial removal passes unnoticed.
+
+Because the response is a union, the count for a pair (X, Y) is
+`(references X holds to Y) + (references Y holds to X)`. You therefore cannot reconcile
+claims against sites found in a single process. Reconcile per pair:
+
+```
+claim count on either query  ==  sites in X pointing at Y  +  sites in Y pointing at X
 ```
 
+### Verified reference model
+
+Measured on demo tenant `93555a16...`, processes "Action Customer Request" (ACR,
+`b4ac5598-...`) and "Dependency Test" (DT, `2e917985-...`).
+
+Ground truth read from the process JSON:
+
+| Edge | Location | Count |
+|---|---|---|
+| ACR to DT | `ProcessProcedures.ProcessLink[]` (Id 29211) | 1 |
+| ACR to DT | `Activity[1].ChildProcessProcedures.Note[0]` (Id 29212) | 1 |
+| ACR to DT | `Inputs.Input[]` (Id 1220) | 1 |
+| DT to ACR | `ProcessProcedures.ProcessLink[]` (Id 29213) | 1 |
+| DT to ACR | `Inputs.Input[]` (Id 1221) | 1 |
+| PCL to ACR | inside PCL only; ACR's JSON holds no reference to PCL | 2 |
+
+Observed `Linked Process` counts reconcile exactly, and only as a union:
+
+```
+Query DT  = DT's own ProcessLink (1) + ACR's ProcessLink + ACR's Note (2)   = ACR x3
+Query ACR = ACR's own ProcessLink (1) + DT's ProcessLink (1)                = DT  x2
+          + PCL's two inbound links                                         = PCL x2
+```
+
+The `PCL x2` rows are the direct proof of bidirectionality: ACR's JSON contains no
+reference to `fce59755` anywhere, so those edges can only exist inside PCL.
+
+Note one asymmetry: a linked-process reference carried by a **child** procedure (the Note
+at Id 29212) counts as an **incoming** edge on the target but not as an **outgoing** edge
+on the holder. This is inferred from a single sample and is the only assignment under
+which both queries reconcile. Re-verify before depending on it.
+
 ---
+
+### CRITICAL: archiving suppresses Input/Output rows
+
+**The rule:** a `Process Input` or `Process Output` row is returned **if and only if the
+process it NAMES is active.** The archive state of the *queried* process is irrelevant.
+`Linked Process` and `Linked Process Group` rows are never suppressed.
+
+Verified across all four archive states of the ACR/DT pair. All six Input rows were
+predicted correctly.
+
+| ACR | DT | Query DT | Query ACR |
+|---|---|---|---|
+| active | active | LP: ACR x3 - **PI: ACR x1** | LP: DT x2, PCL x2 - **PI: DT x1** - LPG x1 |
+| archived | active | LP: ACR x3 | LP: DT x2, PCL x2 - **PI: DT x1** - LPG x1 |
+| active | archived | LP: ACR x3 | LP: DT x3 \* , PCL x2 - LPG x1 |
+| archived | archived | LP: ACR x3 | LP: DT x2, PCL x2 - LPG x1 |
+
+\* captured against an earlier content revision of ACR that carried an extra link and an
+Output. The suppression behaviour is the point here, not the count.
+
+**The suppressed references still exist in the archived process's JSON.** Archiving hides
+them from the dependency index. It does not remove them.
+
+#### Consequences
+
+1. **Any dependency scan taken while a participant is archived is incomplete.** Delete a
+   process on the strength of such a scan and you leave a dangling `FromProcessUniqueId`
+   or `ToProcessUniqueId` inside the archived process, which surfaces as a broken
+   reference whenever it is restored. Restore every participant to active before
+   discovery, then re-run discovery.
+
+2. **Verify before re-archiving, never after.** A verification pass run after re-archiving
+   returns a falsely clean result, because the rows that would reveal a missed reference
+   are exactly the ones archiving suppresses. The order is: edit, publish, verify,
+   re-archive.
+
+3. **Querying an archived process still returns its complete link picture.** Only
+   Input/Output edges *naming* an archived process are lost. The blind spot is narrower
+   than it first looks.
+
+### The blind spot this endpoint cannot cover
+
+An archived process X whose **only** reference to target T is an Input or Output is
+absent from every response. It appears in no query, so there is nothing to discover and
+nothing to restore.
+
+This cannot be bootstrapped away: discovering X requires restoring X, and knowing to
+restore X requires discovering it.
+
+**The archived-process JSON scan therefore remains mandatory.** It can be narrowed,
+though: scan archived processes for **Input and Output references only**. Linked Process
+edges are already covered by the API regardless of archive state.
+
+1. List archived processes: `/Bff/Process/api/v1/processes?ListType=7`
+2. Batch fetch details: `/mobile/api/v1/processes?processUniqueIds=...`
+3. Match `Inputs.Input[].FromProcessUniqueId` and `Outputs.Output[].ToProcessUniqueId`
+   against the target
 
 ## Publishing APIs
 
@@ -599,79 +719,69 @@ function Find-ProcessLinksInJson {
 
 ## Common Patterns
 
-### Pattern 1: Find Active Processes That Reference a Target Process (FAST)
+### Pattern 1: Build a removal plan for a process you intend to delete
 
-**Use Case:** Finding which active processes have links to a process you want to delete
+The API is a candidate index, not a location index. It names related processes and how
+many references exist; it does not say which side holds them or where. So discovery and
+location are two distinct passes.
 
 ```powershell
-# FAST: Use CheckProcessDependencies API
-$url = "$SiteURL/Api/v1/Processes/$targetProcessUniqueId/CheckProcessDependencies?searchBehavior=15"
-$dependencies = Invoke-ApiGet -Url $url -Token $Token
+# Pass 1 - candidates (cheap, 1 call per target)
+$url = "$SiteURL/Api/v1/Processes/$targetUniqueId/CheckProcessDependencies?searchBehavior=31"
+$claims = Invoke-ApiGet -Url $url -Token $Token
+# Keep every occurrence. Do NOT dedupe by Type|UniqueId.
 
-# Parse the response
-foreach ($depType in $dependencies) {
-    if ($depType.Type -eq "Linked Process") {
-        foreach ($dep in $depType.Dependencies) {
-            Write-Host "Found: $($dep.Name) references this process"
-            # $dep.UniqueId contains the process that has the reference
-        }
-    }
-}
+# Pass 2 - locations (1 fetch per unique related process, PLUS the target itself,
+#           because the claim may describe an edge held on either side)
+$sites = Find-ReferenceSites -ProcessObj $relatedObj -TargetUniqueIds $targets
+$sites += Find-ReferenceSites -ProcessObj $targetObj  -TargetUniqueIds $relatedIds
+
+# Pass 3 - reconcile per pair
+#   claim count == sites in X pointing at Y + sites in Y pointing at X
 ```
 
-**Performance:** 1 API call per target process (vs 700+ calls if scanning all processes)
+Then invert by **source** process before executing. The query is target-centric, but the
+edit is source-centric: one fetch, one PUT and one publish per source process, carrying
+the removals for every target at once. Saving a source once per target instead produces
+redundant published versions and a window in which it is already re-archived while later
+edits are still pending.
 
-### Pattern 1 (Alternative - SLOW - Don't Use)
+### Pattern 2: Scan archived processes for the API's blind spot
 
-**DEPRECATED:** This approach is very slow and should not be used for active processes.
-
-```powershell
-# SLOW - DON'T USE THIS FOR ACTIVE PROCESSES
-# Step 1: Get list of all active processes (paginated)
-$listUrl = "$SiteURL/Bff/Process/api/v1/processes?Page=$page&PageSize=20&ListType=0"
-$response = Invoke-ApiGet -Url $listUrl -Token $Token
-
-# Step 2: For each process, fetch full details individually
-foreach ($item in $response.items) {
-    $processUrl = "$SiteURL/Api/v1/Processes/$($item.processUniqueId)"
-    $processData = Invoke-ApiGet -Url $processUrl -Token $Token
-    # Search processData.processJson for references
-}
-```
-
-**Why this is slow:** With 700 active processes, this makes 700+ individual API calls. Use CheckProcessDependencies instead!
-
-### Pattern 2: Scan All Archived Processes for Dependencies
+Required, not optional. See "The blind spot this endpoint cannot cover" above. Narrow it
+to Input and Output references; Linked Process is already covered by Pattern 1.
 
 ```powershell
-# Step 1: Get list of all archived processes (paginated)
-$listUrl = "$SiteURL/Bff/Process/api/v1/processes?Page=$page&PageSize=20&ListType=7"
-$response = Invoke-ApiGet -Url $listUrl -Token $Token
+# Step 1: list archived processes (paginated)
+$listUrl = "$SiteURL/Bff/Process/api/v1/processes?Page=$page&PageSize=200&ListType=7"
 
-# Step 2: Batch fetch process details using mobile API
-$uniqueIds = $response.items | ForEach-Object { $_.processUniqueId }
+# Step 2: batch fetch details via the mobile API
 $queryParams = $uniqueIds | ForEach-Object { "processUniqueIds=$_" }
 $batchUrl = "$SiteURL/mobile/api/v1/processes?" + ($queryParams -join '&')
-$batchData = Invoke-ApiGet -Url $batchUrl -Token $Token
 
-# Step 3: Search each process
-foreach ($proc in $batchData.data) {
-    # Search proc.ProcessModel for references
-}
+# Step 3: match Inputs.Input[].FromProcessUniqueId / Outputs.Output[].ToProcessUniqueId
 ```
 
----
+### Anti-pattern: enumerating all active processes
+
+Fetching every active process individually to find references is 700+ calls on a typical
+tenant. Pattern 1 gets the same candidate set in one call per target.
 
 ## Critical Rules
 
-1. ✅ **Active processes** → Use `/Api/v1/Processes/{processUniqueId}` (individual fetch)
-2. ✅ **Archived processes** → Use `/mobile/api/v1/processes` (batch fetch)
-3. ❌ **Never** use mobile API for active processes
-4. ❌ **Never** use individual fetch for archived processes (too slow)
-5. ⚠️ Always use `ConvertTo-Json -Depth 20` when preparing process JSON for PUT requests
-6. ⚠️ Progress indicators should use `\r` with `-NoNewline` for single-line updates
-
----
+1. **Active processes** use `/Api/v1/Processes/{processUniqueId}` (individual fetch)
+2. **Archived processes** use `/mobile/api/v1/processes` (batch fetch)
+3. Never use the mobile API for active processes
+4. Never use individual fetch for archived processes (too slow)
+5. `CheckProcessDependencies` is **bidirectional**. Never infer from it which process
+   holds a reference; fetch and walk both sides
+6. Never deduplicate dependency results by `Type|UniqueId`. Every occurrence is a site
+7. Never run dependency discovery while any participant is archived, and never verify
+   removal after re-archiving. Both return falsely clean results
+8. Always use `ConvertTo-Json -Depth 20` when preparing process JSON for PUT requests
+9. `ProcessJson` in a PUT body must be a JSON **string**, not an object
+10. Never edit `LinkedStakeholders`. It is a derived cache
+11. Progress indicators should use `\r` with `-NoNewline` for single-line updates
 
 ## Error Codes
 
@@ -687,7 +797,12 @@ foreach ($proc in $batchData.data) {
 
 ---
 
-## Document APIs
+## Document APIs (DEFERRED)
+
+> **Scope note.** Document operations are out of scope for the current refactor. The
+> endpoints below are retained as reference for when document support is layered back
+> in. Nothing in the process workflow should depend on them.
+
 
 ### List Archived Documents (Paginated)
 

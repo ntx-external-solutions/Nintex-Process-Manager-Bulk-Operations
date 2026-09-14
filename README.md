@@ -383,20 +383,61 @@ Document-related features may vary by Nintex PM version. The script includes pla
 
 ## API Endpoints Used
 
-The script uses various Nintex Process Manager API endpoints:
+See **[API_ARCHITECTURE.md](API_ARCHITECTURE.md)** for request/response shapes, the
+active-vs-archived endpoint split, and the verified dependency-checking semantics. That
+document is authoritative; this list is a summary.
 
-- `/oauth2/token` - Authentication
-- `/Api/v1/Processes/*` - Process operations
-- `/BFF/Api/Processes/All/List` - Process listing
-- `/Process/Edit/*` - Archive, restore, delete operations
-- `/user/autocomplete.aspx` - User search
+| Endpoint | Purpose |
+|---|---|
+| `/oauth2/token` | Authentication |
+| `/Api/v1/Processes/{uniqueId}` | Get / update an **active** process |
+| `/Api/v1/Processes/{uniqueId}/CheckProcessDependencies` | Dependency check (see caveats below) |
+| `/Api/v1/Processes/{uniqueId}/Publish` | Publish with approval bypass |
+| `/Bff/Process/api/v1/processes` | Process listing (`ListType=0` active, `7` archived) |
+| `/mobile/api/v1/processes` | Batch fetch **archived** process details |
+| `/Process/Edit/{Archive,Restore,Delete}Process` | Archive, restore, delete |
+| `/Process/Edit/PublishProcessRevisionEdit` | Publish without approval |
+| `/bff/navigation/api/v1/breadcrumb/children` | Group children |
+| `/user/autocomplete.aspx` | User search (legacy) |
+
+### Dependency checking caveats
+
+Three behaviours of `CheckProcessDependencies` are easy to get wrong and have each been
+verified against a live tenant. Full evidence is in API_ARCHITECTURE.md.
+
+1. **The response is bidirectional.** It returns both what the queried process references
+   and what references it, in one undifferentiated list. You cannot tell from the payload
+   which process holds a given reference, so both sides must be fetched and inspected.
+
+2. **Counts are per-occurrence.** The same process appearing three times means three
+   separate references exist. Deduplicating the results silently drops removal sites.
+
+3. **Archiving hides Input and Output references.** A `Process Input` or `Process Output`
+   row is returned only if the process it *names* is active. The references still exist in
+   the archived process's JSON. Consequences: never run dependency discovery while a
+   participant is archived, and never verify a removal after re-archiving. Both return
+   falsely clean results.
 
 ## Limitations
 
-- Document operations are partially implemented (varies by Nintex PM version)
-- Process group creation for Mode 5 requires manual setup
-- Reference removal in Mode 5 is conservative (logs warnings, may need manual review)
-- Large-scale operations (1000+ items) may take significant time
+Known broken or incomplete as of this revision:
+
+- **Mode 3 (Update Location)** and **Mode 4 (Update Ownership)** send the process wrapper
+  object to the update endpoint instead of the required `ProcessJson` string, and never
+  publish. Neither reliably applies changes. Use `Update-ProcessOwnership.ps1` for
+  ownership; it implements the correct pattern.
+- **Mode 2 (Restore)** reads `isArchived` / `name` off the unwrapped response, so its
+  preview and verification output is unreliable even when the restore itself succeeds.
+- **Document operations** are deferred and partially implemented. Do not rely on them.
+- **Mode 5 dependency handling** calls `CheckProcessDependencies` twice with contradictory
+  assumptions about direction, and deduplicates results in a way that drops removal sites.
+  See the caveats under "API Endpoints Used".
+- The reference locator does not cover `EmbeddedProcessLink`, `ProcessGroupLink`, their
+  orphan variants, or `EmbeddedLinkedProcessId`, and only recurses one level into
+  `ChildProcessProcedures` off `Activity`.
+- Process group creation for Mode 5 requires manual setup.
+- Large-scale operations (1000+ items) may take significant time. Only
+  `Update-ProcessOwnership.ps1` implements retry/backoff and throttling.
 
 ## Support
 
