@@ -1,0 +1,24 @@
+#!/bin/sh
+# Refuses any commit whose index contains config.txt.
+#
+# config.txt holds a live site URL, a username and a password. It is listed in
+# .gitignore, but .gitignore does nothing for a file that is already tracked or
+# that someone stages with "git add -f", so this hook is the actual guard.
+#
+# The check reads the INDEX, not the diff. A "git add -f config.txt" that
+# restores the file byte-for-byte as it was at HEAD produces no diff at all,
+# and a diff-based check waves exactly that case through: the file is tracked
+# again, quietly, which is the state this repository just got out of.
+#
+# Enable it once per clone:
+#   git config core.hooksPath .githooks
+
+if git ls-files --cached --error-unmatch config.txt >/dev/null 2>&1; then
+    echo "pre-commit: refusing to commit; config.txt is in the index." >&2
+    echo "  That file holds credentials and must stay untracked." >&2
+    echo "  Remove it with: git rm --cached config.txt" >&2
+    echo "  Edit config.template.txt instead if you meant to change the template." >&2
+    exit 1
+fi
+
+exit 0
