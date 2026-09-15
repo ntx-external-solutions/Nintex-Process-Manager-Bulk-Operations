@@ -4,6 +4,12 @@ config.txt
 # Results files
 *_Results_*.csv
 
+# Delete plan ledgers. Written to the working directory by every Mode 5 run,
+# including dry runs, so without this every run leaves the repository dirty.
+# They can carry tenant process names and ids; keep them out of version control.
+Delete_Plan_*.json
+Delete_Plan_*.json.tmp
+
 # PowerShell execution logs
 *.log
 

@@ -260,6 +260,198 @@ Assert-Equal $true $script:TempGroupDeleted 'an empty holding group is deleted'
 Assert-Equal 'Success' $cleanup2[0].Status 'the successful cleanup is reported'
 
 # ---------------------------------------------------------------------------
+Write-Host "`nScenario: a variation drags its master, and the run stops" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# T1 is a variation. Restoring it out of the archive also archives its master,
+# M1, which is not a target and is not in the ledger. Nothing in the process
+# model says the two are linked, so the only way to see it is the before/after
+# diff of tenant state. The run must stop and put M1 back.
+
+$M1 = '99999999-9999-9999-9999-999999999999'
+
+function Reset-VariationTenant {
+    $script:Archived = @{ $T1 = $true;  $M1 = $false }
+    $script:GroupOf  = @{ $T1 = 100;    $M1 = 100 }
+    $script:Names    = @{ $T1 = 'Order Handling (AU)'; $M1 = 'Order Handling' }
+    $script:Deleted  = @()
+    $script:RestoreCalls = @()
+    $script:ArchiveCalls = @()
+    $script:TempGroupDeleted = $false
+    $script:TempGroupContents = @()
+    $script:PlanAtFirstRestore = $null
+}
+Reset-VariationTenant
+
+function Invoke-ApiGet {
+    param([string]$Url,[string]$Token)
+    if ($Url -match 'ListType=7') {
+        $page = 1
+        if ($Url -match 'Page=(\d+)') { $page = [int]$Matches[1] }
+        if ($page -gt 1) { return [PSCustomObject]@{ items = @() } }
+        $items = @()
+        foreach ($id in @($T1,$M1)) {
+            if (-not $script:Archived[$id]) { continue }
+            $items += [PSCustomObject]@{ processUniqueId=$id; processName=$script:Names[$id]; groupId=$script:GroupOf[$id] }
+        }
+        return [PSCustomObject]@{ items = $items }
+    }
+    return [PSCustomObject]@{ items = @() }
+}
+
+function Invoke-NpmApi {
+    param([string]$Url,[string]$Token,[string]$Method='Get',$Body=$null,[int]$MaxRetries=0)
+    function Ok($r) { return [PSCustomObject]@{ Success=$true; StatusCode=200; Response=$r; Error=$null } }
+
+    if ($Url -match 'ListType=(\d+)') {
+        $wantArchived = ([int]$Matches[1] -eq 7)
+        $items = @()
+        foreach ($id in @($T1,$M1)) {
+            if ($script:Archived[$id] -ne $wantArchived) { continue }
+            $items += [PSCustomObject]@{
+                processUniqueId=$id; id=1; processName=$script:Names[$id]; groupId=$script:GroupOf[$id] }
+        }
+        return Ok ([PSCustomObject]@{ items = $items })
+    }
+    if ($Url -match 'CheckProcessDependencies') { return Ok $null }
+
+    if ($Url -match 'RestoreProcess') {
+        $id = $Body.processUniqueId
+        $script:RestoreCalls += $id
+        $script:Archived[$id] = $false
+        $script:GroupOf[$id]  = [int]$Body.processGroupId
+
+        # The coupling under test: acting on the variation acts on the master.
+        if ($id -eq $T1) { $script:Archived[$M1] = $true }
+        return Ok @{}
+    }
+    if ($Url -match 'ArchiveProcess') {
+        $script:ArchiveCalls += $Body.processUniqueId
+        $script:Archived[$Body.processUniqueId] = $true
+        return Ok @{}
+    }
+    if ($Url -match 'DeleteProcess') { $script:Deleted += $Body.processUniqueId; return Ok @{} }
+
+    if ($Url -match 'mobile/api/v1/processes') {
+        $data = @()
+        foreach ($m in ($Url -split '&')) {
+            if ($m -match 'processUniqueIds=([0-9a-fA-F\-]+)') {
+                $id = $Matches[1]
+                $data += [PSCustomObject]@{ ProcessModel = [PSCustomObject]@{
+                    UniqueId=$id; Name=$script:Names[$id]; GroupId=$script:GroupOf[$id]; StateId=2 } }
+            }
+        }
+        return Ok ([PSCustomObject]@{ data = $data })
+    }
+    if ($Method -eq 'Get' -and $Url -match '/Api/v1/Processes/([0-9a-fA-F\-]+)$') {
+        $id = $Matches[1]
+        return Ok ([PSCustomObject]@{ processJson = [PSCustomObject]@{
+            UniqueId=$id; Name=$script:Names[$id]; GroupId=$script:GroupOf[$id]; StateId=1 } })
+    }
+    return Ok $null
+}
+
+$work = Join-Path ([System.IO.Path]::GetTempPath()) "variation-$([guid]::NewGuid())"
+New-Item -ItemType Directory -Path $work -Force | Out-Null
+Push-Location $work
+try {
+    Invoke-BulkDeleteProcesses -SiteURL 'https://mock' -Token 't' -SourceType 'Archived' `
+        -TempGroupName 'Bulk Delete Temporary Group' -CurrentUsername 'u' -Force
+
+    Assert-Equal 0 $script:Deleted.Count 'NOTHING is deleted once collateral is detected'
+    Assert-Equal $false $script:Archived[$M1] 'the master is put back to active'
+    Assert-Equal 100 $script:GroupOf[$M1] 'the master is returned to its own group'
+    Assert-Equal $true $script:Archived[$T1] 'the target is re-archived on the way out'
+
+    $planFile = @(Get-ChildItem -Path . -Filter 'Delete_Plan_*.json')[0]
+    $plan = Get-Content $planFile.FullName -Raw | ConvertFrom-Json
+    Assert-Equal 'AbortedCollateral' $plan.Status 'the plan records why the run stopped'
+    Assert-Equal 1 @($plan.Collateral).Count 'the collateral is recorded in the plan for audit'
+    Assert-Equal $M1 @($plan.Collateral)[0].UniqueId 'the master is named in the plan'
+    Assert-Equal 'Archived' @($plan.Collateral)[0].Change 'the plan says what happened to it'
+
+    # Save-DeleteResults is stubbed at the top of this file; it captures the rows
+    # rather than writing a CSV.
+    $rows = @($script:LastResults)
+    Assert-True ($rows.Count -gt 0) 'results are still reported when the run stops'
+    Assert-True (@($rows | Where-Object { $_.Operation -eq 'Collateral' }).Count -gt 0) `
+        'the results name the collateral'
+    Assert-True (@($rows | Where-Object { $_.Operation -eq 'ReverseCollateral' -and $_.Status -eq 'Success' }).Count -gt 0) `
+        'the reversal is recorded as done'
+}
+finally {
+    Pop-Location
+    Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# ---------------------------------------------------------------------------
+Write-Host "`nScenario: collateral during the ARCHIVE phase stops before deletion" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# The targets are active, so there is no Hold phase and no first checkpoint.
+# The pre-delete archive is itself a mutation, and it is the last point at which
+# stopping still costs nothing: an unwanted archive can be undone, a delete cannot.
+
+Reset-VariationTenant
+$script:Archived = @{ $T1 = $false; $M1 = $false }   # both active now
+
+function Invoke-NpmApi {
+    param([string]$Url,[string]$Token,[string]$Method='Get',$Body=$null,[int]$MaxRetries=0)
+    function Ok($r) { return [PSCustomObject]@{ Success=$true; StatusCode=200; Response=$r; Error=$null } }
+
+    if ($Url -match 'ListType=(\d+)') {
+        $wantArchived = ([int]$Matches[1] -eq 7)
+        $items = @()
+        foreach ($id in @($T1,$M1)) {
+            if ($script:Archived[$id] -ne $wantArchived) { continue }
+            $items += [PSCustomObject]@{
+                processUniqueId=$id; id=1; processName=$script:Names[$id]; groupId=$script:GroupOf[$id] }
+        }
+        return Ok ([PSCustomObject]@{ items = $items })
+    }
+    if ($Url -match 'CheckProcessDependencies') { return Ok $null }
+    if ($Url -match 'ArchiveProcess') {
+        $id = $Body.processUniqueId
+        $script:ArchiveCalls += $id
+        $script:Archived[$id] = $true
+        if ($id -eq $T1) { $script:Archived[$M1] = $true }   # the coupling
+        return Ok @{}
+    }
+    if ($Url -match 'RestoreProcess') {
+        $id = $Body.processUniqueId
+        $script:RestoreCalls += $id
+        $script:Archived[$id] = $false
+        $script:GroupOf[$id] = [int]$Body.processGroupId
+        return Ok @{}
+    }
+    if ($Url -match 'DeleteProcess') { $script:Deleted += $Body.processUniqueId; return Ok @{} }
+    if ($Method -eq 'Get' -and $Url -match '/Api/v1/Processes/([0-9a-fA-F\-]+)$') {
+        $id = $Matches[1]
+        return Ok ([PSCustomObject]@{ processJson = [PSCustomObject]@{
+            UniqueId=$id; Name=$script:Names[$id]; GroupId=$script:GroupOf[$id]; StateId=1 } })
+    }
+    if ($Url -match 'mobile/api/v1/processes') { return Ok ([PSCustomObject]@{ data = @() }) }
+    return Ok $null
+}
+
+$work2 = Join-Path ([System.IO.Path]::GetTempPath()) "variation2-$([guid]::NewGuid())"
+New-Item -ItemType Directory -Path $work2 -Force | Out-Null
+$csvPath = Join-Path $work2 'targets.csv'
+"ProcessID`n$T1" | Set-Content -Path $csvPath -Encoding UTF8
+
+Push-Location $work2
+try {
+    Invoke-BulkDeleteProcesses -SiteURL 'https://mock' -Token 't' -SourceType 'CSV' -CsvPath $csvPath `
+        -TempGroupName 'Bulk Delete Temporary Group' -CurrentUsername 'u' -Force
+
+    Assert-Equal 0 $script:Deleted.Count 'the run stops between archiving and deleting'
+    Assert-True ($script:ArchiveCalls -contains $T1) 'the target was archived, which is what exposed the coupling'
+    Assert-Equal $false $script:Archived[$M1] 'the master is un-archived again'
+}
+finally {
+    Pop-Location
+    Remove-Item $work2 -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# ---------------------------------------------------------------------------
 Write-Host "`nScenario: both archived-list readers page identically" -ForegroundColor Cyan
 # ---------------------------------------------------------------------------
 $script:PageSizesSeen = @()

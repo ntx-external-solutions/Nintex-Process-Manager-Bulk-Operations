@@ -1,6 +1,6 @@
 # Nintex Process Manager Bulk Operations
 
-**Version 4.1.** The version is defined once, in `$script:ScriptVersion` at the top of
+**Version 4.2.** The version is defined once, in `$script:ScriptVersion` at the top of
 `Nintex-BulkOperations.ps1`, and printed at startup.
 
 A PowerShell script for bulk operations on Nintex Process Manager (Promapp) processes
@@ -171,9 +171,10 @@ This is what makes the script scriptable and schedulable; the menu path is uncha
 | `-ThoroughScan` | Mode 5: read every active process for Input/Output references |
 | `-IncludeSubgroups` | Include subgroups for `-Source Group` |
 
-`-Force` does **not** wave through a Mode 5 reconciliation mismatch or a failed
-verification. Those still stop the run, because they mean the plan does not match the
-tenant, and that is precisely when nobody should be deleting anything unattended.
+`-Force` does **not** wave through a Mode 5 reconciliation mismatch, a failed
+verification, an unresolved participant, or a collateral change. Those still stop the
+run, because they mean the plan does not match the tenant, and that is precisely when
+nobody should be deleting anything unattended.
 
 Exit codes: `0` success, `1` the mode failed, `2` bad configuration, `3` authentication
 failed.
@@ -583,7 +584,13 @@ Known broken or incomplete as of this revision:
   API_ARCHITECTURE.md already flags as an open question, not of real drift, so those
   are now reported as a warning rather than gating the run. Shapes that do not fit
   still gate. Settling it needs a captured fixture; until then treat a Link warning as
-  worth a look on a first run against a new tenant.
+  worth a look on a first run against a new tenant. One `claimed 1, located 2` pair,
+  where the JSON holds more than the API reports, still gates deliberately: it is the
+  only observed shape that could mean a reference is being missed.
+- **Group moves are not reversed automatically.** When a run changes a process it was
+  not asked to change, an unwanted archive or un-archive is undone, but a process that
+  merely moved group while staying active is named for manual correction instead. The
+  only move endpoint available is Mode 3's, which is broken.
 
 ## Testing
 
@@ -597,7 +604,7 @@ Three suites run against mocked tenants, no network and no credentials:
 |---|---|
 | `Test-Dependencies.ps1` | The pure functions: site location, removal, inversion, reconciliation, plan persistence |
 | `Test-Executor.ps1` | Plan construction and execution end to end, including a clean dependency result and the both-sides-deleted case |
-| `Test-BulkDelete.ps1` | Mode 5 orchestration: the Hold phase, the pre-mutation plan, ledger truthfulness, holding group cleanup, pagination |
+| `Test-BulkDelete.ps1` | Mode 5 orchestration: the Hold phase, the pre-mutation plan, ledger truthfulness, holding group cleanup, pagination, and collateral detection at both checkpoints |
 
 ## Support
 
@@ -610,7 +617,37 @@ For issues or questions:
 
 ## Version History
 
-**Version 4.1** (Current)
+**Version 4.2** (Current)
+- Fixed: a bulk operation on a process **variation** silently acted on its master.
+  A live run archived two processes and moved a third, none of them targets and
+  none in the ledger. Nintex PM stores a variation as its own record in its own
+  group and the link to the master is in none of the 46 keys of the process model
+  nor the 5 fields of a list entry, so no amount of reading a target reveals it.
+  The run now snapshots the whole tenant before it starts and re-checks after the
+  Hold phase and again after the pre-delete archive. Anything that moved which was
+  not a target stops the run, is named, is recorded in the plan, and is put back
+  where it can be. `-Force` cannot approve it.
+- Fixed: a participant the dependency API named but that neither process list
+  returned was dropped in silence, so a holder in that state never had its
+  reference removed. Such a participant is now retried against both fetch
+  endpoints, and one that is genuinely unreachable is recorded on the plan and
+  blocks the run.
+- Fixed: a dry run reported archived participants as "restored for the run" when a
+  preview restores nothing.
+- Fixed: `Delete_Plan_*.json` is gitignored. Every run, dry ones included, left
+  the repository dirty.
+- Changed: the archived blind-spot sweep uses a narrow Input/Output finder instead
+  of walking every activity tree and discarding the result. Across a 479-process
+  archive that is 479 whole activity trees, plus their child recursion, no longer
+  walked for nothing.
+- Changed: the sweep no longer caches every model it reads. It caches only the
+  ones that produced a hit and will be read again, rather than holding hundreds of
+  full process models to serve no reads at all. A zero-hit cache report is normal
+  and is no longer printed as though it were a fault.
+- Changed: a process with no name in the ledger or the index falls back to the
+  name the dependency payload already carried, instead of printing a bare GUID.
+
+**Version 4.1**
 - Fixed: a clean dependency check was read as a failed one. An empty result array
   unrolled to `$null` on return, so every dependency-free process blocked the run.
   `Get-ProcessDependencyClaim` now returns a result object whose `Success` field

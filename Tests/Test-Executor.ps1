@@ -349,6 +349,165 @@ $oneSide = @(Test-DependencyReconciliation -QueriedUniqueId $AcrId -RelatedUniqu
 Assert-Equal 'Mismatch' @($oneSide | Where-Object { $_.Category -eq 'Link' })[0].Status `
     'a surviving holder still raises a mismatch'
 
+# ---------------------------------------------------------------------------
+Write-Host "`nScenario: a participant missing from both list sweeps" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# Processes exist that the dependency API reports but that neither ListType=0
+# nor ListType=7 returns, while the mobile batch endpoint still serves them.
+# Dropping such a participant silently means a holder whose reference to a
+# deleted target is never removed.
+
+$GhostId  = 'eeee0000-0000-0000-0000-00000000000e'
+$TargetId = 'ffff0000-0000-0000-0000-00000000000f'
+$script:GhostFetchable = $true
+
+function Invoke-NpmApi {
+    param([string]$Url,[string]$Token,[string]$Method='Get',$Body=$null,[int]$MaxRetries=0)
+    function Ok3($r) { return [PSCustomObject]@{ Success=$true; StatusCode=200; Response=$r; Error=$null } }
+
+    # Only the target is listed. The ghost appears in neither sweep.
+    if ($Url -match 'ListType=(\d+)') {
+        $items = @()
+        if ([int]$Matches[1] -eq 0) {
+            $items = @([PSCustomObject]@{ processUniqueId=$TargetId; id=7; processName='Target'; groupId=12 })
+        }
+        return Ok3 ([PSCustomObject]@{ items = $items })
+    }
+
+    if ($Url -match 'CheckProcessDependencies') {
+        if ($Url -match "/Processes/$TargetId/") {
+            return Ok3 (@'
+[{"Type":"Linked Process","Dependencies":[{"Name":"Ghost Holder","UniqueId":"eeee0000-0000-0000-0000-00000000000e"}]}]
+'@ | ConvertFrom-Json)
+        }
+        return Ok3 $null
+    }
+
+    # The ghost is served by the batch endpoint despite being unlisted.
+    if ($Url -match 'mobile/api/v1/processes') {
+        $data = @()
+        if ($script:GhostFetchable -and $Url -match [regex]::Escape($GhostId)) {
+            $data += [PSCustomObject]@{ ProcessModel = [PSCustomObject]@{
+                UniqueId = $GhostId; Name = 'Ghost Holder'; Id = 4242
+                GroupId = 77; GroupUniqueId = 'g-77'; StateId = 2 } }
+        }
+        return Ok3 ([PSCustomObject]@{ data = $data })
+    }
+
+    if ($Method -eq 'Get' -and $Url -match '/Api/v1/Processes/([0-9a-fA-F\-]+)$') {
+        $id = $Matches[1]
+        if ($id -eq $TargetId) {
+            return Ok3 ([PSCustomObject]@{ processJson = [PSCustomObject]@{
+                UniqueId=$id; Name='Target'; GroupId=12; GroupUniqueId='g-12'; StateId=1 } })
+        }
+        return [PSCustomObject]@{ Success=$false; StatusCode=404; Response=$null; Error='Not found' }
+    }
+
+    return Ok3 $null
+}
+
+$indexGhost = Get-NpmProcessIndex -SiteURL 'https://mock' -Token 't'
+Assert-Equal 1 $indexGhost.Count 'the ghost really is absent from the index'
+
+$planGhost = New-ProcessDeletePlan -SiteURL 'https://mock' -Token 't' `
+    -TargetUniqueIds @($TargetId) -Index $indexGhost -AllowRestore $false
+
+$ghostLedger = @($planGhost.Ledger | Where-Object { $_.UniqueId -eq $GhostId })
+Assert-Equal 1 $ghostLedger.Count 'the unlisted participant is recovered into the ledger, not dropped'
+Assert-Equal 'Ghost Holder' $ghostLedger[0].Name 'its name comes back with it'
+Assert-Equal 77 $ghostLedger[0].OriginalGroupId 'its group comes back with it'
+Assert-Equal 0 @($planGhost.Unresolved).Count 'a recoverable participant is not reported unresolved'
+Assert-True ((@($planGhost.Log) -join ' ') -like '*Recovered participant*') 'the recovery is logged'
+
+# Now the same participant, unreachable by any endpoint.
+$script:GhostFetchable = $false
+$planLost = New-ProcessDeletePlan -SiteURL 'https://mock' -Token 't' `
+    -TargetUniqueIds @($TargetId) -Index $indexGhost -AllowRestore $false
+
+Assert-Equal 1 @($planLost.Unresolved).Count 'a genuinely unreachable participant is recorded, not ignored'
+Assert-Equal $GhostId @($planLost.Unresolved)[0].UniqueId 'it is named by id'
+Assert-Equal 'Ghost Holder' @($planLost.Unresolved)[0].Name 'and by the name the dependency payload carried'
+Assert-True ((@($planLost.Log) -join ' ') -like '*UNRESOLVED*') 'the run says its references will not be removed'
+
+# W3: a name is available for a process no sweep returned.
+Assert-Equal 'Ghost Holder' (Resolve-PlanProcessName -Plan $planLost -Index $indexGhost -UniqueId $GhostId) `
+    'the claim name is used rather than printing a bare GUID'
+Assert-Equal 'Target' (Resolve-PlanProcessName -Plan $planLost -Index $indexGhost -UniqueId $TargetId) `
+    'the ledger still wins where it has an entry'
+
+# ---------------------------------------------------------------------------
+Write-Host "`nScenario: a preview does not claim restores it did not make" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+
+$script:Models = @{
+    $AcrId = (Get-Content (Join-Path $root 'Tests/Fixtures/ActionCustomerRequest.json') -Raw | ConvertFrom-Json)
+    $DtId  = (Get-Content (Join-Path $root 'Tests/Fixtures/DependencyTest.json') -Raw | ConvertFrom-Json)
+}
+$script:ArchivedIds = @($AcrId)
+
+function Invoke-NpmApi {
+    param([string]$Url,[string]$Token,[string]$Method='Get',$Body=$null,[int]$MaxRetries=0)
+    function Ok4($r) { return [PSCustomObject]@{ Success=$true; StatusCode=200; Response=$r; Error=$null } }
+
+    if ($Url -match 'ListType=(\d+)') {
+        $listType = [int]$Matches[1]
+        $items = @()
+        foreach ($id in $script:Models.Keys) {
+            $isArch = ($script:ArchivedIds -contains $id)
+            if (($listType -eq 7) -ne $isArch) { continue }
+            $m = $script:Models[$id]
+            $items += [PSCustomObject]@{ processUniqueId=$id; id=$m.Id; processName=$m.Name; groupId=$m.GroupId }
+        }
+        return Ok4 ([PSCustomObject]@{ items = $items })
+    }
+    if ($Url -match 'CheckProcessDependencies') {
+        if ($Url -match '/Processes/([0-9a-fA-F\-]+)/CheckProcessDependencies') {
+            $id = $Matches[1]
+            if ($script:DepResponses.ContainsKey($id)) { return Ok4 ($script:DepResponses[$id] | ConvertFrom-Json) }
+        }
+        return Ok4 $null
+    }
+    if ($Url -match 'mobile/api/v1/processes') {
+        $data = @()
+        foreach ($m in ($Url -split '&')) {
+            if ($m -match 'processUniqueIds=([0-9a-fA-F\-]+)') {
+                $id = $Matches[1]
+                if ($script:Models.ContainsKey($id)) { $data += [PSCustomObject]@{ ProcessModel = $script:Models[$id] } }
+            }
+        }
+        return Ok4 ([PSCustomObject]@{ data = $data })
+    }
+    if ($Method -eq 'Get' -and $Url -match '/Api/v1/Processes/([0-9a-fA-F\-]+)$') {
+        $id = $Matches[1]
+        if ($script:Models.ContainsKey($id) -and ($script:ArchivedIds -notcontains $id)) {
+            return Ok4 ([PSCustomObject]@{ processJson = $script:Models[$id] })
+        }
+        return [PSCustomObject]@{ Success=$false; StatusCode=404; Response=$null; Error='Not found' }
+    }
+    return Ok4 $null
+}
+
+$previewIndex = Get-NpmProcessIndex -SiteURL 'https://mock' -Token 't'
+$preview = New-ProcessDeletePlan -SiteURL 'https://mock' -Token 't' `
+    -TargetUniqueIds @($DtId) -Index $previewIndex -AllowRestore $false
+
+Assert-Equal 0 @($preview.Ledger | Where-Object { $_.RestoredByThisRun }).Count `
+    'a preview restores nothing, so nothing is flagged as restored'
+Assert-True (@($preview.Ledger | Where-Object { $_.WasArchived }).Count -gt 0) `
+    'the preview still knows an archived participant is involved'
+
+$shown = (Show-ProcessDeletePlan -Plan $preview -Index $previewIndex 6>&1 | Out-String)
+Assert-True ($shown -match 'none restored') 'the preview says plainly that it restored nothing'
+Assert-True (-not ($shown -match 'restored for the run')) 'the preview does not claim restores it never made'
+
+# A real run does restore, and says so.
+$script:ArchivedIds = @($AcrId)
+$realIndex = Get-NpmProcessIndex -SiteURL 'https://mock' -Token 't'
+$real = New-ProcessDeletePlan -SiteURL 'https://mock' -Token 't' `
+    -TargetUniqueIds @($DtId) -Index $realIndex -HoldingGroupId 999 -AllowRestore $true
+$shownReal = (Show-ProcessDeletePlan -Plan $real -Index $realIndex 6>&1 | Out-String)
+Assert-True ($shownReal -match 'restored for the run') 'a real run does report the restores it made'
+
 Write-Host "`n======================================" -ForegroundColor Cyan
 Write-Host "  Passed: $script:Pass   Failed: $script:Fail" -ForegroundColor $(if ($script:Fail -eq 0) { 'Green' } else { 'Red' })
 Write-Host "======================================`n" -ForegroundColor Cyan

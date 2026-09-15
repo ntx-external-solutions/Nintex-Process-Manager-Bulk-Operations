@@ -629,6 +629,72 @@ payloads), would settle both this and the (a)/(b) question above. Neither is set
 the shape table alone; the table is evidence about the distribution, not about the
 mechanism.
 
+A second run against the same tenant confirmed the entry is still there and still
+alone of its kind, now among only 6 remaining mismatches rather than 120. It is
+**not** classified as known-shape asymmetry: the classifier only forgives a delta
+that matches a child-procedure count on the queried side, and this pair has none,
+so it still gates the run. That is deliberate. Of the observed shapes it is the
+only one that could mean a real reference is being missed rather than
+over-reported, and it should keep stopping runs until a fixture explains it.
+
+### Process variations are coupled, and nothing in the payload says so
+
+Measured on the demo tenant during a live 10-target run. The run archived two
+processes that were active and moved a third into the temporary group. None were
+targets. None were in the ledger. Nothing failed, and nothing in the output
+mentioned them.
+
+The cause is process variations. Nintex PM stores a variation as **its own
+process record, in its own group**, with its own UniqueId. Acting on the
+variation acts on the master as well. The coupling is not exposed anywhere this
+tooling can see it:
+
+| Source | Fields | Mentions the master? |
+|---|---|---|
+| Process model (`/Api/v1/Processes/{id}`) | 46 keys | no |
+| Index entry (`ListType=0` / `ListType=7`) | 5 fields | no |
+| `CheckProcessDependencies` | claim rows | no |
+
+So a target cannot be inspected to find out whether operating on it will also
+operate on something else. **There is no read that answers the question.**
+
+What can be done is to record the state of every process in the tenant before
+the run, and compare after each mutating phase. Anything that moved which was
+not asked to move is collateral. That is what `New-TenantStateSnapshot` and
+`Compare-TenantState` do, and the check runs twice:
+
+1. after the Hold phase restores archived targets, and
+2. after the pre-delete archive pass, which is the last point before the
+   irreversible step.
+
+Collateral stops the run. `-Force` cannot approve it: a run that has just
+demonstrated it affects processes nobody listed has no business proceeding to a
+delete unattended.
+
+The same signal is produced by another user editing the tenant mid-run, which is
+indistinguishable from the outside and is treated the same way.
+
+**Reversal is partial, by design.** An unwanted archive is undone by restoring to
+the recorded home group, and an unwanted un-archive by re-archiving. A process
+that merely changed group while staying active is **not** moved back: the only
+move endpoint available here is the one Mode 3 uses, which is documented below
+as broken, and guessing with a broken endpoint on a process the operator never
+meant to touch makes two problems out of one. Those are named for manual
+correction. A process that disappeared cannot be recovered by anything.
+
+### Some processes are in no list but are still fetchable
+
+Also measured: processes that `CheckProcessDependencies` names as related, but
+that appear in neither `ListType=0` nor `ListType=7`, while the mobile batch
+endpoint returns them normally. Two were seen on the demo tenant.
+
+This matters because such a process can be a **holder**. Skipping it means its
+reference to a deleted target is never removed, which is the exact failure the
+dependency engine exists to prevent. So a candidate missing from the index is
+now retried against both fetch endpoints before being given up on, and one that
+is genuinely unreachable is recorded on the plan as an unresolved participant
+and blocks the run rather than passing unnoticed.
+
 ### Reconciliation is skipped when both sides are being deleted
 
 Of those 120 mismatches, 114 were pairs where **both** processes were in the delete set

@@ -84,7 +84,7 @@ param(
     [switch]$IncludeSubgroups
 )
 
-$script:ScriptVersion = '4.1'
+$script:ScriptVersion = '4.2'
 
 # ----------------------------------------------------------------------------
 # Dependency engine. Mode 5 delegates all dependency discovery, reference
@@ -2835,6 +2835,31 @@ function Invoke-BulkDeleteProcesses {
 
     $snapshot = New-ProcessStateSnapshot -Index $index -UniqueIds $targetUniqueIds -GroupUniqueIdMap $groupUniqueIdMap
 
+    # The whole tenant, not just the targets. A process variation is stored as
+    # its own record and acting on one acts on its master, with nothing in the
+    # model or the list entry to warn you. Comparing the tenant before and after
+    # each mutating phase is the only way to see it happen.
+    $tenantBaseline = New-TenantStateSnapshot -Index $index
+    Write-Host "  Baseline covers $($tenantBaseline.Count) process(es) across the tenant." -ForegroundColor Gray
+
+    # What to do when a phase changes something it was not asked to change.
+    # Stopping is the default and the only answer available unattended: the
+    # run has just proved it affects processes nobody listed, so it has no
+    # business continuing to an irreversible delete without a human.
+    $collateralDecision = {
+        param($Collateral)
+
+        if ($Force) {
+            Write-Host "`n-Force cannot approve collateral changes. Stopping." -ForegroundColor Red
+            Write-Host "Re-run interactively, or add the affected processes to the target set if" -ForegroundColor Yellow
+            Write-Host "they really should be included." -ForegroundColor Yellow
+            return $false
+        }
+
+        Write-Host "`n$(@($Collateral).Count) process(es) changed that were not targets." -ForegroundColor Red
+        return ((Read-Host "Continue anyway? Type 'YES' to accept these changes") -eq 'YES')
+    }
+
     # ---- Holding group ----------------------------------------------------
     # Only archived TARGETS go here. Dependency holders are restored in place to
     # their own group, because they survive the run and parking them elsewhere
@@ -2891,6 +2916,48 @@ function Invoke-BulkDeleteProcesses {
         Write-Host "  Held $($archivedTargets.Count) target(s) in '$TempGroupName'" -ForegroundColor Gray
 
         $index = Get-NpmProcessIndex -SiteURL $SiteURL -Token $Token
+
+        # ---- Collateral check, straight after the first mutating phase ----
+        Write-Host "`n=== CHECKING FOR COLLATERAL CHANGES ===" -ForegroundColor Cyan
+        $holdCollateral = @(Compare-TenantState -Baseline $tenantBaseline -Index $index -ExpectedUniqueIds $targetUniqueIds)
+
+        if ($holdCollateral.Count -gt 0) {
+            Show-CollateralDamage -Collateral $holdCollateral -Phase 'after holding archived targets'
+
+            $accept = & $collateralDecision $holdCollateral
+            if (-not $accept) {
+                Write-Host "`nStopping. Nothing has been deleted." -ForegroundColor Red
+
+                $aborted = New-DependencyPlan -SiteURL $SiteURL -TargetUniqueIds $targetUniqueIds
+                $aborted.Status = 'AbortedCollateral'
+                $aborted.Ledger = @(ConvertTo-PlanLedgerEntry -Snapshot $snapshot)
+                $aborted.Collateral = @($holdCollateral)
+                foreach ($c in $holdCollateral) {
+                    $aborted.Log += "COLLATERAL after hold phase: $($c.UniqueId) ($($c.Name)) - $($c.Change)"
+                }
+                [void](Export-DependencyPlan -Plan $aborted -Path $planPath)
+
+                foreach ($c in $holdCollateral) {
+                    $results += [PSCustomObject]@{
+                        ObjectType = 'Process'; ObjectID = $c.UniqueId
+                        Name = $(if ($c.Name) { $c.Name } else { $c.UniqueId })
+                        Operation = 'Collateral'; Status = 'Failed'
+                        Message = "Changed without being a target ($($c.Change)); run stopped"
+                    }
+                }
+
+                # Put back what the run moved, its own targets first and then the
+                # processes it was never asked to touch.
+                $results += @(Restore-ProcessPlanState -SiteURL $SiteURL -Token $Token -Plan $aborted -PlanPath $planPath -ApprovalsEnabled $approvalsEnabled)
+                $results += @(Restore-CollateralState -SiteURL $SiteURL -Token $Token -Collateral $holdCollateral -ApprovalsEnabled $approvalsEnabled)
+                $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName)
+
+                Save-DeleteResults -Results $results -Timestamp $timestamp
+                return
+            }
+        } else {
+            Write-Host "  No collateral changes. Only the targets moved." -ForegroundColor Green
+        }
     }
 
     # ---- Plan -------------------------------------------------------------
@@ -2910,7 +2977,15 @@ function Invoke-BulkDeleteProcesses {
             -OnFailedTargets $failedTargetDecision
     }
     finally {
-        Write-Host "  Model cache served $(Get-NpmModelCacheHitCount) repeat read(s)" -ForegroundColor Gray
+        # Zero is a normal result, not a fault. The cache exists for the two
+        # cases where a process really is read twice: an archived dependency
+        # holder fetched for the ledger and read again by the blind-spot sweep,
+        # and a holder the sweep discovers and then adds to the ledger. A run
+        # whose targets have no dependencies hits neither, and reports zero.
+        $hits = Get-NpmModelCacheHitCount
+        if ($hits -gt 0) {
+            Write-Host "  Model cache served $hits repeat read(s)" -ForegroundColor Gray
+        }
         Disable-NpmModelCache
     }
 
@@ -2949,6 +3024,27 @@ function Invoke-BulkDeleteProcesses {
     if ($WhatIf) {
         Write-Host "`n*** PREVIEW ONLY - nothing was changed ***" -ForegroundColor Yellow
         return
+    }
+
+    # ---- Unresolved participants ------------------------------------------
+    # A participant the run could not fetch is a participant whose references
+    # were never examined. Deleting a target it points at leaves a broken
+    # reference behind, which is the exact failure the whole dependency engine
+    # exists to prevent.
+    $unresolved = @($plan.Unresolved)
+    if ($unresolved.Count -gt 0) {
+        Write-Host "`n$($unresolved.Count) participant(s) could not be resolved." -ForegroundColor Red
+        $continue = $false
+        if (-not $Force) { $continue = ((Read-Host "Continue anyway? (Y/N)") -eq 'Y') }
+        else { Write-Host "-Force does not wave through unresolved participants. Stopping." -ForegroundColor Red }
+
+        if (-not $continue) {
+            Write-Host "Operation cancelled. Nothing has been deleted." -ForegroundColor Yellow
+            $results += @(Restore-ProcessPlanState -SiteURL $SiteURL -Token $Token -Plan $plan -PlanPath $planPath -ApprovalsEnabled $approvalsEnabled)
+            if ($tempGroup) { $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName) }
+            Save-DeleteResults -Results $results -Timestamp $timestamp
+            return
+        }
     }
 
     # ---- Remove references and verify -------------------------------------
@@ -3013,7 +3109,20 @@ function Invoke-BulkDeleteProcesses {
         return
     }
 
-    $results += @(Invoke-ProcessTargetDeletion -SiteURL $SiteURL -Token $Token -Plan $plan -ApprovalsEnabled $approvalsEnabled)
+    $deletionResults = @(Invoke-ProcessTargetDeletion -SiteURL $SiteURL -Token $Token -Plan $plan `
+        -ApprovalsEnabled $approvalsEnabled -TenantBaseline $tenantBaseline -OnCollateral $collateralDecision)
+    $results += $deletionResults
+
+    # The deletion step stops before deleting anything if the archive pass moved
+    # something that was not a target. Unwind rather than carrying on.
+    if (@($plan.Collateral).Count -gt 0 -and @($deletionResults | Where-Object { $_.Operation -eq 'Delete' }).Count -eq 0) {
+        [void](Export-DependencyPlan -Plan $plan -Path $planPath)
+        $results += @(Restore-ProcessPlanState -SiteURL $SiteURL -Token $Token -Plan $plan -PlanPath $planPath -ApprovalsEnabled $approvalsEnabled)
+        $results += @(Restore-CollateralState -SiteURL $SiteURL -Token $Token -Collateral $plan.Collateral -ApprovalsEnabled $approvalsEnabled)
+        if ($tempGroup) { $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName) }
+        Save-DeleteResults -Results $results -Timestamp $timestamp
+        return
+    }
 
     # ---- Restore original state ------------------------------------------
     $results += @(Restore-ProcessPlanState -SiteURL $SiteURL -Token $Token -Plan $plan -PlanPath $planPath -ApprovalsEnabled $approvalsEnabled)
