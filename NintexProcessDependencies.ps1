@@ -614,13 +614,26 @@ function Test-DependencyReconciliation {
         holder side is the known child-reference asymmetry documented in
         API_ARCHITECTURE.md, not necessarily a defect. It is surfaced rather
         than silently tolerated.
+
+    .PARAMETER BothSidesDeleted
+        Set when the queried process and the related process are BOTH in the
+        delete set. Whatever references the pair holds to each other cease to
+        exist when both are deleted, so there is nothing to remove, nothing to
+        get wrong, and nothing for an operator to adjudicate.
+
+        Entries are still emitted, with Status 'NotApplicable', because the plan
+        file is the audit record of what the run considered. They are simply not
+        gated on. On the tenant this was measured against, 114 of 120 Link
+        mismatches were pairs of this kind: the operator was being asked to
+        review 120 lines to protect the 6 that could matter.
     #>
     param(
         [string]$QueriedUniqueId,
         [string]$RelatedUniqueId,
         $Claims,
         $Sites,
-        [bool]$RelatedIsArchived = $false
+        [bool]$RelatedIsArchived = $false,
+        [bool]$BothSidesDeleted = $false
     )
 
     $results = @()
@@ -655,14 +668,28 @@ function Test-DependencyReconciliation {
         $status = 'Match'
         $note = ''
 
-        if ($claimed -ne $expected) {
+        if ($BothSidesDeleted) {
+            # Both ends of this pair are being deleted. The references between
+            # them are going away with them, whatever the counts say.
+            $status = 'NotApplicable'
+            $note = 'Both processes are delete targets; references between them disappear with them'
+        }
+        elseif ($claimed -ne $expected) {
             $status = 'Mismatch'
 
             $childCount = @($categorySites | Where-Object {
                 $_.IsChild -and $_.HolderUniqueId -eq $QueriedUniqueId
             }).Count
 
-            if ($category -eq 'Link' -and $childCount -gt 0 -and ($expected - $claimed) -eq $childCount) {
+            # The asymmetry runs in both directions. The measured tenant shows
+            # the API over-claiming (claimed 2, located 1) far more often than
+            # the JSON holding more than the API reports, and the delta is the
+            # holder's child-procedure count in both cases. Neither direction is
+            # evidence of drift on its own; see the open question in
+            # API_ARCHITECTURE.md, which a fixture still has to settle.
+            $delta = [Math]::Abs($claimed - $expected)
+
+            if ($category -eq 'Link' -and $childCount -gt 0 -and $delta -eq $childCount) {
                 $status = 'MatchWithKnownAsymmetry'
                 $note = "Differs by $childCount child-procedure site(s); see API_ARCHITECTURE.md child-reference asymmetry"
             }
@@ -768,6 +795,21 @@ function Get-ProcessDependencyClaim {
     .DESCRIPTION
         searchBehavior=31. See API_ARCHITECTURE.md for why the result is a
         bidirectional union and must not be deduplicated.
+
+    .OUTPUTS
+        A result object, never a bare array:
+
+            Success - $true when the endpoint answered, whatever it answered
+            Claims  - the parsed claims, empty when there are no dependencies
+            Status  - HTTP status code
+            Error   - failure message, $null on success
+
+        Success is carried in a field rather than encoded in the return value on
+        purpose. Returning $null for failure and an array for success cannot
+        work in PowerShell: an empty array unrolls to $null on return, so a
+        process with no dependencies is indistinguishable at the call site from
+        a check that never ran. That collapse blocked a 497-target run where 392
+        targets were simply dependency-free. A field cannot unroll.
     #>
     param(
         [string]$SiteURL,
@@ -781,10 +823,75 @@ function Get-ProcessDependencyClaim {
 
     if (-not $result.Success) {
         Write-Host "  Dependency check failed for $ProcessUniqueId : HTTP $($result.StatusCode) $($result.Error)" -ForegroundColor Red
-        return $null    # distinct from "no dependencies"; the caller must not treat it as clean
+        return [PSCustomObject]@{
+            Success = $false
+            Claims  = @()
+            Status  = $result.StatusCode
+            Error   = $result.Error
+        }
     }
 
-    return @(ConvertFrom-DependencyResponse -Response $result.Response -QueriedUniqueId $ProcessUniqueId)
+    return [PSCustomObject]@{
+        Success = $true
+        Claims  = @(ConvertFrom-DependencyResponse -Response $result.Response -QueriedUniqueId $ProcessUniqueId)
+        Status  = $result.StatusCode
+        Error   = $null
+    }
+}
+
+# ----------------------------------------------------------------------------
+# Process model cache
+# ----------------------------------------------------------------------------
+# Planning walks the same processes several times: once per discovery pass, then
+# again in the archived Input/Output sweep, then again when the ledger is built.
+# On a 497-target run that was hundreds of redundant fetches and most of the
+# eleven minutes a single pass took.
+#
+# The cache is OFF by default and only switched on for the planning phase, which
+# is read-only. It is invalidated on every write, because a cached copy that
+# outlives a save or an archive-state change is worse than no cache at all: the
+# whole point of re-reading after a save is to verify what actually landed.
+
+$script:NpmModelCache = @{}
+$script:NpmModelCacheEnabled = $false
+$script:NpmModelCacheHits = 0
+
+function Enable-NpmModelCache {
+    $script:NpmModelCache = @{}
+    $script:NpmModelCacheEnabled = $true
+    $script:NpmModelCacheHits = 0
+}
+
+function Disable-NpmModelCache {
+    $script:NpmModelCache = @{}
+    $script:NpmModelCacheEnabled = $false
+}
+
+function Get-NpmModelCacheHitCount { return $script:NpmModelCacheHits }
+
+function Get-NpmCachedModel {
+    param([string]$UniqueId)
+    if (-not $script:NpmModelCacheEnabled -or -not $UniqueId) { return $null }
+    $key = $UniqueId.ToLowerInvariant()
+    if ($script:NpmModelCache.ContainsKey($key)) {
+        $script:NpmModelCacheHits++
+        return $script:NpmModelCache[$key]
+    }
+    return $null
+}
+
+function Set-NpmCachedModel {
+    param([string]$UniqueId, $Model)
+    if (-not $script:NpmModelCacheEnabled -or -not $UniqueId -or $null -eq $Model) { return }
+    $script:NpmModelCache[$UniqueId.ToLowerInvariant()] = $Model
+}
+
+function Clear-NpmCachedModel {
+    # Called on every mutation. A stale model is a corrupted save waiting to
+    # happen, so eviction is unconditional and does not check the enabled flag.
+    param([string]$UniqueId)
+    if (-not $UniqueId) { return }
+    $script:NpmModelCache.Remove($UniqueId.ToLowerInvariant())
 }
 
 function Get-NpmProcessModel {
@@ -877,6 +984,7 @@ function Save-NpmProcessModel {
         VariantConnectionChangeStates     = @()
     }
 
+    Clear-NpmCachedModel -UniqueId $ProcessUniqueId
     $url = "$SiteURL/Api/v1/Processes/$ProcessUniqueId"
     $save = Invoke-NpmApi -Url $url -Token $Token -Method Put -Body $body
     if (-not $save.Success) {
@@ -944,6 +1052,7 @@ function New-ProcessLedgerEntry {
         RestoredByThisRun     = $false
         RestoredToGroupId     = $null
         Denormalized          = $false
+        Deleted               = $false
     }
 }
 
@@ -969,6 +1078,97 @@ function New-ProcessLedgerEntryFromModel {
         -OriginalGroupId (Get-NodeValue -Node $ProcessModel -Name 'GroupId')
 }
 
+function New-ProcessStateSnapshot {
+    <#
+    .SYNOPSIS
+        Captures archive state and home group for a set of processes, before the
+        run mutates anything.
+
+    .DESCRIPTION
+        The Hold phase un-archives every archived target and moves it into a
+        temporary group. Any index read after that reports the moved state, so a
+        ledger built from it says the targets were never archived and names the
+        temp group as their home. That ledger is not a crash-safety net: on a
+        resume it would re-archive nothing and point at a group cleanup may
+        already have deleted.
+
+        This snapshot is taken first and is the authority for WasArchived and
+        OriginalGroup* from then on.
+
+    .PARAMETER GroupUniqueIdMap
+        Optional numeric-group-id to group-UniqueId map. The process list gives
+        a numeric groupId only, but deletion wants the group's UniqueId, and
+        resolving it per process would be one fetch each.
+    #>
+    param(
+        $Index,
+        [string[]]$UniqueIds,
+        $GroupUniqueIdMap = $null
+    )
+
+    $snapshot = @{}
+
+    foreach ($id in @($UniqueIds)) {
+        if (-not $id) { continue }
+        $entry = Get-NpmIndexEntry -Index $Index -UniqueId $id
+        if ($null -eq $entry) { continue }
+
+        $groupUniqueId = ''
+        if ($null -ne $GroupUniqueIdMap -and $null -ne $entry.GroupId) {
+            $key = "$($entry.GroupId)"
+            if ($GroupUniqueIdMap.ContainsKey($key)) { $groupUniqueId = [string]$GroupUniqueIdMap[$key] }
+        }
+
+        $snapshot[$entry.UniqueId.ToLowerInvariant()] = [PSCustomObject]@{
+            UniqueId              = $entry.UniqueId
+            Name                  = $entry.Name
+            NumericId             = $entry.NumericId
+            WasArchived           = $entry.IsArchived
+            IsArchivedNow         = $entry.IsArchived
+            OriginalGroupId       = $entry.GroupId
+            OriginalGroupUniqueId = $groupUniqueId
+            RestoredByThisRun     = $false
+        }
+    }
+
+    return $snapshot
+}
+
+function Set-ProcessSnapshotRestored {
+    # Records that the Hold phase pulled this process out of the archive. The
+    # flag is what Restore-ProcessPlanState keys off to put it back.
+    param($Snapshot, [string]$UniqueId, $HoldingGroupId = $null)
+
+    if ($null -eq $Snapshot -or -not $UniqueId) { return }
+    $key = $UniqueId.ToLowerInvariant()
+    if (-not $Snapshot.ContainsKey($key)) { return }
+
+    $Snapshot[$key].RestoredByThisRun = $true
+    $Snapshot[$key].IsArchivedNow = $false
+}
+
+function ConvertTo-PlanLedgerEntry {
+    # Snapshot rows in the shape the plan ledger uses, so a plan can be written
+    # to disk before the first mutation and still be readable by the resume path.
+    param($Snapshot)
+
+    if ($null -eq $Snapshot) { return @() }
+
+    return @($Snapshot.Values | ForEach-Object {
+        [PSCustomObject]@{
+            UniqueId              = $_.UniqueId
+            Name                  = $_.Name
+            NumericId             = $_.NumericId
+            WasArchived           = $_.WasArchived
+            OriginalGroupUniqueId = $_.OriginalGroupUniqueId
+            OriginalGroupId       = $_.OriginalGroupId
+            RestoredByThisRun     = $_.RestoredByThisRun
+            Denormalized          = $false
+            Deleted               = $false
+        }
+    })
+}
+
 function New-DependencyPlan {
     param(
         [string]$SiteURL,
@@ -986,6 +1186,7 @@ function New-DependencyPlan {
         Sites          = @()
         WorkItems      = @()
         Reconciliation = @()
+        FailedTargets  = @()
         Log            = @()
     }
 }
@@ -1021,6 +1222,40 @@ function Import-DependencyPlan {
 # ============================================================================
 
 $script:NpmThrottleMs = 0
+
+# ----------------------------------------------------------------------------
+# Progress reporting
+# ----------------------------------------------------------------------------
+# Long phases used to emit one line and then nothing for eleven minutes, which
+# is indistinguishable from a hang. Write-Progress gives a live bar; the callers
+# also print a periodic counter so a redirected transcript still shows movement.
+
+function Write-NpmProgress {
+    param(
+        [string]$Activity,
+        [string]$Status,
+        [int]$Done,
+        [int]$Total,
+        [int]$Id = 1,
+        [int]$Every = 10
+    )
+
+    if ($Total -le 0) { return }
+
+    $percent = [Math]::Min(100, [int](($Done / $Total) * 100))
+    Write-Progress -Id $Id -Activity $Activity -Status "$Status - $Done of $Total" -PercentComplete $percent
+
+    # A console counter as well: Write-Progress renders nothing in a transcript
+    # or a redirected host, which is exactly where a long run is watched from.
+    if ($Every -gt 0 -and ($Done % $Every) -eq 0) {
+        Write-Host "`r    $Status`: $Done of $Total..." -NoNewline -ForegroundColor Gray
+    }
+}
+
+function Complete-NpmProgress {
+    param([string]$Activity, [int]$Id = 1)
+    Write-Progress -Id $Id -Activity $Activity -Completed
+}
 
 function Start-NpmThrottle {
     if ($script:NpmThrottleMs -gt 0) { Start-Sleep -Milliseconds $script:NpmThrottleMs }
@@ -1093,13 +1328,21 @@ function Get-NpmProcessModelAnyState {
         [bool]$IsArchived
     )
 
+    $cached = Get-NpmCachedModel -UniqueId $UniqueId
+    if ($null -ne $cached) { return $cached }
+
     if ($IsArchived) {
         $models = @(Get-NpmArchivedProcessModel -SiteURL $SiteURL -Token $Token -ProcessUniqueIds @($UniqueId))
-        if ($models.Count -gt 0) { return $models[0] }
+        if ($models.Count -gt 0) {
+            Set-NpmCachedModel -UniqueId $UniqueId -Model $models[0]
+            return $models[0]
+        }
         return $null
     }
 
-    return (Get-NpmProcessModel -SiteURL $SiteURL -Token $Token -ProcessUniqueId $UniqueId)
+    $model = Get-NpmProcessModel -SiteURL $SiteURL -Token $Token -ProcessUniqueId $UniqueId
+    Set-NpmCachedModel -UniqueId $UniqueId -Model $model
+    return $model
 }
 
 function Restore-NpmProcess {
@@ -1110,6 +1353,7 @@ function Restore-NpmProcess {
         $ProcessGroupId
     )
 
+    Clear-NpmCachedModel -UniqueId $ProcessUniqueId
     Start-NpmThrottle
     $result = Invoke-NpmApi -Url "$SiteURL/Process/Edit/RestoreProcess" -Token $Token -Method Post -Body @{
         processUniqueId = $ProcessUniqueId
@@ -1127,6 +1371,7 @@ function Set-NpmProcessArchived {
         [bool]$ApprovalsEnabled = $false
     )
 
+    Clear-NpmCachedModel -UniqueId $ProcessUniqueId
     Start-NpmThrottle
     $result = Invoke-NpmApi -Url "$SiteURL/Process/Edit/ArchiveProcess" -Token $Token -Method Post -Body @{
         processUniqueId = $ProcessUniqueId
@@ -1158,6 +1403,7 @@ function Remove-NpmProcess {
         [string]$ProcessGroupUniqueId = ''
     )
 
+    Clear-NpmCachedModel -UniqueId $ProcessUniqueId
     $body = @{ processUniqueId = $ProcessUniqueId }
     if ($ProcessGroupUniqueId) { $body.processGroupUniqueId = $ProcessGroupUniqueId }
 
@@ -1208,44 +1454,96 @@ function Find-HiddenInputOutputReference {
     $archivedIds = @()
     $activeIds = @()
 
+    # The targets are excluded outright. A reference a target holds to another
+    # target dies with both of them, and a target is never edited anyway, so
+    # fetching one here buys nothing.
+    $targetLookup = @{}
+    foreach ($t in @($TargetUniqueIds)) { if ($t) { $targetLookup[$t.ToLowerInvariant()] = $true } }
+
     foreach ($entry in $Index.Values) {
+        if ($targetLookup.ContainsKey($entry.UniqueId.ToLowerInvariant())) { continue }
         if ($entry.IsArchived) { $archivedIds += $entry.UniqueId }
         elseif ($IncludeActive) { $activeIds += $entry.UniqueId }
     }
+
+    # Say the size up front. This is the phase that makes a ten-item job take
+    # three minutes, and an operator should know that before it starts.
+    $totalToScan = $activeIds.Count + $archivedIds.Count
+    if ($totalToScan -eq 0) { return $sites }
+
+    $excludedCount = @($Index.Values).Count - $totalToScan
+    Write-Host "  Input/Output blind-spot scan: $totalToScan process(es) to read" -ForegroundColor Gray
+    Write-Host "    ($($archivedIds.Count) archived, $($activeIds.Count) active, $excludedCount excluded as targets or not in scope)" -ForegroundColor Gray
 
     if ($activeIds.Count -gt 0) {
         Write-Host "  Scanning $($activeIds.Count) ACTIVE process(es) for Input/Output references (slow)..." -ForegroundColor Gray
         $done = 0
         foreach ($id in $activeIds) {
             $done++
-            if ($done % 25 -eq 0) {
-                Write-Host "`r    Scanned $done of $($activeIds.Count)..." -NoNewline -ForegroundColor Gray
-            }
+            Write-NpmProgress -Activity 'Input/Output blind-spot scan' -Status 'Active processes' `
+                -Done $done -Total $activeIds.Count -Id 2 -Every 25
+
+            # Served from the planning cache when an earlier phase already read
+            # this process; otherwise fetched and cached for the phases after.
             # Active processes must use the individual endpoint; the mobile API
             # is for archived processes and returns nothing useful here.
-            $model = Get-NpmProcessModel -SiteURL $SiteURL -Token $Token -ProcessUniqueId $id
+            $model = Get-NpmCachedModel -UniqueId $id
+            if ($null -eq $model) {
+                $model = Get-NpmProcessModel -SiteURL $SiteURL -Token $Token -ProcessUniqueId $id
+                Set-NpmCachedModel -UniqueId $id -Model $model
+            }
             if ($null -eq $model) { continue }
             $found = @(Find-ProcessReferenceSite -ProcessObject $model -TargetUniqueIds $TargetUniqueIds)
             $sites += @($found | Where-Object { $_.Category -eq 'Input' -or $_.Category -eq 'Output' })
         }
+        Complete-NpmProgress -Activity 'Input/Output blind-spot scan' -Id 2
         Write-Host ""
     }
 
-    if ($archivedIds.Count -eq 0) { return $sites }
-    Write-Host "  Scanning $($archivedIds.Count) archived process(es) for Input/Output references..." -ForegroundColor Gray
+    if ($archivedIds.Count -eq 0) {
+        if ($sites.Count -gt 0) {
+            Write-Host "  Found $($sites.Count) Input/Output reference(s) invisible to the dependency API" -ForegroundColor Yellow
+        }
+        return $sites
+    }
 
-    for ($i = 0; $i -lt $archivedIds.Count; $i += $BatchSize) {
-        $end = [Math]::Min($i + $BatchSize - 1, $archivedIds.Count - 1)
+    # Anything already in the cache is walked without a fetch; only the rest
+    # goes to the batch endpoint.
+    $toFetch = @()
+    foreach ($id in $archivedIds) {
+        $cached = Get-NpmCachedModel -UniqueId $id
+        if ($null -ne $cached) {
+            $found = @(Find-ProcessReferenceSite -ProcessObject $cached -TargetUniqueIds $TargetUniqueIds)
+            $sites += @($found | Where-Object { $_.Category -eq 'Input' -or $_.Category -eq 'Output' })
+        } else {
+            $toFetch += $id
+        }
+    }
+
+    $cachedCount = $archivedIds.Count - $toFetch.Count
+    if ($cachedCount -gt 0) {
+        Write-Host "  $cachedCount archived model(s) served from cache; fetching $($toFetch.Count)..." -ForegroundColor Gray
+    } else {
+        Write-Host "  Scanning $($toFetch.Count) archived process(es) for Input/Output references..." -ForegroundColor Gray
+    }
+
+    for ($i = 0; $i -lt $toFetch.Count; $i += $BatchSize) {
+        $end = [Math]::Min($i + $BatchSize - 1, $toFetch.Count - 1)
         $models = @(Get-NpmArchivedProcessModel -SiteURL $SiteURL -Token $Token `
-            -ProcessUniqueIds $archivedIds[$i..$end] -BatchSize $BatchSize)
+            -ProcessUniqueIds $toFetch[$i..$end] -BatchSize $BatchSize)
 
         foreach ($model in $models) {
+            $modelId = [string](Get-NodeValue -Node $model -Name 'UniqueId')
+            Set-NpmCachedModel -UniqueId $modelId -Model $model
+
             $found = @(Find-ProcessReferenceSite -ProcessObject $model -TargetUniqueIds $TargetUniqueIds)
             $sites += @($found | Where-Object { $_.Category -eq 'Input' -or $_.Category -eq 'Output' })
         }
 
-        Write-Host "`r    Scanned $([Math]::Min($end + 1, $archivedIds.Count)) of $($archivedIds.Count)..." -NoNewline -ForegroundColor Gray
+        Write-NpmProgress -Activity 'Input/Output blind-spot scan' -Status 'Archived processes' `
+            -Done ([Math]::Min($end + 1, $toFetch.Count)) -Total $toFetch.Count -Id 2 -Every 1
     }
+    Complete-NpmProgress -Activity 'Input/Output blind-spot scan' -Id 2
     Write-Host ""
 
     if ($sites.Count -gt 0) {
@@ -1281,7 +1579,9 @@ function New-ProcessDeletePlan {
         $HoldingGroupId = $null,
         [bool]$AllowRestore = $true,
         [bool]$ScanActiveForInputOutput = $false,
-        [int]$MaxPasses = 3
+        [int]$MaxPasses = 3,
+        [scriptblock]$OnFailedTargets = $null,
+        $PreHoldSnapshot = $null
     )
 
     $plan = New-DependencyPlan -SiteURL $SiteURL -TargetUniqueIds $TargetUniqueIds
@@ -1297,22 +1597,49 @@ function New-ProcessDeletePlan {
         $entry = Get-NpmIndexEntry -Index $Index -UniqueId $UniqueId
         if ($null -eq $entry) { return $null }
 
+        # The index passed in here was refreshed AFTER the Hold phase moved the
+        # archived targets into the temp group, so for those targets it reports
+        # post-mutation state: not archived, living in a group that cleanup is
+        # about to delete. A ledger built from that cannot unwind anything.
+        #
+        # PreHoldSnapshot is the state captured before the first mutation and
+        # wins wherever it has an entry. Without it this falls back to the index,
+        # which is correct for every process the run has not touched.
+        $snap = $null
+        if ($null -ne $PreHoldSnapshot -and $PreHoldSnapshot.ContainsKey($key)) {
+            $snap = $PreHoldSnapshot[$key]
+        }
+
+        $isArchivedNow = $entry.IsArchived
+        if ($null -ne $snap) { $isArchivedNow = [bool]$snap.IsArchivedNow }
+
         $model = Get-NpmProcessModelAnyState -SiteURL $SiteURL -Token $Token `
-            -UniqueId $UniqueId -IsArchived $entry.IsArchived
+            -UniqueId $UniqueId -IsArchived $isArchivedNow
 
         $groupUniqueId = [string](Get-NodeValue -Node $model -Name 'GroupUniqueId')
         $groupId = Get-NodeValue -Node $model -Name 'GroupId'
         if ($null -eq $groupId) { $groupId = $entry.GroupId }
 
+        $wasArchived = $entry.IsArchived
+        $restoredByThisRun = $false
+
+        if ($null -ne $snap) {
+            $wasArchived = [bool]$snap.WasArchived
+            $restoredByThisRun = [bool]$snap.RestoredByThisRun
+            if ($null -ne $snap.OriginalGroupId) { $groupId = $snap.OriginalGroupId }
+            if ($snap.OriginalGroupUniqueId) { $groupUniqueId = [string]$snap.OriginalGroupUniqueId }
+        }
+
         $record = [PSCustomObject]@{
             UniqueId              = $entry.UniqueId
             Name                  = $entry.Name
             NumericId             = $entry.NumericId
-            WasArchived           = $entry.IsArchived
+            WasArchived           = $wasArchived
             OriginalGroupUniqueId = $groupUniqueId
             OriginalGroupId       = $groupId
-            RestoredByThisRun     = $false
+            RestoredByThisRun     = $restoredByThisRun
             Denormalized          = $false
+            Deleted               = $false
             Model                 = $model
         }
         $ledger[$key] = $record
@@ -1325,29 +1652,112 @@ function New-ProcessDeletePlan {
 
         $allClaims = @()
         $failedTargets = @()
+        $done = 0
+        $total = @($TargetUniqueIds).Count
 
         foreach ($target in $TargetUniqueIds) {
-            $claims = Get-ProcessDependencyClaim -SiteURL $SiteURL -Token $Token -ProcessUniqueId $target
-            if ($null -eq $claims) {
-                # A failed check is NOT an empty dependency list. Treating it as
-                # one would delete a process whose references were never examined.
+            $done++
+            Write-NpmProgress -Activity "Discovery pass $pass" -Status 'Checking dependencies' `
+                -Done $done -Total $total -Id 1
+
+            $check = Get-ProcessDependencyClaim -SiteURL $SiteURL -Token $Token -ProcessUniqueId $target
+
+            # Success is read off the field. An empty Claims array means the
+            # process genuinely has no dependencies, which is not a failure.
+            if (-not $check.Success) {
                 $failedTargets += $target
                 continue
             }
-            $allClaims += $claims
+            $allClaims += @($check.Claims)
+        }
+        Complete-NpmProgress -Activity "Discovery pass $pass" -Id 1
+        Write-Host "`r    Checked $total of $total.                    " -ForegroundColor Gray
+
+        # One retry for the failures before giving up on the batch. A single
+        # transient 5xx should not discard the twenty minutes of discovery that
+        # a large run has already paid for.
+        if ($failedTargets.Count -gt 0) {
+            Write-Host "  $($failedTargets.Count) dependency check(s) failed. Retrying them once..." -ForegroundColor Yellow
+            $stillFailed = @()
+            $done = 0
+
+            foreach ($target in $failedTargets) {
+                $done++
+                Write-NpmProgress -Activity "Discovery pass $pass" -Status 'Retrying failed checks' `
+                    -Done $done -Total $failedTargets.Count -Id 1
+
+                $check = Get-ProcessDependencyClaim -SiteURL $SiteURL -Token $Token -ProcessUniqueId $target
+                if (-not $check.Success) {
+                    $stillFailed += [PSCustomObject]@{
+                        UniqueId = $target
+                        Status   = $check.Status
+                        Error    = $check.Error
+                    }
+                    continue
+                }
+                $allClaims += @($check.Claims)
+            }
+            Complete-NpmProgress -Activity "Discovery pass $pass" -Id 1
+            $failedTargets = $stillFailed
         }
 
         if ($failedTargets.Count -gt 0) {
-            $plan.Status = 'Blocked'
-            $plan.Log += "Dependency check failed for $($failedTargets.Count) target(s): $($failedTargets -join ', ')"
-            Write-Host "  Dependency check failed for $($failedTargets.Count) target(s). Cannot plan safely." -ForegroundColor Red
-            return $plan
+            $names = @($failedTargets | ForEach-Object {
+                $e = Get-NpmIndexEntry -Index $Index -UniqueId $_.UniqueId
+                $label = if ($e) { $e.Name } else { $_.UniqueId }
+                "$label ($($_.UniqueId)): HTTP $($_.Status) $($_.Error)"
+            })
+
+            Write-Host "  Dependency check still failing for $($failedTargets.Count) target(s) after retry:" -ForegroundColor Red
+            foreach ($n in $names) { Write-Host "    $n" -ForegroundColor Red }
+
+            $proceed = $false
+            if ($null -ne $OnFailedTargets) {
+                $proceed = [bool](& $OnFailedTargets $failedTargets)
+            }
+
+            if (-not $proceed) {
+                # A failed check is NOT an empty dependency list. Proceeding would
+                # delete a process whose references were never examined.
+                $plan.Status = 'Blocked'
+                $plan.FailedTargets = @($failedTargets)
+                $plan.Log += "Dependency check failed for $($failedTargets.Count) target(s) after retry: $($names -join '; ')"
+                Write-Host "  Cannot plan safely." -ForegroundColor Red
+                return $plan
+            }
+
+            # Proceeding with the subset that checked cleanly. The failures are
+            # dropped from the target set entirely, not merely skipped later, so
+            # nothing downstream can delete one of them by accident.
+            $excluded = @{}
+            foreach ($f in $failedTargets) { $excluded[$f.UniqueId.ToLowerInvariant()] = $true }
+
+            $TargetUniqueIds = @($TargetUniqueIds | Where-Object { -not $excluded.ContainsKey($_.ToLowerInvariant()) })
+            $plan.TargetUniqueIds = @($TargetUniqueIds)
+            $plan.FailedTargets = @($failedTargets)
+            $plan.Log += "Excluded $($failedTargets.Count) target(s) whose dependency check failed: $($names -join '; ')"
+            Write-Host "  Continuing with $($TargetUniqueIds.Count) target(s); the failures are excluded." -ForegroundColor Yellow
+
+            if ($TargetUniqueIds.Count -eq 0) {
+                $plan.Status = 'Blocked'
+                $plan.Log += 'Every target failed its dependency check; nothing is left to plan'
+                return $plan
+            }
         }
 
         $candidates = @(Get-DependencyCandidate -Claims $allClaims -TargetUniqueIds $TargetUniqueIds)
         Write-Host "  $($allClaims.Count) claim(s) across $($candidates.Count) process(es)" -ForegroundColor Gray
 
-        foreach ($candidate in $candidates) { [void](Add-LedgerEntry -UniqueId $candidate) }
+        Write-Host "  Building ledger for $($candidates.Count) process(es)..." -ForegroundColor Gray
+        $done = 0
+        foreach ($candidate in $candidates) {
+            $done++
+            Write-NpmProgress -Activity "Discovery pass $pass" -Status 'Fetching process models' `
+                -Done $done -Total $candidates.Count -Id 1
+            [void](Add-LedgerEntry -UniqueId $candidate)
+        }
+        Complete-NpmProgress -Activity "Discovery pass $pass" -Id 1
+        Write-Host "`r    Fetched $($candidates.Count) of $($candidates.Count).                    " -ForegroundColor Gray
 
         # Restore archived participants so their suppressed Input/Output edges
         # become visible to the next pass.
@@ -1444,8 +1854,13 @@ function New-ProcessDeletePlan {
             $isArchived = $false
             if ($null -ne $record) { $isArchived = ($record.WasArchived -and -not $record.RestoredByThisRun) }
 
+            # Both ends in the delete set means the pair is not work and not a
+            # decision; reconciling it only produces lines to wave through.
+            $bothDeleted = $targetLookup.ContainsKey($relatedId.ToLowerInvariant())
+
             $reconciliation += @(Test-DependencyReconciliation -QueriedUniqueId $target -RelatedUniqueId $relatedId `
-                -Claims $allClaims -Sites $allSites -RelatedIsArchived $isArchived)
+                -Claims $allClaims -Sites $allSites -RelatedIsArchived $isArchived `
+                -BothSidesDeleted $bothDeleted)
         }
     }
 
@@ -1461,6 +1876,7 @@ function New-ProcessDeletePlan {
             OriginalGroupId       = $_.OriginalGroupId
             RestoredByThisRun     = $_.RestoredByThisRun
             Denormalized          = $_.Denormalized
+            Deleted               = $_.Deleted
         }
     })
     $plan.Claims = $allClaims
@@ -1483,6 +1899,24 @@ function New-ProcessDeletePlan {
 # ============================================================================
 # PLAN PREVIEW
 # ============================================================================
+
+function Resolve-PlanProcessName {
+    # The plan ledger is the first source of truth because it was captured at
+    # plan time; the index is the fallback for anything the ledger never saw.
+    param($Plan, $Index, [string]$UniqueId)
+
+    if (-not $UniqueId) { return '(unknown)' }
+
+    $record = @($Plan.Ledger | Where-Object { $_.UniqueId -eq $UniqueId })
+    if ($record.Count -gt 0 -and $record[0].Name) { return $record[0].Name }
+
+    if ($null -ne $Index) {
+        $entry = Get-NpmIndexEntry -Index $Index -UniqueId $UniqueId
+        if ($null -ne $entry -and $entry.Name) { return $entry.Name }
+    }
+
+    return $UniqueId
+}
 
 function Show-ProcessDeletePlan {
     param($Plan, $Index)
@@ -1519,13 +1953,53 @@ function Show-ProcessDeletePlan {
         }
     }
 
+    $notApplicable = @($Plan.Reconciliation | Where-Object { $_.Status -eq 'NotApplicable' })
+    if ($notApplicable.Count -gt 0) {
+        Write-Host "`n$($notApplicable.Count) reconciliation entr(ies) skipped: both sides of the pair are being deleted." -ForegroundColor Gray
+        Write-Host "They are recorded in the plan file for audit but need no decision." -ForegroundColor Gray
+    }
+
+    $known = @($Plan.Reconciliation | Where-Object { $_.Status -eq 'MatchWithKnownAsymmetry' })
+    if ($known.Count -gt 0) {
+        Write-Host "`n$($known.Count) entr(ies) differ by the known child-reference asymmetry (warning, not a gate)." -ForegroundColor Yellow
+        Write-Host "See the open question in API_ARCHITECTURE.md." -ForegroundColor Yellow
+    }
+
     $problems = @($Plan.Reconciliation | Where-Object { $_.Status -eq 'Mismatch' })
     if ($problems.Count -gt 0) {
-        Write-Host "`nRECONCILIATION MISMATCHES:" -ForegroundColor Red
+        Write-Host "`nRECONCILIATION MISMATCHES ($($problems.Count)):" -ForegroundColor Red
         Write-Host "The dependency API and the process JSON disagree. Investigate before deleting." -ForegroundColor Red
-        foreach ($p in $problems) {
-            Write-Host "  $($p.Category): claimed $($p.Claimed), located $($p.Located) - $($p.Note)" -ForegroundColor Red
+
+        $targetLookup = @{}
+        foreach ($t in @($Plan.TargetUniqueIds)) { $targetLookup[$t.ToLowerInvariant()] = $true }
+
+        # Grouped by the queried process so an operator scans by process rather
+        # than down 120 undifferentiated rows.
+        foreach ($group in ($problems | Group-Object QueriedUniqueId)) {
+            $queriedName = Resolve-PlanProcessName -Plan $Plan -Index $Index -UniqueId $group.Name
+            Write-Host "`n  $queriedName" -ForegroundColor Red
+
+            foreach ($p in $group.Group) {
+                $relatedName = Resolve-PlanProcessName -Plan $Plan -Index $Index -UniqueId $p.RelatedUniqueId
+                $survives = if ($targetLookup.ContainsKey($p.RelatedUniqueId.ToLowerInvariant())) { 'also a target' } else { 'survives' }
+
+                Write-Host ("    {0,-6} -> {1}   claimed {2}, located {3}   [{4}]" -f `
+                    $p.Category, $relatedName, $p.Claimed, $p.Located, $survives) -ForegroundColor Red
+
+                # Name the sites the run would actually edit for this pair, so
+                # the operator can go and look at them.
+                $pairSites = @($Plan.Sites | Where-Object {
+                    $_.Category -eq $p.Category -and (
+                        ($_.HolderUniqueId -eq $p.QueriedUniqueId -and $_.TargetUniqueId -eq $p.RelatedUniqueId) -or
+                        ($_.HolderUniqueId -eq $p.RelatedUniqueId -and $_.TargetUniqueId -eq $p.QueriedUniqueId)
+                    )
+                })
+                foreach ($site in $pairSites) {
+                    Write-Host "           $($site.Path)" -ForegroundColor DarkGray
+                }
+            }
         }
+        Write-Host ""
     }
 
     $suppressed = @($Plan.Reconciliation | Where-Object { $_.Suppressed -and $_.Located -gt 0 })
@@ -1715,6 +2189,16 @@ function Invoke-ProcessTargetDeletion {
         Write-Host "`r  Deleting $i of $($targets.Count)..." -NoNewline -ForegroundColor Red
 
         $ok = Remove-NpmProcess -SiteURL $SiteURL -Token $Token -ProcessUniqueId $target -ProcessGroupUniqueId $groupUniqueId
+
+        # Marked on the ledger so the unwind pass below does not try to
+        # re-archive something that no longer exists. Before the Hold phase runs
+        # a target IS an archived process this run restored, so it matches the
+        # re-archive filter on every count except that it is gone.
+        if ($ok -and $record.Count -gt 0) {
+            if ($record[0].PSObject.Properties['Deleted']) { $record[0].Deleted = $true }
+            else { $record[0] | Add-Member -NotePropertyName Deleted -NotePropertyValue $true -Force }
+        }
+
         $results += [PSCustomObject]@{
             ObjectType = 'Process'; ObjectID = $target; Name = $name
             Operation = 'Delete'
@@ -1746,7 +2230,9 @@ function Restore-ProcessPlanState {
     )
 
     $results = @()
-    $toRestore = @($Plan.Ledger | Where-Object { $_.WasArchived -and $_.RestoredByThisRun -and -not $_.Denormalized })
+    $toRestore = @($Plan.Ledger | Where-Object {
+        $_.WasArchived -and $_.RestoredByThisRun -and -not $_.Denormalized -and -not $_.Deleted
+    })
 
     if ($toRestore.Count -eq 0) { return $results }
 

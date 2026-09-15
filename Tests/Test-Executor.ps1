@@ -269,6 +269,86 @@ Assert-Equal 'Blocked' $plan3.Status 'a failed dependency check blocks planning'
 Assert-Equal 0 @($plan3.WorkItems).Count 'a blocked plan queues no work'
 Assert-True (@($plan3.Log) -join ' ' -like '*failed*') 'the block reason is logged'
 
+# ---------------------------------------------------------------------------
+Write-Host "`nScenario: a CLEAN dependency check is not a failed one" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# The inverse of the scenario above, and the one that was missing. The tenant
+# answers HTTP 200 with an empty body for a process that has no dependencies.
+# PowerShell unrolls an empty array on return, so the old code assigned $null at
+# the call site and read a clean check as a failed one: on the measured tenant
+# that blocked 392 of 497 targets, which is to say every dependency-free process.
+
+$CleanA = 'aaaaaaaa-0000-0000-0000-000000000001'
+$CleanB = 'bbbbbbbb-0000-0000-0000-000000000002'
+
+function Invoke-NpmApi {
+    param([string]$Url,[string]$Token,[string]$Method='Get',$Body=$null,[int]$MaxRetries=0)
+
+    function Ok2($r) { return [PSCustomObject]@{ Success=$true; StatusCode=200; Response=$r; Error=$null } }
+
+    if ($Url -match 'ListType=(\d+)') {
+        $items = @()
+        if ([int]$Matches[1] -eq 0) {
+            $items = @(
+                [PSCustomObject]@{ processUniqueId = $CleanA; id = 11; processName = 'Clean A'; groupId = 5 },
+                [PSCustomObject]@{ processUniqueId = $CleanB; id = 12; processName = 'Clean B'; groupId = 5 }
+            )
+        }
+        return Ok2 ([PSCustomObject]@{ items = $items })
+    }
+    # An empty body is what the tenant actually sends for "no dependencies".
+    if ($Url -match 'CheckProcessDependencies') { return Ok2 $null }
+    if ($Method -eq 'Get' -and $Url -match '/Api/v1/Processes/([0-9a-fA-F\-]+)$') {
+        return Ok2 ([PSCustomObject]@{ processJson = [PSCustomObject]@{
+            UniqueId = $Matches[1]; Name = 'Clean'; GroupId = 5; GroupUniqueId = 'g-5'; StateId = 1 } })
+    }
+    return Ok2 $null
+}
+
+# Pure: the shape of the return value, independent of any caller.
+$clean = Get-ProcessDependencyClaim -SiteURL 'https://mock' -Token 't' -ProcessUniqueId $CleanA
+Assert-Equal $true $clean.Success 'an empty dependency payload is a SUCCESSFUL check'
+Assert-Equal 0 @($clean.Claims).Count 'an empty payload yields zero claims'
+Assert-True ($null -ne $clean.Claims) 'Claims is an empty collection, never $null'
+Assert-True ($clean.Claims -is [array]) 'Claims survives the return as an array rather than unrolling'
+
+$indexClean = Get-NpmProcessIndex -SiteURL 'https://mock' -Token 't'
+$planClean = New-ProcessDeletePlan -SiteURL 'https://mock' -Token 't' `
+    -TargetUniqueIds @($CleanA, $CleanB) -Index $indexClean -HoldingGroupId 999 -AllowRestore $true
+
+Assert-True ($planClean.Status -ne 'Blocked') 'a tenant-wide clean dependency result does NOT block the plan'
+Assert-Equal 'Planned' $planClean.Status 'the plan reaches Planned'
+Assert-Equal 0 @($planClean.Claims).Count 'no claims were discovered, correctly'
+Assert-Equal 0 @($planClean.WorkItems).Count 'dependency-free targets queue no reference removal'
+Assert-Equal 0 @($planClean.FailedTargets).Count 'no target is recorded as failed'
+Assert-Equal 2 @($planClean.TargetUniqueIds).Count 'both targets stay in the delete set'
+
+# ---------------------------------------------------------------------------
+Write-Host "`nScenario: reconciliation skips pairs where both sides are deleted" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# 114 of the 120 mismatches on the measured tenant were pairs like this. The
+# references between them cease to exist when both are deleted, so gating on
+# them asked the operator to adjudicate 120 lines to protect 6.
+
+$claimsPair = @(
+    [PSCustomObject]@{ QueriedUniqueId=$AcrId; RelatedUniqueId=$DtId; Type='Linked Process'; Category='Link' },
+    [PSCustomObject]@{ QueriedUniqueId=$AcrId; RelatedUniqueId=$DtId; Type='Linked Process'; Category='Link' }
+)
+
+$bothGone = @(Test-DependencyReconciliation -QueriedUniqueId $AcrId -RelatedUniqueId $DtId `
+    -Claims $claimsPair -Sites @() -BothSidesDeleted $true)
+$bothLink = @($bothGone | Where-Object { $_.Category -eq 'Link' })[0]
+
+Assert-Equal 'NotApplicable' $bothLink.Status 'a pair with both sides deleted is NotApplicable, not a mismatch'
+Assert-Equal 0 @($bothGone | Where-Object { $_.Status -eq 'Mismatch' }).Count 'no category of that pair gates the run'
+Assert-Equal 2 $bothLink.Claimed 'the claim count is still recorded for the audit trail'
+
+# One side surviving is exactly the case the gate exists for, so it still fires.
+$oneSide = @(Test-DependencyReconciliation -QueriedUniqueId $AcrId -RelatedUniqueId $DtId `
+    -Claims $claimsPair -Sites @() -BothSidesDeleted $false)
+Assert-Equal 'Mismatch' @($oneSide | Where-Object { $_.Category -eq 'Link' })[0].Status `
+    'a surviving holder still raises a mismatch'
+
 Write-Host "`n======================================" -ForegroundColor Cyan
 Write-Host "  Passed: $script:Pass   Failed: $script:Fail" -ForegroundColor $(if ($script:Fail -eq 0) { 'Green' } else { 'Red' })
 Write-Host "======================================`n" -ForegroundColor Cyan
