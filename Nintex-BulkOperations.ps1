@@ -1,8 +1,90 @@
 # Nintex Process Manager Bulk Operations Script
-# Version 4.0 (Archived Document Deletion)
 # Supports: Archive, Restore, Update Location, Update Ownership, and Delete operations
+#
+# The version lives in $script:ScriptVersion below and is printed at startup.
+# It is defined once so the header, the banner and the README cannot drift apart
+# the way they did through 1.1, 4.0 and "DEPRECATED".
 
 #Requires -Version 5.1
+
+<#
+.SYNOPSIS
+    Bulk archive, restore, relocate, re-own and delete content in Nintex Process
+    Manager.
+
+.DESCRIPTION
+    Runs two ways.
+
+    Interactively, with no parameters, it prints a menu and prompts for
+    everything, which is how an operator uses it.
+
+    Non-interactively, with -Mode, it skips the menu entirely and runs that one
+    mode from the parameters given. This is what makes the script scriptable and
+    testable: the menu used to run at load, so the file could not even be
+    dot-sourced without executing the whole program, and a redirected stdin sent
+    it into an infinite invalid-selection loop.
+
+.PARAMETER Mode
+    1 Archive, 2 Restore, 3 Update Location, 4 Update Ownership, 5 Delete.
+    Supplying it skips the menu and runs that mode once.
+
+.PARAMETER Source
+    Where the target set comes from: CSV, Group, Archived, or ArchivedDocuments.
+
+.PARAMETER ObjectType
+    Process, Document, or Both, for the modes that act on either.
+
+.PARAMETER WhatIf
+    Preview. Nothing is changed.
+
+.PARAMETER Force
+    Answer the confirmation prompts affirmatively and run unattended. It does NOT
+    wave through a reconciliation mismatch or a failed verification in Mode 5:
+    those still stop the run, because they mean the plan does not match the
+    tenant.
+
+.EXAMPLE
+    .\Nintex-BulkOperations.ps1
+    The menu, as before.
+
+.EXAMPLE
+    .\Nintex-BulkOperations.ps1 -Mode 5 -Source Archived -WhatIf
+    Dry-run a delete over the whole archive, no prompts.
+
+.EXAMPLE
+    .\Nintex-BulkOperations.ps1 -Mode 5 -Source CSV -CsvPath .\targets.csv -Force
+    Delete the processes named in a CSV, unattended.
+
+.EXAMPLE
+    . .\Nintex-BulkOperations.ps1
+    Dot-source for tests. Loads the functions and runs nothing.
+#>
+param(
+    [ValidateSet('1','2','3','4','5')]
+    [string]$Mode,
+
+    [ValidateSet('CSV','Group','Archived','ArchivedDocuments')]
+    [string]$Source,
+
+    [string]$CsvPath,
+
+    [int]$GroupId = -1,
+
+    [ValidateSet('Process','Document','Both')]
+    [string]$ObjectType,
+
+    [int]$RestoreGroupId = -1,
+
+    [string]$ConfigPath = 'config.txt',
+
+    [switch]$WhatIf,
+    [switch]$Force,
+    [switch]$ApprovalsEnabled,
+    [switch]$ThoroughScan,
+    [switch]$IncludeSubgroups
+)
+
+$script:ScriptVersion = '4.1'
 
 # ----------------------------------------------------------------------------
 # Dependency engine. Mode 5 delegates all dependency discovery, reference
@@ -13,7 +95,7 @@ $script:DependencyEnginePath = Join-Path $PSScriptRoot 'NintexProcessDependencie
 if (-not (Test-Path $script:DependencyEnginePath)) {
     Write-Host "Required file not found: $script:DependencyEnginePath" -ForegroundColor Red
     Write-Host "NintexProcessDependencies.ps1 must sit next to this script." -ForegroundColor Red
-    exit
+    throw "NintexProcessDependencies.ps1 not found next to Nintex-BulkOperations.ps1"
 }
 . $script:DependencyEnginePath
 
@@ -427,6 +509,47 @@ function Invoke-DeleteDocuments {
     return $response
 }
 
+# ListType 7 is the archived process list. Everything that reads it goes through
+# this one paginator: two copies existed with different page sizes, and Mode 5
+# happened to use the 20-per-page one, which is 25 round trips for 497 processes
+# where 3 will do.
+$script:ArchivedPageSize = 200
+
+function Get-ArchivedProcessItems {
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [int]$GroupID = -1,
+        [int]$PageSize = $script:ArchivedPageSize,
+        [switch]$Quiet
+    )
+
+    $allProcesses = @()
+    $page = 1
+
+    do {
+        $url = "$SiteURL/Bff/Process/api/v1/processes?Page=$page&PageSize=$PageSize&ListType=7"
+        $response = Invoke-ApiGet -Url $url -Token $Token
+
+        $items = @()
+        if ($response -and $response.items) { $items = @($response.items) }
+
+        if ($items.Count -gt 0 -and -not $Quiet) {
+            Write-Host "    Page ${page}: $($items.Count) archived process(es)" -ForegroundColor Gray
+        }
+
+        if ($GroupID -gt 0) {
+            $allProcesses += @($items | Where-Object { $_.groupId -eq $GroupID })
+        } else {
+            $allProcesses += $items
+        }
+
+        $page++
+    } while ($items.Count -eq $PageSize)
+
+    return $allProcesses
+}
+
 function Get-ArchivedProcesses {
     param(
         [string]$SiteURL,
@@ -435,31 +558,7 @@ function Get-ArchivedProcesses {
     )
 
     Write-Host "  Fetching archived processes..." -ForegroundColor Gray
-
-    $allProcesses = @()
-    $pageSize = 200
-    $page = 1
-
-    do {
-        $url = "$SiteURL/Bff/Process/api/v1/processes?Page=$page&PageSize=$pageSize&ListType=7"
-        $response = Invoke-ApiGet -Url $url -Token $Token
-
-        if ($response -and $response.items) {
-            Write-Host "    Page ${page}: Found $($response.items.Count) archived processes" -ForegroundColor Gray
-
-            if ($GroupID -gt 0) {
-                $groupProcesses = $response.items | Where-Object {
-                    $_.groupId -eq $GroupID
-                }
-                $allProcesses += $groupProcesses
-            } else {
-                $allProcesses += $response.items
-            }
-        }
-
-        $page++
-    } while ($response -and $response.items -and $response.items.Count -eq $pageSize)
-
+    $allProcesses = @(Get-ArchivedProcessItems -SiteURL $SiteURL -Token $Token -GroupID $GroupID)
     Write-Host "  Total archived processes: $($allProcesses.Count)" -ForegroundColor Gray
     return $allProcesses
 }
@@ -1453,14 +1552,16 @@ function Invoke-BulkArchive {
     }
     else {  # Group-based
         if ($ObjectType -eq "Processes" -or $ObjectType -eq "Both") {
-            $includeSubgroups = (Read-Host "Include subgroups? (Y/N)") -eq 'Y'
+            $includeSubgroups = if ($script:CliOptions.NonInteractive) { [bool]$script:CliOptions.IncludeSubgroups }
+                                else { (Read-Host "Include subgroups? (Y/N)") -eq 'Y' }
             $processes = Get-ProcessesFromGroup -SiteURL $SiteURL -Token $Token -GroupID $GroupID -GroupUniqueId $GroupUniqueId -IncludeSubgroups $includeSubgroups
             $processesToArchive = $processes | ForEach-Object { $_.processUniqueId }
             Write-Host "Found $($processesToArchive.Count) processes to archive" -ForegroundColor Green
         }
 
         if ($ObjectType -eq "Documents" -or $ObjectType -eq "Both") {
-            $includeSubgroups = (Read-Host "Include subgroups for documents? (Y/N)") -eq 'Y'
+            $includeSubgroups = if ($script:CliOptions.NonInteractive) { [bool]$script:CliOptions.IncludeSubgroups }
+                                else { (Read-Host "Include subgroups for documents? (Y/N)") -eq 'Y' }
             $documents = Get-DocumentsFromGroup -SiteURL $SiteURL -Token $Token -GroupID $GroupID -IncludeSubgroups $includeSubgroups
             $documentsToArchive = $documents | ForEach-Object { $_.id }
             Write-Host "Found $($documentsToArchive.Count) documents to archive" -ForegroundColor Green
@@ -1887,7 +1988,12 @@ function Invoke-BulkUpdateLocation {
             Write-Host "  - $invalidGroup" -ForegroundColor Yellow
         }
         Write-Host ""
-        $continue = Read-Host "Continue anyway? Rows with invalid groups will fail. (Y/N)"
+        $continue = 'N'
+        if (-not $script:CliOptions.NonInteractive) {
+            $continue = Read-Host "Continue anyway? Rows with invalid groups will fail. (Y/N)"
+        } else {
+            Write-Host "Running unattended; not continuing past unresolved target groups." -ForegroundColor Red
+        }
         if ($continue -ne 'Y') {
             Write-Host "Operation cancelled" -ForegroundColor Yellow
             return
@@ -2100,7 +2206,12 @@ function Invoke-BulkUpdateOwnership {
             Write-Host "  - $invalidUser" -ForegroundColor Yellow
         }
         Write-Host ""
-        $continue = Read-Host "Continue anyway? Rows with invalid users may fail. (Y/N)"
+        $continue = 'N'
+        if (-not $script:CliOptions.NonInteractive) {
+            $continue = Read-Host "Continue anyway? Rows with invalid users may fail. (Y/N)"
+        } else {
+            Write-Host "Running unattended; not continuing past unresolved users." -ForegroundColor Red
+        }
         if ($continue -ne 'Y') {
             Write-Host "Operation cancelled" -ForegroundColor Yellow
             return
@@ -2349,6 +2460,8 @@ function Archive-Process {
 # Returns an array of dependency types found (e.g., @("Linked Process", "Process Input", "Process Output"))
 # Legacy function for backwards compatibility - returns boolean
 function Get-AllArchivedProcesses {
+    # UniqueIds only. Shares Get-ArchivedProcessItems with Get-ArchivedProcesses
+    # so both read the archive at the same page size.
     param(
         [string]$SiteURL,
         [string]$Token
@@ -2356,41 +2469,15 @@ function Get-AllArchivedProcesses {
 
     Write-Host "  Fetching all archived processes from site..." -ForegroundColor Gray
 
-    $allArchivedProcesses = @()
-    $page = 1
-    $pageSize = 20
-    $hasMore = $true
-
-    # Fetch all archived processes with pagination
-    while ($hasMore) {
-        try {
-            # ListType=7 is for archived processes
-            $listUrl = "$SiteURL/Bff/Process/api/v1/processes?Page=$page&PageSize=$pageSize&ListType=7"
-            $response = Invoke-ApiGet -Url $listUrl -Token $Token
-
-            if ($response -and $response.items -and $response.items.Count -gt 0) {
-                Write-Host "  Page $page : Found $($response.items.Count) archived processes" -ForegroundColor Gray
-
-                # Add each process UniqueId to the list
-                foreach ($item in $response.items) {
-                    $allArchivedProcesses += $item.processUniqueId
-                }
-
-                # Check if there are more pages
-                if ($response.items.Count -lt $pageSize) {
-                    $hasMore = $false
-                } else {
-                    $page++
-                }
-            } else {
-                $hasMore = $false
-            }
-        }
-        catch {
-            Write-Host "  Error fetching archived processes: $($_.Exception.Message)" -ForegroundColor Red
-            $hasMore = $false
-        }
+    try {
+        $items = @(Get-ArchivedProcessItems -SiteURL $SiteURL -Token $Token)
     }
+    catch {
+        Write-Host "  Error fetching archived processes: $($_.Exception.Message)" -ForegroundColor Red
+        return @()
+    }
+
+    $allArchivedProcesses = @($items | ForEach-Object { $_.processUniqueId } | Where-Object { $_ })
 
     Write-Host "  Total archived processes found: $($allArchivedProcesses.Count)" -ForegroundColor Green
     return $allArchivedProcesses
@@ -2505,6 +2592,74 @@ function Delete-ArchivedDocuments {
 
 # Object-based version that works directly with PSObjects (avoids double serialization)
 # Object-based version that works directly with PSObjects (avoids double serialization)
+function Remove-HoldingGroup {
+    <#
+    .SYNOPSIS
+        Deletes the temporary holding group, but never while it still holds
+        processes.
+
+    .DESCRIPTION
+        The group exists only to park archived targets while their references
+        are removed. By cleanup time every target should have been deleted or
+        re-archived back to its own group, so a non-empty holding group means
+        something did not finish.
+
+        Deleting it anyway is how processes get lost: they are live, they are in
+        a group nobody will look in again, and the plan that named the group is
+        the only record. So it is left in place and named.
+    #>
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        $TempGroup,
+        [string]$GroupName
+    )
+
+    $results = @()
+    if (-not $TempGroup) { return $results }
+
+    $remaining = @()
+    try {
+        $remaining = @(Get-ProcessesFromGroup -SiteURL $SiteURL -Token $Token `
+            -GroupID $TempGroup.id -GroupUniqueId $TempGroup.uniqueId -IncludeSubgroups $false)
+    } catch {
+        Write-Host "  Could not read the holding group's contents: $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "  Leaving '$GroupName' in place rather than deleting a group of unknown contents." -ForegroundColor Yellow
+        return @([PSCustomObject]@{
+            ObjectType = 'ProcessGroup'; ObjectID = $TempGroup.uniqueId; Name = $GroupName
+            Operation = 'Cleanup'; Status = 'Skipped'
+            Message = 'Could not verify the group is empty; delete it manually after checking'
+        })
+    }
+
+    if ($remaining.Count -gt 0) {
+        Write-Host "  '$GroupName' still holds $($remaining.Count) process(es). NOT deleting it." -ForegroundColor Red
+        foreach ($proc in $remaining) {
+            $name = if ($proc.processName) { $proc.processName } else { $proc.processUniqueId }
+            Write-Host "      $name ($($proc.processUniqueId))" -ForegroundColor Red
+        }
+        Write-Host "  These are live processes. Move or archive them before deleting the group." -ForegroundColor Red
+
+        return @([PSCustomObject]@{
+            ObjectType = 'ProcessGroup'; ObjectID = $TempGroup.uniqueId; Name = $GroupName
+            Operation = 'Cleanup'; Status = 'Skipped'
+            Message = "Still holds $($remaining.Count) process(es): $(@($remaining | ForEach-Object { $_.processUniqueId }) -join ', ')"
+        })
+    }
+
+    $ok = Delete-ProcessGroup -SiteURL $SiteURL -Token $Token -GroupUniqueId $TempGroup.uniqueId
+    if (-not $ok) {
+        Write-Host "  Could not delete the holding group '$GroupName'. Delete it manually." -ForegroundColor Yellow
+    }
+
+    return @([PSCustomObject]@{
+        ObjectType = 'ProcessGroup'; ObjectID = $TempGroup.uniqueId; Name = $GroupName
+        Operation = 'Cleanup'
+        Status = $(if ($ok) { 'Success' } else { 'Failed' })
+        Message = $(if ($ok) { 'Empty holding group deleted' } else { 'Delete failed; remove it manually' })
+    })
+}
+
 function Invoke-BulkDeleteProcesses {
     <#
     .SYNOPSIS
@@ -2527,7 +2682,11 @@ function Invoke-BulkDeleteProcesses {
         [string]$GroupUniqueId = "",
         [string]$TempGroupName = "Bulk Delete Temporary Group",
         [string]$CurrentUsername,
-        [switch]$WhatIf
+        [switch]$WhatIf,
+        [switch]$Force,
+        [switch]$ApprovalsEnabled,
+        [switch]$ThoroughScan,
+        [switch]$IncludeSubgroups
     )
 
     Write-Host "`n========================================" -ForegroundColor Cyan
@@ -2542,10 +2701,10 @@ function Invoke-BulkDeleteProcesses {
         Write-Host "WARNING: This is a destructive operation." -ForegroundColor Red
     }
 
-    $approvalsEnabled = $false
-    $scanActive = $false
+    $approvalsEnabled = [bool]$ApprovalsEnabled
+    $scanActive = [bool]$ThoroughScan
 
-    if (-not $WhatIf) {
+    if (-not $WhatIf -and -not $Force) {
         $approvalsEnabled = (Read-Host "Are process approvals enabled in your environment? (Y/N)") -eq 'Y'
 
         Write-Host "`nInput and Output references can be invisible to the dependency API." -ForegroundColor Yellow
@@ -2558,8 +2717,31 @@ function Invoke-BulkDeleteProcesses {
             return
         }
     }
+    elseif ($Force -and -not $WhatIf) {
+        Write-Host "`n-Force supplied: running unattended, no confirmation prompts." -ForegroundColor Yellow
+        Write-Host "  Approvals enabled : $approvalsEnabled" -ForegroundColor Yellow
+        Write-Host "  Thorough scan     : $scanActive" -ForegroundColor Yellow
+    }
 
     $results = @()
+
+    # What to do when a target's dependency check still fails after a retry.
+    # A single transient 500 on a 497-item batch should not discard twenty
+    # minutes of discovery, but proceeding is always an explicit decision: the
+    # default, and the only answer available unattended, is to stop.
+    $failedTargetDecision = {
+        param($Failed)
+
+        if ($WhatIf) { return $false }
+        if ($Force) {
+            Write-Host "  -Force: not proceeding past failed dependency checks. Fix them and re-run." -ForegroundColor Red
+            return $false
+        }
+
+        Write-Host "`n$(@($Failed).Count) target(s) could not be checked for dependencies." -ForegroundColor Red
+        Write-Host "Proceeding excludes them from the run; the rest checked cleanly." -ForegroundColor Yellow
+        return ((Read-Host "Proceed with the targets that checked cleanly? (Y/N)") -eq 'Y')
+    }
 
     # ---- Gather the target set -------------------------------------------
     Write-Host "`n=== GATHERING TARGETS ===" -ForegroundColor Cyan
@@ -2578,7 +2760,10 @@ function Invoke-BulkDeleteProcesses {
         $rawIds = @(Get-AllArchivedProcesses -SiteURL $SiteURL -Token $Token)
     }
     else {
-        $includeSubgroups = (Read-Host "Include subgroups? (Y/N)") -eq 'Y'
+        $includeSubgroups = [bool]$IncludeSubgroups
+        if (-not $Force -and -not $WhatIf) {
+            $includeSubgroups = (Read-Host "Include subgroups? (Y/N)") -eq 'Y'
+        }
         $processes = Get-ProcessesFromGroup -SiteURL $SiteURL -Token $Token `
             -GroupID $GroupID -GroupUniqueId $GroupUniqueId -IncludeSubgroups $includeSubgroups
         $rawIds = @($processes | ForEach-Object { $_.processUniqueId })
@@ -2625,6 +2810,31 @@ function Invoke-BulkDeleteProcesses {
     }
     Write-Host "  $($targetUniqueIds.Count) target process(es)" -ForegroundColor Green
 
+    # ---- Snapshot original state BEFORE anything moves --------------------
+    # Everything the unwind path needs (was it archived, which group did it come
+    # from) has to be read now. The Hold phase below un-archives the archived
+    # targets and moves them into a temporary group, and every index read after
+    # that reports where they were put, not where they came from.
+    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $planPath = "Delete_Plan_$timestamp.json"
+
+    Write-Host "`n=== SNAPSHOT ===" -ForegroundColor Cyan
+    Write-Host "Recording the original state of $($targetUniqueIds.Count) target(s) before any change." -ForegroundColor Gray
+
+    # Numeric groupId to group UniqueId, so the ledger can name the home group
+    # in the form deletion and restore actually use.
+    $groupUniqueIdMap = @{}
+    try {
+        foreach ($g in @(Get-ProcessGroups -SiteURL $SiteURL -Token $Token)) {
+            if ($null -ne $g.id) { $groupUniqueIdMap["$($g.id)"] = $g.uniqueId }
+        }
+    } catch {
+        Write-Host "  Could not map group ids to unique ids: $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "  The plan will still record numeric group ids." -ForegroundColor Yellow
+    }
+
+    $snapshot = New-ProcessStateSnapshot -Index $index -UniqueIds $targetUniqueIds -GroupUniqueIdMap $groupUniqueIdMap
+
     # ---- Holding group ----------------------------------------------------
     # Only archived TARGETS go here. Dependency holders are restored in place to
     # their own group, because they survive the run and parking them elsewhere
@@ -2646,9 +2856,40 @@ function Invoke-BulkDeleteProcesses {
             return
         }
 
+        # The crash-safety net has to exist before the first mutation, not after
+        # it. This preliminary plan carries the pre-Hold ledger and the temp
+        # group, which is enough to unwind by hand if the run dies mid-restore.
+        $preliminary = New-DependencyPlan -SiteURL $SiteURL -TargetUniqueIds $targetUniqueIds
+        $preliminary.Status = 'Holding'
+        $preliminary.Ledger = @(ConvertTo-PlanLedgerEntry -Snapshot $snapshot)
+        $preliminary.Log += "Holding group '$TempGroupName' created: id $($tempGroup.id), uniqueId $($tempGroup.uniqueId)"
+        $preliminary.Log += "About to restore $($archivedTargets.Count) archived target(s) into the holding group"
+        [void](Export-DependencyPlan -Plan $preliminary -Path $planPath)
+        Write-Host "Pre-mutation plan written to: $planPath" -ForegroundColor Green
+
+        $held = 0
         foreach ($target in $archivedTargets) {
-            [void](Restore-NpmProcess -SiteURL $SiteURL -Token $Token -ProcessUniqueId $target -ProcessGroupId $tempGroup.id)
+            $held++
+            Write-NpmProgress -Activity 'Holding group' -Status 'Restoring archived targets' `
+                -Done $held -Total $archivedTargets.Count -Id 3
+
+            if (Restore-NpmProcess -SiteURL $SiteURL -Token $Token -ProcessUniqueId $target -ProcessGroupId $tempGroup.id) {
+                # Recorded per target as it happens, so an interrupted Hold phase
+                # leaves a plan that names exactly what was moved.
+                Set-ProcessSnapshotRestored -Snapshot $snapshot -UniqueId $target -HoldingGroupId $tempGroup.id
+            } else {
+                $preliminary.Log += "FAILED to restore target $target into the holding group"
+                $results += [PSCustomObject]@{
+                    ObjectType = 'Process'; ObjectID = $target; Name = ''
+                    Operation = 'Hold'; Status = 'Failed'; Message = 'Could not restore into the holding group'
+                }
+            }
+            $preliminary.Ledger = @(ConvertTo-PlanLedgerEntry -Snapshot $snapshot)
+            [void](Export-DependencyPlan -Plan $preliminary -Path $planPath)
         }
+        Complete-NpmProgress -Activity 'Holding group' -Id 3
+        Write-Host "  Held $($archivedTargets.Count) target(s) in '$TempGroupName'" -ForegroundColor Gray
+
         $index = Get-NpmProcessIndex -SiteURL $SiteURL -Token $Token
     }
 
@@ -2657,19 +2898,49 @@ function Invoke-BulkDeleteProcesses {
     $holdingGroupId = $null
     if ($tempGroup) { $holdingGroupId = $tempGroup.id }
 
-    $plan = New-ProcessDeletePlan -SiteURL $SiteURL -Token $Token `
-        -TargetUniqueIds $targetUniqueIds -Index $index `
-        -HoldingGroupId $holdingGroupId -AllowRestore (-not $WhatIf) `
-        -ScanActiveForInputOutput $scanActive
+    # Planning is read-only, so process models can be cached across its phases.
+    # Every write path evicts, and the cache is dropped before execution begins.
+    Enable-NpmModelCache
+    try {
+        $plan = New-ProcessDeletePlan -SiteURL $SiteURL -Token $Token `
+            -TargetUniqueIds $targetUniqueIds -Index $index `
+            -HoldingGroupId $holdingGroupId -AllowRestore (-not $WhatIf) `
+            -ScanActiveForInputOutput $scanActive `
+            -PreHoldSnapshot $snapshot `
+            -OnFailedTargets $failedTargetDecision
+    }
+    finally {
+        Write-Host "  Model cache served $(Get-NpmModelCacheHitCount) repeat read(s)" -ForegroundColor Gray
+        Disable-NpmModelCache
+    }
 
     if ($plan.Status -eq 'Blocked') {
         Write-Host "`nPlanning was blocked. Nothing has been deleted." -ForegroundColor Red
         foreach ($line in @($plan.Log)) { Write-Host "  $line" -ForegroundColor Red }
+
+        # Anything the Hold phase pulled out of the archive has to go back, or
+        # the tenant is left with live copies of processes that were archived.
+        if ($tempGroup) {
+            $plan.Ledger = @(ConvertTo-PlanLedgerEntry -Snapshot $snapshot)
+            [void](Export-DependencyPlan -Plan $plan -Path $planPath)
+            $results += @(Restore-ProcessPlanState -SiteURL $SiteURL -Token $Token -Plan $plan -PlanPath $planPath -ApprovalsEnabled $approvalsEnabled)
+            Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName
+            Save-DeleteResults -Results $results -Timestamp $timestamp
+        }
         return
     }
 
-    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    $planPath = "Delete_Plan_$timestamp.json"
+    # Targets excluded by a failed dependency check are named in the results CSV
+    # rather than disappearing quietly.
+    foreach ($failed in @($plan.FailedTargets)) {
+        $results += [PSCustomObject]@{
+            ObjectType = 'Process'; ObjectID = $failed.UniqueId; Name = ''
+            Operation = 'DependencyCheck'; Status = 'Failed'
+            Message = "Excluded from the run: HTTP $($failed.Status) $($failed.Error)"
+        }
+    }
+    $targetUniqueIds = @($plan.TargetUniqueIds)
+
     [void](Export-DependencyPlan -Plan $plan -Path $planPath)
     Write-Host "Plan written to: $planPath" -ForegroundColor Green
 
@@ -2681,13 +2952,21 @@ function Invoke-BulkDeleteProcesses {
     }
 
     # ---- Remove references and verify -------------------------------------
+    # Only genuine mismatches gate. Pairs where both sides are being deleted are
+    # 'NotApplicable' and known child-reference asymmetry is a warning; gating on
+    # those meant 120 lines to adjudicate where 6 mattered.
     $mismatches = @($plan.Reconciliation | Where-Object { $_.Status -eq 'Mismatch' })
     if ($mismatches.Count -gt 0) {
         Write-Host "`n$($mismatches.Count) reconciliation mismatch(es) above." -ForegroundColor Red
-        if ((Read-Host "Continue anyway? (Y/N)") -ne 'Y') {
+        $continue = $false
+        if (-not $Force) { $continue = ((Read-Host "Continue anyway? (Y/N)") -eq 'Y') }
+        else { Write-Host "-Force does not wave through reconciliation mismatches. Stopping." -ForegroundColor Red }
+
+        if (-not $continue) {
             Write-Host "Operation cancelled. Nothing has been deleted." -ForegroundColor Yellow
             Write-Host "Restored processes still need re-archiving; see $planPath" -ForegroundColor Yellow
             $results += @(Restore-ProcessPlanState -SiteURL $SiteURL -Token $Token -Plan $plan -PlanPath $planPath -ApprovalsEnabled $approvalsEnabled)
+            if ($tempGroup) { $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName) }
             Save-DeleteResults -Results $results -Timestamp $timestamp
             return
         }
@@ -2700,9 +2979,14 @@ function Invoke-BulkDeleteProcesses {
     if (@($execution.VerificationFailed).Count -gt 0) {
         Write-Host "`nVerification failed: references remain on $(@($execution.VerificationFailed).Count) process(es)." -ForegroundColor Red
         Write-Host "Deleting now would leave broken references behind." -ForegroundColor Red
-        if ((Read-Host "Continue to deletion anyway? (Y/N)") -ne 'Y') {
+        $continue = $false
+        if (-not $Force) { $continue = ((Read-Host "Continue to deletion anyway? (Y/N)") -eq 'Y') }
+        else { Write-Host "-Force does not wave through a failed verification. Stopping." -ForegroundColor Red }
+
+        if (-not $continue) {
             Write-Host "Operation cancelled before deletion." -ForegroundColor Yellow
             $results += @(Restore-ProcessPlanState -SiteURL $SiteURL -Token $Token -Plan $plan -PlanPath $planPath -ApprovalsEnabled $approvalsEnabled)
+            if ($tempGroup) { $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName) }
             Save-DeleteResults -Results $results -Timestamp $timestamp
             return
         }
@@ -2714,9 +2998,17 @@ function Invoke-BulkDeleteProcesses {
     Write-Host "========================================" -ForegroundColor Red
     Write-Host "About to permanently delete $($targetUniqueIds.Count) process(es). This cannot be undone." -ForegroundColor Red
 
-    if ((Read-Host "Type 'DELETE' to confirm") -ne 'DELETE') {
+    $confirmed = $Force
+    if ($Force) {
+        Write-Host "-Force supplied: proceeding without the typed confirmation." -ForegroundColor Red
+    } else {
+        $confirmed = ((Read-Host "Type 'DELETE' to confirm") -eq 'DELETE')
+    }
+
+    if (-not $confirmed) {
         Write-Host "Deletion cancelled." -ForegroundColor Yellow
         $results += @(Restore-ProcessPlanState -SiteURL $SiteURL -Token $Token -Plan $plan -PlanPath $planPath -ApprovalsEnabled $approvalsEnabled)
+        if ($tempGroup) { $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName) }
         Save-DeleteResults -Results $results -Timestamp $timestamp
         return
     }
@@ -2729,15 +3021,16 @@ function Invoke-BulkDeleteProcesses {
     # ---- Clean up the holding group --------------------------------------
     if ($tempGroup) {
         Write-Host "`n=== CLEANUP ===" -ForegroundColor Cyan
-        if (-not (Delete-ProcessGroup -SiteURL $SiteURL -Token $Token -GroupUniqueId $tempGroup.uniqueId)) {
-            Write-Host "  Could not delete the holding group '$TempGroupName'. Delete it manually." -ForegroundColor Yellow
-        }
+        $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName)
     }
 
     # ---- Optional: delete the source group folders ------------------------
     if ($SourceType -eq "Group" -and $GroupUniqueId) {
         Write-Host "`n=== OPTIONAL: GROUP FOLDER CLEANUP ===" -ForegroundColor Cyan
-        if ((Read-Host "Also delete the process group folders themselves? (Y/N)") -eq 'Y') {
+        $deleteFolders = $false
+        if (-not $Force) { $deleteFolders = ((Read-Host "Also delete the process group folders themselves? (Y/N)") -eq 'Y') }
+
+        if ($deleteFolders) {
             $groupsToDelete = @(Get-GroupsInTree -SiteURL $SiteURL -Token $Token -RootGroupUniqueId $GroupUniqueId -IncludeRoot $true)
 
             if ($groupsToDelete.Count -eq 0) {
@@ -2880,54 +3173,101 @@ function Get-DryRunChoice {
 }
 
 # ============================================================================
-# MAIN SCRIPT
+# PARAMETER RESOLUTION
+# ============================================================================
+# Each resolver returns the supplied parameter when there is one and prompts
+# otherwise, so one copy of the mode dispatch serves both entry points.
+
+$script:CliOptions = @{}
+
+function Resolve-SourceType {
+    param([int]$Mode)
+
+    if ($script:CliOptions.Source) { return [string]$script:CliOptions.Source }
+    if ($script:CliOptions.NonInteractive) {
+        throw "-Source is required with -Mode $Mode"
+    }
+    return (Get-SourceType -Mode $Mode)
+}
+
+function Resolve-ObjectType {
+    param([int]$Mode)
+
+    if ($script:CliOptions.ObjectType) { return [string]$script:CliOptions.ObjectType }
+    if ($script:CliOptions.NonInteractive) { return 'Process' }
+    return (Get-ObjectType -Mode $Mode)
+}
+
+function Resolve-DryRunChoice {
+    if ($script:CliOptions.NonInteractive) { return [bool]$script:CliOptions.WhatIf }
+    return (Get-DryRunChoice)
+}
+
+function Resolve-CsvPath {
+    param([string]$Hint = '')
+
+    if ($script:CliOptions.CsvPath) { return [string]$script:CliOptions.CsvPath }
+    if ($script:CliOptions.NonInteractive) {
+        throw "-CsvPath is required for this mode and source"
+    }
+
+    $prompt = if ($Hint) { "Enter CSV file path ($Hint)" } else { 'Enter CSV file path' }
+    return (Read-Host $prompt)
+}
+
+function Resolve-ProcessGroup {
+    # Non-interactively the group comes from -GroupId, which means a lookup
+    # rather than a picker.
+    param([string]$SiteURL, [string]$Token, [string]$Prompt)
+
+    if (-not $script:CliOptions.NonInteractive) {
+        return (Select-ProcessGroup -SiteURL $SiteURL -Token $Token -Prompt $Prompt)
+    }
+
+    $id = [int]$script:CliOptions.GroupId
+    if ($id -le 0) { throw '-GroupId is required with -Source Group' }
+
+    $group = Get-ProcessGroupById -SiteURL $SiteURL -Token $Token -GroupId "$id"
+    if (-not $group) { throw "Process group $id was not found" }
+    return $group
+}
+
+function Resolve-RestoreGroupId {
+    if ($script:CliOptions.NonInteractive) { return [int]$script:CliOptions.RestoreGroupId }
+    return -1
+}
+
+# ============================================================================
+# MODE DISPATCH
 # ============================================================================
 
-# Clear screen
-Clear-Host
+function Invoke-BulkOperationMode {
+    <#
+    .SYNOPSIS
+        Runs one mode. Shared by the menu and the -Mode entry point.
+    #>
+    param(
+        [string]$mode,
+        $config,
+        [string]$token
+    )
 
-Write-Host "============================================" -ForegroundColor Cyan
-Write-Host "  NINTEX PROCESS MANAGER BULK OPERATIONS" -ForegroundColor Cyan
-Write-Host "============================================" -ForegroundColor Cyan
-Write-Host "  Version 4.0 (Archived Document Deletion)" -ForegroundColor Yellow
-Write-Host "  Script loaded: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Yellow
-Write-Host ""
-
-# Load configuration
-$config = Read-ConfigFile
-if (-not $config) {
-    Write-Host "Cannot proceed without valid configuration" -ForegroundColor Red
-    exit
-}
-
-# Authenticate
-$token = Get-AuthToken -SiteURL $config.SiteURL -Username $config.Username -Password $config.Password
-if (-not $token) {
-    Write-Host "Authentication failed. Cannot proceed." -ForegroundColor Red
-    exit
-}
-
-# Main loop
-$running = $true
-while ($running) {
-    Show-MainMenu
-    $mode = Read-Host "Select Mode"
-
+    $running = $true   # 'Q' clears this; the menu loop reads it back
     switch ($mode) {
         '1' {  # Bulk Archive
-            $sourceType = Get-SourceType -Mode 1
-            $objectType = Get-ObjectType -Mode 1
-            $isDryRun = Get-DryRunChoice
+            $sourceType = Resolve-SourceType -Mode 1
+            $objectType = Resolve-ObjectType -Mode 1
+            $isDryRun = Resolve-DryRunChoice
 
             if ($sourceType -eq "CSV") {
-                $csvPath = Read-Host "Enter CSV file path"
+                $csvPath = Resolve-CsvPath
                 if ($isDryRun) {
                     Invoke-BulkArchive -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -CsvPath $csvPath -WhatIf
                 } else {
                     Invoke-BulkArchive -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -CsvPath $csvPath
                 }
             } else {
-                $group = Select-ProcessGroup -SiteURL $config.SiteURL -Token $token -Prompt "Select Group to Archive"
+                $group = Resolve-ProcessGroup -SiteURL $config.SiteURL -Token $token -Prompt "Select Group to Archive"
                 if ($group) {
                     if ($isDryRun) {
                         Invoke-BulkArchive -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -GroupID $group.id -GroupUniqueId $group.uniqueId -WhatIf
@@ -2939,21 +3279,21 @@ while ($running) {
         }
 
         '2' {  # Bulk Restore
-            $sourceType = Get-SourceType -Mode 2
-            $objectType = Get-ObjectType -Mode 2
-            $isDryRun = Get-DryRunChoice
+            $sourceType = Resolve-SourceType -Mode 2
+            $objectType = Resolve-ObjectType -Mode 2
+            $isDryRun = Resolve-DryRunChoice
 
             # Get restore target group
             $restoreGroupId = -1
             if ($config.DefaultRestoreGroupID -and $config.DefaultRestoreGroupID -match '^\d+$') {
-                $useDefault = Read-Host "Use default restore group ID $($config.DefaultRestoreGroupID)? (Y/N)"
+                $useDefault = if ($script:CliOptions.NonInteractive) { 'Y' } else { Read-Host "Use default restore group ID $($config.DefaultRestoreGroupID)? (Y/N)" }
                 if ($useDefault -eq 'Y') {
                     $restoreGroupId = [int]$config.DefaultRestoreGroupID
                 }
             }
 
             if ($restoreGroupId -lt 0) {
-                $restoreGroup = Select-ProcessGroup -SiteURL $config.SiteURL -Token $token -Prompt "Select Target Group for Restore"
+                $restoreGroup = Resolve-ProcessGroup -SiteURL $config.SiteURL -Token $token -Prompt "Select Target Group for Restore"
                 if ($restoreGroup) {
                     $restoreGroupId = $restoreGroup.id
                 }
@@ -2961,7 +3301,7 @@ while ($running) {
 
             if ($restoreGroupId -gt 0) {
                 if ($sourceType -eq "CSV") {
-                    $csvPath = Read-Host "Enter CSV file path"
+                    $csvPath = Resolve-CsvPath
                     if ($isDryRun) {
                         Invoke-BulkRestore -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -CsvPath $csvPath -RestoreGroupID $restoreGroupId -WhatIf
                     } else {
@@ -2978,9 +3318,9 @@ while ($running) {
         }
 
         '3' {  # Bulk Update Location
-            $objectType = Get-ObjectType -Mode 3
-            $csvPath = Read-Host "Enter CSV file path (must contain ID and NewGroupID columns)"
-            $isDryRun = Get-DryRunChoice
+            $objectType = Resolve-ObjectType -Mode 3
+            $csvPath = Resolve-CsvPath -Hint "must contain ID and NewGroupID columns"
+            $isDryRun = Resolve-DryRunChoice
             if ($isDryRun) {
                 Invoke-BulkUpdateLocation -SiteURL $config.SiteURL -Token $token -ObjectType $objectType -CsvPath $csvPath -WhatIf
             } else {
@@ -2989,8 +3329,8 @@ while ($running) {
         }
 
         '4' {  # Bulk Update Ownership
-            $csvPath = Read-Host "Enter CSV file path (must contain ProcessID, NewOwner, NewExpert columns)"
-            $isDryRun = Get-DryRunChoice
+            $csvPath = Resolve-CsvPath -Hint "must contain ProcessID, NewOwner, NewExpert columns"
+            $isDryRun = Resolve-DryRunChoice
             if ($isDryRun) {
                 Invoke-BulkUpdateOwnership -SiteURL $config.SiteURL -Token $token -CsvPath $csvPath -WhatIf
             } else {
@@ -2999,27 +3339,35 @@ while ($running) {
         }
 
         '5' {  # Bulk Delete Content
-            $sourceType = Get-SourceType -Mode 5
-            $isDryRun = Get-DryRunChoice
+            $sourceType = Resolve-SourceType -Mode 5
+            $isDryRun = Resolve-DryRunChoice
 
             $tempGroupName = $config.TempGroupName
             if (-not $tempGroupName) {
                 $tempGroupName = "Bulk Delete Temporary Group"
             }
 
+            # Unattended flags only. The interactive path leaves these off and
+            # Invoke-BulkDeleteProcesses prompts exactly as it always did.
+            $deleteSwitches = @{}
+            if ($script:CliOptions.Force)            { $deleteSwitches.Force = $true }
+            if ($script:CliOptions.ApprovalsEnabled) { $deleteSwitches.ApprovalsEnabled = $true }
+            if ($script:CliOptions.ThoroughScan)     { $deleteSwitches.ThoroughScan = $true }
+            if ($script:CliOptions.IncludeSubgroups) { $deleteSwitches.IncludeSubgroups = $true }
+
             if ($sourceType -eq "CSV") {
-                $csvPath = Read-Host "Enter CSV file path"
+                $csvPath = Resolve-CsvPath
                 if ($isDryRun) {
-                    Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -CsvPath $csvPath -TempGroupName $tempGroupName -CurrentUsername $config.Username -WhatIf
+                    Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -CsvPath $csvPath -TempGroupName $tempGroupName -CurrentUsername $config.Username -WhatIf @deleteSwitches
                 } else {
-                    Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -CsvPath $csvPath -TempGroupName $tempGroupName -CurrentUsername $config.Username
+                    Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -CsvPath $csvPath -TempGroupName $tempGroupName -CurrentUsername $config.Username @deleteSwitches
                 }
             } elseif ($sourceType -eq "Archived") {
                 # Handle bulk delete of all archived processes
                 if ($isDryRun) {
-                    Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -TempGroupName $tempGroupName -CurrentUsername $config.Username -WhatIf
+                    Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -TempGroupName $tempGroupName -CurrentUsername $config.Username -WhatIf @deleteSwitches
                 } else {
-                    Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -TempGroupName $tempGroupName -CurrentUsername $config.Username
+                    Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -TempGroupName $tempGroupName -CurrentUsername $config.Username @deleteSwitches
                 }
             } elseif ($sourceType -eq "ArchivedDocuments") {
                 # Handle bulk delete of all archived documents
@@ -3057,7 +3405,7 @@ while ($running) {
                         Write-Host "This action CANNOT be undone." -ForegroundColor Red
                         Write-Host ""
 
-                        $confirm1 = Read-Host "Type 'DELETE ALL DOCUMENTS' to confirm"
+                        $confirm1 = if ($script:CliOptions.Force) { 'DELETE ALL DOCUMENTS' } else { Read-Host "Type 'DELETE ALL DOCUMENTS' to confirm" }
                         if ($confirm1 -eq 'DELETE ALL DOCUMENTS') {
                             Write-Host "`nDeleting archived documents..." -ForegroundColor Cyan
 
@@ -3077,12 +3425,12 @@ while ($running) {
                     }
                 }
             } else {
-                $group = Select-ProcessGroup -SiteURL $config.SiteURL -Token $token -Prompt "Select Group to Delete (WARNING: Destructive!)"
+                $group = Resolve-ProcessGroup -SiteURL $config.SiteURL -Token $token -Prompt "Select Group to Delete (WARNING: Destructive!)"
                 if ($group) {
                     if ($isDryRun) {
-                        Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -GroupID $group.id -GroupUniqueId $group.uniqueId -TempGroupName $tempGroupName -CurrentUsername $config.Username -WhatIf
+                        Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -GroupID $group.id -GroupUniqueId $group.uniqueId -TempGroupName $tempGroupName -CurrentUsername $config.Username -WhatIf @deleteSwitches
                     } else {
-                        Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -GroupID $group.id -GroupUniqueId $group.uniqueId -TempGroupName $tempGroupName -CurrentUsername $config.Username
+                        Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -GroupID $group.id -GroupUniqueId $group.uniqueId -TempGroupName $tempGroupName -CurrentUsername $config.Username @deleteSwitches
                     }
                 }
             }
@@ -3098,10 +3446,147 @@ while ($running) {
         }
     }
 
-    if ($running) {
-        Write-Host "`nPress any key to continue..." -ForegroundColor Gray
+
+    return $running
+}
+
+# ============================================================================
+# MAIN SCRIPT
+# ============================================================================
+
+function Start-BulkOperations {
+    param(
+        [string]$Mode,
+        [string]$Source,
+        [string]$CsvPath,
+        [int]$GroupId = -1,
+        [string]$ObjectType,
+        [int]$RestoreGroupId = -1,
+        [string]$ConfigPath = 'config.txt',
+        [switch]$WhatIf,
+        [switch]$Force,
+        [switch]$ApprovalsEnabled,
+        [switch]$ThoroughScan,
+        [switch]$IncludeSubgroups
+    )
+
+    $nonInteractive = [bool]$Mode
+
+    $script:CliOptions = @{
+        NonInteractive   = $nonInteractive
+        Source           = $Source
+        CsvPath          = $CsvPath
+        GroupId          = $GroupId
+        ObjectType       = $ObjectType
+        RestoreGroupId   = $RestoreGroupId
+        WhatIf           = [bool]$WhatIf
+        Force            = [bool]$Force
+        ApprovalsEnabled = [bool]$ApprovalsEnabled
+        ThoroughScan     = [bool]$ThoroughScan
+        IncludeSubgroups = [bool]$IncludeSubgroups
+    }
+
+    # Clearing the screen throws away whatever the caller was looking at, which
+    # is fine for a menu session and wrong for a scripted run.
+    if (-not $nonInteractive) { Clear-Host }
+
+    Write-Host "============================================" -ForegroundColor Cyan
+    Write-Host "  NINTEX PROCESS MANAGER BULK OPERATIONS" -ForegroundColor Cyan
+    Write-Host "============================================" -ForegroundColor Cyan
+    Write-Host "  Version $script:ScriptVersion" -ForegroundColor Yellow
+    Write-Host "  Script loaded: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Yellow
+    Write-Host ""
+
+    $config = Read-ConfigFile -ConfigPath $ConfigPath
+    if (-not $config) {
+        Write-Host "Cannot proceed without valid configuration" -ForegroundColor Red
+        return 2
+    }
+
+    $token = Get-AuthToken -SiteURL $config.SiteURL -Username $config.Username -Password $config.Password
+    if (-not $token) {
+        Write-Host "Authentication failed. Cannot proceed." -ForegroundColor Red
+        return 3
+    }
+
+    # ---- Non-interactive: run the one mode and exit with a status code ----
+    if ($nonInteractive) {
+        Write-Host "Running mode $Mode non-interactively." -ForegroundColor Cyan
+        try {
+            [void](Invoke-BulkOperationMode -mode $Mode -config $config -token $token)
+        }
+        catch {
+            Write-Host "Mode $Mode failed: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray
+            return 1
+        }
+        return 0
+    }
+
+    # ---- Interactive menu -------------------------------------------------
+    # The invalid-selection counter is the other half of the redirected-stdin
+    # fix: with stdin closed Read-Host returns nothing forever, and without a
+    # cap that is an infinite loop printing "Invalid selection" until killed.
+    $running = $true
+    $invalidSelections = 0
+    $maxInvalidSelections = 5
+
+    while ($running) {
+        Show-MainMenu
+        $selection = Read-Host "Select Mode"
+
+        if ($selection -notmatch '^[1-5Qq]$') {
+            $invalidSelections++
+            Write-Host "Invalid selection. Please try again. ($invalidSelections of $maxInvalidSelections)" -ForegroundColor Red
+
+            if ($invalidSelections -ge $maxInvalidSelections) {
+                Write-Host "Too many invalid selections; exiting." -ForegroundColor Red
+                Write-Host "If you meant to script this, use -Mode. See Get-Help .\Nintex-BulkOperations.ps1." -ForegroundColor Yellow
+                return 1
+            }
+            Wait-ForKeyPress
+            continue
+        }
+
+        $invalidSelections = 0
+        $running = Invoke-BulkOperationMode -mode $selection.ToUpperInvariant() -config $config -token $token
+
+        if ($running) { Wait-ForKeyPress }
+    }
+
+    Write-Host "Thank you for using Nintex Process Manager Bulk Operations!" -ForegroundColor Green
+    return 0
+}
+
+function Wait-ForKeyPress {
+    # ReadKey throws outright when console input is redirected, which is every
+    # scripted or piped invocation. There is nothing to wait for in that case.
+    if ([Console]::IsInputRedirected -or $null -eq $Host.UI.RawUI) { return }
+
+    Write-Host "`nPress any key to continue..." -ForegroundColor Gray
+    try {
         $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    }
+    catch {
+        # Some hosts (ISE, remoting) have a RawUI that cannot read keys either.
+        Start-Sleep -Milliseconds 250
     }
 }
 
-Write-Host "Thank you for using Nintex Process Manager Bulk Operations!" -ForegroundColor Green
+# ----------------------------------------------------------------------------
+# Entry point.
+#
+# Dot-sourcing (". .\Nintex-BulkOperations.ps1") loads the functions and runs
+# nothing, so tests and other scripts can use them. Running the file normally
+# starts the program. Without this guard the menu executed at load and there was
+# no way to reach a single function from outside.
+# ----------------------------------------------------------------------------
+if ($MyInvocation.InvocationName -ne '.') {
+    $exitCode = Start-BulkOperations -Mode $Mode -Source $Source -CsvPath $CsvPath `
+        -GroupId $GroupId -ObjectType $ObjectType -RestoreGroupId $RestoreGroupId `
+        -ConfigPath $ConfigPath -WhatIf:$WhatIf -Force:$Force `
+        -ApprovalsEnabled:$ApprovalsEnabled -ThoroughScan:$ThoroughScan `
+        -IncludeSubgroups:$IncludeSubgroups
+
+    exit $exitCode
+}

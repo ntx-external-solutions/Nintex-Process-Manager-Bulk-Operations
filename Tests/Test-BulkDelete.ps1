@@ -1,0 +1,283 @@
+<#
+.SYNOPSIS
+    Mode 5 orchestration tests: the Hold phase, the plan ledger, and holding
+    group cleanup, against a mocked tenant.
+
+.DESCRIPTION
+    Covers the defects a pure engine test cannot reach, because they live in the
+    order Invoke-BulkDeleteProcesses does things rather than in any one function:
+
+      - the plan ledger must record the state the targets were in BEFORE the
+        Hold phase un-archived them and moved them to a temporary group
+      - the plan must be on disk before the first mutation, not after it
+      - the temporary group must never be deleted while it still holds processes
+
+    This file dot-sources Nintex-BulkOperations.ps1, which is only possible
+    because the menu no longer runs at load.
+
+    Run:  pwsh -NoProfile -File Tests/Test-BulkDelete.ps1
+#>
+
+$ErrorActionPreference = 'Stop'
+$root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+. (Join-Path $root 'Nintex-BulkOperations.ps1')
+
+$script:Pass = 0
+$script:Fail = 0
+
+function Assert-Equal {
+    param($Expected, $Actual, [string]$Because)
+    if ($Expected -eq $Actual) { $script:Pass++; Write-Host "  PASS  $Because" -ForegroundColor Green }
+    else {
+        $script:Fail++
+        Write-Host "  FAIL  $Because" -ForegroundColor Red
+        Write-Host "        expected [$Expected] got [$Actual]" -ForegroundColor Red
+    }
+}
+function Assert-True { param([bool]$C,[string]$B) Assert-Equal -Expected $true -Actual $C -Because $B }
+
+# ---------------------------------------------------------------------------
+# Mock tenant: three archived processes in group 100, nothing depends on them.
+# ---------------------------------------------------------------------------
+$T1 = '11111111-1111-1111-1111-111111111111'
+$T2 = '22222222-2222-2222-2222-222222222222'
+$T3 = '33333333-3333-3333-3333-333333333333'
+
+$script:HomeGroupId       = 100
+$script:HomeGroupUniqueId = 'group-100-home'
+$script:TempGroupId       = 830
+$script:TempGroupUniqueId = 'group-830-temp'
+
+function Reset-MockTenant {
+    $script:Archived = @{ $T1 = $true; $T2 = $true; $T3 = $true }
+    $script:GroupOf  = @{ $T1 = 100;   $T2 = 100;   $T3 = 100 }
+    $script:Deleted  = @()
+    $script:RestoreCalls = @()
+    $script:PlanPathAtFirstRestore = $null
+    $script:PlanAtFirstRestore = $null
+    $script:TempGroupDeleted = $false
+    $script:TempGroupContents = @()
+    $script:ArchiveCalls = @()
+}
+Reset-MockTenant
+
+$script:Names = @{ $T1 = 'Alpha'; $T2 = 'Bravo'; $T3 = 'Charlie' }
+
+function Invoke-NpmApi {
+    param([string]$Url,[string]$Token,[string]$Method='Get',$Body=$null,[int]$MaxRetries=0)
+
+    function Ok($r) { return [PSCustomObject]@{ Success=$true; StatusCode=200; Response=$r; Error=$null } }
+
+    if ($Url -match 'ListType=(\d+)') {
+        $wantArchived = ([int]$Matches[1] -eq 7)
+        $items = @()
+        foreach ($id in @($T1,$T2,$T3)) {
+            if ($script:Archived[$id] -ne $wantArchived) { continue }
+            $items += [PSCustomObject]@{
+                processUniqueId = $id
+                id              = 1000 + [int]($id.Substring(0,1))
+                processName     = $script:Names[$id]
+                groupId         = $script:GroupOf[$id]
+            }
+        }
+        return Ok ([PSCustomObject]@{ items = $items })
+    }
+
+    # No dependencies anywhere: an empty body, exactly as the tenant sends it.
+    if ($Url -match 'CheckProcessDependencies') { return Ok $null }
+
+    if ($Url -match 'RestoreProcess') {
+        $id = $Body.processUniqueId
+
+        # Snapshot the plan file as it stood at the moment of the very first
+        # mutation. That file is what a crashed run would be recovered from.
+        if ($script:RestoreCalls.Count -eq 0) {
+            $found = @(Get-ChildItem -Path . -Filter 'Delete_Plan_*.json' -ErrorAction SilentlyContinue)
+            if ($found.Count -gt 0) {
+                $script:PlanPathAtFirstRestore = $found[0].FullName
+                $script:PlanAtFirstRestore = Get-Content $found[0].FullName -Raw | ConvertFrom-Json
+            }
+        }
+
+        $script:RestoreCalls += $id
+        $script:Archived[$id] = $false
+        $script:GroupOf[$id]  = [int]$Body.processGroupId
+        return Ok ([PSCustomObject]@{ ok = $true })
+    }
+
+    if ($Url -match 'ArchiveProcess') {
+        $script:ArchiveCalls += $Body.processUniqueId
+        $script:Archived[$Body.processUniqueId] = $true
+        return Ok ([PSCustomObject]@{ ok = $true })
+    }
+
+    if ($Url -match 'DeleteProcess') {
+        $script:Deleted += $Body.processUniqueId
+        return Ok ([PSCustomObject]@{ ok = $true })
+    }
+
+    if ($Url -match 'mobile/api/v1/processes') {
+        $data = @()
+        foreach ($m in ($Url -split '&')) {
+            if ($m -match 'processUniqueIds=([0-9a-fA-F\-]+)') {
+                $id = $Matches[1]
+                $data += [PSCustomObject]@{ ProcessModel = [PSCustomObject]@{
+                    UniqueId = $id; Name = $script:Names[$id]
+                    GroupId = $script:GroupOf[$id]; GroupUniqueId = 'from-model'; StateId = 2 } }
+            }
+        }
+        return Ok ([PSCustomObject]@{ data = $data })
+    }
+
+    if ($Method -eq 'Get' -and $Url -match '/Api/v1/Processes/([0-9a-fA-F\-]+)$') {
+        $id = $Matches[1]
+        return Ok ([PSCustomObject]@{ processJson = [PSCustomObject]@{
+            UniqueId = $id; Name = $script:Names[$id]
+            GroupId = $script:GroupOf[$id]; GroupUniqueId = 'from-model'; StateId = 1 } })
+    }
+
+    return Ok $null
+}
+
+# The target-gathering path uses the main script's own HTTP helper, not the
+# engine's, so it needs mocking too.
+function Invoke-ApiGet {
+    param([string]$Url,[string]$Token)
+
+    if ($Url -match 'ListType=7') {
+        $page = 1
+        if ($Url -match 'Page=(\d+)') { $page = [int]$Matches[1] }
+        if ($page -gt 1) { return [PSCustomObject]@{ items = @() } }
+
+        $items = @()
+        foreach ($id in @($T1,$T2,$T3)) {
+            if (-not $script:Archived[$id]) { continue }
+            $items += [PSCustomObject]@{
+                processUniqueId = $id; processName = $script:Names[$id]; groupId = $script:GroupOf[$id]
+            }
+        }
+        return [PSCustomObject]@{ items = $items }
+    }
+
+    return [PSCustomObject]@{ items = @() }
+}
+
+# Group helpers from the main script.
+function Get-ProcessGroups {
+    param([string]$SiteURL,[string]$Token)
+    return @(
+        @{ id = $script:HomeGroupId; uniqueId = $script:HomeGroupUniqueId; name = 'Home' },
+        @{ id = $script:TempGroupId; uniqueId = $script:TempGroupUniqueId; name = 'Bulk Delete Temporary Group' }
+    )
+}
+function New-ProcessGroup {
+    param([string]$SiteURL,[string]$Token,[string]$GroupName)
+    return @{ id = $script:TempGroupId; uniqueId = $script:TempGroupUniqueId; name = $GroupName }
+}
+function Delete-ProcessGroup {
+    param([string]$SiteURL,[string]$Token,[string]$GroupUniqueId,[switch]$Silent)
+    $script:TempGroupDeleted = $true
+    return $true
+}
+function Get-ProcessesFromGroup {
+    param([string]$SiteURL,[string]$Token,$GroupID,[string]$GroupUniqueId,$IncludeSubgroups)
+    return @($script:TempGroupContents)
+}
+function Save-DeleteResults { param($Results,[string]$Timestamp) $script:LastResults = @($Results) }
+
+# ---------------------------------------------------------------------------
+Write-Host "`nScenario: archived targets are held, deleted, and the ledger tells the truth" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+
+$work = Join-Path ([System.IO.Path]::GetTempPath()) "bulkdelete-$([guid]::NewGuid())"
+New-Item -ItemType Directory -Path $work -Force | Out-Null
+Push-Location $work
+try {
+    Invoke-BulkDeleteProcesses -SiteURL 'https://mock' -Token 't' -SourceType 'Archived' `
+        -TempGroupName 'Bulk Delete Temporary Group' -CurrentUsername 'u' -Force
+
+    $planFile = @(Get-ChildItem -Path . -Filter 'Delete_Plan_*.json')[0]
+    $plan = Get-Content $planFile.FullName -Raw | ConvertFrom-Json
+
+    Assert-Equal 3 $script:RestoreCalls.Count 'all three archived targets are held'
+    Assert-Equal 3 $script:Deleted.Count 'all three targets are deleted'
+
+    # B4: the plan must exist before the first thing the run changes.
+    Assert-True ($null -ne $script:PlanAtFirstRestore) 'a plan file is on disk BEFORE the first restore'
+    Assert-Equal 3 @($script:PlanAtFirstRestore.Ledger).Count 'the pre-mutation plan already carries every target'
+    Assert-Equal $true @($script:PlanAtFirstRestore.Ledger)[0].WasArchived `
+        'the pre-mutation ledger records the targets as archived'
+
+    foreach ($entry in @($plan.Ledger)) {
+        Assert-Equal $true $entry.WasArchived "$($entry.Name): the ledger says it WAS archived"
+        Assert-Equal $script:HomeGroupId $entry.OriginalGroupId `
+            "$($entry.Name): OriginalGroupId is the home group, not the temp group"
+        Assert-Equal $script:HomeGroupUniqueId $entry.OriginalGroupUniqueId `
+            "$($entry.Name): OriginalGroupUniqueId is the home group, not the temp group"
+        Assert-Equal $true $entry.RestoredByThisRun `
+            "$($entry.Name): RestoredByThisRun is set so the unwind path can put it back"
+    }
+
+    Assert-Equal 0 @($plan.Ledger | Where-Object { $_.OriginalGroupId -eq $script:TempGroupId }).Count `
+        'no ledger entry names the temporary group as its origin'
+
+    Assert-Equal $true $script:TempGroupDeleted 'the empty holding group is cleaned up'
+
+    # A target is, by the time it is deleted, an archived process that this run
+    # restored, so it matches the re-archive filter on every count except that
+    # it no longer exists. One archive each (the pre-delete archive), not two.
+    Assert-Equal 3 $script:ArchiveCalls.Count 'deleted targets are archived once, not re-archived afterwards'
+    foreach ($entry in @($plan.Ledger)) {
+        Assert-Equal $true $entry.Deleted "$($entry.Name): the ledger records that it was deleted"
+    }
+    Assert-Equal 0 @($script:LastResults | Where-Object { $_.Operation -eq 'ReArchive' }).Count `
+        'no re-archive is attempted against a deleted process'
+}
+finally {
+    Pop-Location
+    Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# ---------------------------------------------------------------------------
+Write-Host "`nScenario: a holding group that still holds processes is NOT deleted" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+
+Reset-MockTenant
+$script:TempGroupContents = @(
+    [PSCustomObject]@{ processUniqueId = $T2; processName = 'Bravo' }
+)
+
+$tempGroup = @{ id = $script:TempGroupId; uniqueId = $script:TempGroupUniqueId }
+$cleanup = @(Remove-HoldingGroup -SiteURL 'https://mock' -Token 't' -TempGroup $tempGroup -GroupName 'Bulk Delete Temporary Group')
+
+Assert-Equal $false $script:TempGroupDeleted 'a non-empty holding group is left in place'
+Assert-Equal 'Skipped' $cleanup[0].Status 'the skip is reported rather than passing silently'
+Assert-True ($cleanup[0].Message -like "*$T2*") 'the leftover process is named so it can be found'
+
+$script:TempGroupContents = @()
+$cleanup2 = @(Remove-HoldingGroup -SiteURL 'https://mock' -Token 't' -TempGroup $tempGroup -GroupName 'Bulk Delete Temporary Group')
+Assert-Equal $true $script:TempGroupDeleted 'an empty holding group is deleted'
+Assert-Equal 'Success' $cleanup2[0].Status 'the successful cleanup is reported'
+
+# ---------------------------------------------------------------------------
+Write-Host "`nScenario: both archived-list readers page identically" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+$script:PageSizesSeen = @()
+function Invoke-ApiGet {
+    param([string]$Url,[string]$Token)
+    if ($Url -match 'PageSize=(\d+)') { $script:PageSizesSeen += [int]$Matches[1] }
+    return [PSCustomObject]@{ items = @() }
+}
+
+[void](Get-AllArchivedProcesses -SiteURL 'https://mock' -Token 't')
+[void](Get-ArchivedProcesses -SiteURL 'https://mock' -Token 't')
+
+Assert-Equal 1 @($script:PageSizesSeen | Select-Object -Unique).Count `
+    'Get-AllArchivedProcesses and Get-ArchivedProcesses request the same page size'
+Assert-Equal 200 @($script:PageSizesSeen | Select-Object -Unique)[0] `
+    'that page size is 200, not 20'
+
+Write-Host "`n======================================" -ForegroundColor Cyan
+Write-Host "  Passed: $script:Pass   Failed: $script:Fail" -ForegroundColor $(if ($script:Fail -eq 0) { 'Green' } else { 'Red' })
+Write-Host "======================================`n" -ForegroundColor Cyan
+if ($script:Fail -gt 0) { exit 1 }

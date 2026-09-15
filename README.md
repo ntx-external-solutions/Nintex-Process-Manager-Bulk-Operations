@@ -1,6 +1,14 @@
-# Nintex Process Manager Bulk Operations (DEPRECATED)
+# Nintex Process Manager Bulk Operations
 
-A comprehensive PowerShell script for performing bulk operations on Nintex Process Manager (Promapp) processes and documents.
+**Version 4.1.** The version is defined once, in `$script:ScriptVersion` at the top of
+`Nintex-BulkOperations.ps1`, and printed at startup.
+
+A PowerShell script for bulk operations on Nintex Process Manager (Promapp) processes
+and documents.
+
+> **Status.** Modes 1, 2 and 5 are in use. Modes 3 and 4 have known defects; see
+> [Limitations](#limitations). Nintex Process Manager itself is a legacy product, but
+> this tooling is maintained and Mode 5 has been exercised against a live tenant.
 
 ## Features
 
@@ -84,6 +92,10 @@ This allows locally created scripts to run without warnings while still requirin
 
 Copy `config.template.txt` to `config.txt` and fill in your details:
 
+```powershell
+Copy-Item config.template.txt config.txt
+```
+
 ```
 SiteURL=https://yourcompany.promapp.com
 Username=your.email@company.com
@@ -92,7 +104,20 @@ DefaultRestoreGroupID=123
 TempGroupName=Bulk Delete Temporary Group
 ```
 
-**IMPORTANT:** Add `config.txt` to your `.gitignore` file to prevent committing credentials to version control.
+For a tenant whose URL carries a tenant segment, include it:
+`SiteURL=https://demo.promapp.com/93555a16ceb24f139a6e8a40618d3f8b`
+
+**Credentials.** `config.txt` is listed in `.gitignore` and is not tracked in this
+repository. `.gitignore` has no effect on a file that is already tracked or that
+someone stages with `git add -f`, so there is also a hook that refuses such a commit
+outright. Enable it once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+If you are updating an existing clone that had a tracked `config.txt`, git may remove
+your local copy when you pull. Back it up first.
 
 ### 4. Prepare CSV Files (if needed)
 
@@ -114,6 +139,52 @@ The script will:
 2. Authenticate to your Nintex PM site
 3. Present a menu of operation modes
 4. Guide you through the selected operation
+
+### Running It Non-Interactively
+
+Supplying `-Mode` skips the menu and runs that one mode from the parameters given.
+This is what makes the script scriptable and schedulable; the menu path is unchanged.
+
+```powershell
+# Dry-run a delete over the whole archive
+.\Nintex-BulkOperations.ps1 -Mode 5 -Source Archived -WhatIf
+
+# Delete the processes named in a CSV, unattended
+.\Nintex-BulkOperations.ps1 -Mode 5 -Source CSV -CsvPath .\targets.csv -Force
+
+# Archive a group and everything under it
+.\Nintex-BulkOperations.ps1 -Mode 1 -Source Group -GroupId 655 -IncludeSubgroups -Force
+```
+
+| Parameter | Meaning |
+|---|---|
+| `-Mode` | `1` Archive, `2` Restore, `3` Update Location, `4` Update Ownership, `5` Delete |
+| `-Source` | `CSV`, `Group`, `Archived`, `ArchivedDocuments` |
+| `-CsvPath` | CSV file, for `-Source CSV` |
+| `-GroupId` | Numeric group id, for `-Source Group` |
+| `-ObjectType` | `Process`, `Document` or `Both`; defaults to `Process` |
+| `-RestoreGroupId` | Target group for Mode 2 |
+| `-ConfigPath` | Alternative config file; defaults to `config.txt` |
+| `-WhatIf` | Preview. Nothing is changed. |
+| `-Force` | Answer the confirmation prompts and run unattended |
+| `-ApprovalsEnabled` | Declare that process approvals are on in this tenant |
+| `-ThoroughScan` | Mode 5: read every active process for Input/Output references |
+| `-IncludeSubgroups` | Include subgroups for `-Source Group` |
+
+`-Force` does **not** wave through a Mode 5 reconciliation mismatch or a failed
+verification. Those still stop the run, because they mean the plan does not match the
+tenant, and that is precisely when nobody should be deleting anything unattended.
+
+Exit codes: `0` success, `1` the mode failed, `2` bad configuration, `3` authentication
+failed.
+
+### Dot-Sourcing
+
+Dot-sourcing loads the functions and runs nothing, which is how the test suite uses it:
+
+```powershell
+. .\Nintex-BulkOperations.ps1
+```
 
 ### Group Selection
 
@@ -308,15 +379,20 @@ Declining it risks leaving a dangling input on a surviving process.
 ```
 Select Mode: 5
 Select Source: 1 (CSV)
+Execution Mode: 1 (Execute)
 Enter CSV file path: processes-to-delete.csv
+Are process approvals enabled in your environment? (Y/N): N
+Run the thorough scan? (Y/N): N
+Type 'DELETE' to confirm you want to proceed: DELETE
+[Gather, snapshot, hold, plan...]
+[N reconciliation mismatch(es) above.]  Continue anyway? (Y/N): Y
+[Remove references, verify...]
 Type 'DELETE' to confirm: DELETE
-Enter the ID of a temporary group to use: 999
-Include subgroups? (Y/N): N
-[Process scans for references...]
-Do you want to attempt to remove these references? (Y/N): Y
-Ready to archive processes. Continue? (Y/N): Y
-Ready to PERMANENTLY DELETE processes. Type 'DELETE' to confirm: DELETE
 ```
+
+The holding group is created by the script. There is no prompt for a temporary group
+id; earlier versions asked for one and the README described that flow for longer than
+the code did.
 
 ## Output
 
@@ -397,10 +473,12 @@ Document-related features may vary by Nintex PM version. The script includes pla
 5. **Permissions** - Ensure you have necessary permissions for all operations
 6. **References** - For delete operations, carefully review reference reports
 
-## Dependency Engine (new)
+## Dependency Engine
 
-`NintexProcessDependencies.ps1` implements the corrected dependency model. It is
-dot-sourceable and not yet wired into Mode 5.
+`NintexProcessDependencies.ps1` implements the corrected dependency model. **Mode 5
+delegates to it entirely**: every piece of dependency discovery, reference removal and
+process deletion lives here, and `Invoke-BulkDeleteProcesses` is a thin orchestrator
+over it. The file is also dot-sourceable on its own:
 
 ```powershell
 . .\NintexProcessDependencies.ps1
@@ -497,7 +575,29 @@ Known broken or incomplete as of this revision:
   API_ARCHITECTURE.md. Until it is settled, only the thorough scan guarantees no
   Input or Output reference is missed.
 - Large-scale operations (1000+ items) may take significant time. Only
-  `Update-ProcessOwnership.ps1` implements retry/backoff and throttling.
+  `Update-ProcessOwnership.ps1` and the Mode 5 dependency engine implement
+  retry/backoff and throttling.
+- **Link reconciliation over-expects on some tenants.** Mismatches cluster into a few
+  exact shapes (`claimed 2, located 1` and similar) whose delta equals the holder's
+  child-procedure count. That is the signature of the child-reference asymmetry
+  API_ARCHITECTURE.md already flags as an open question, not of real drift, so those
+  are now reported as a warning rather than gating the run. Shapes that do not fit
+  still gate. Settling it needs a captured fixture; until then treat a Link warning as
+  worth a look on a first run against a new tenant.
+
+## Testing
+
+```powershell
+pwsh -NoProfile -File Tests/Run-AllTests.ps1
+```
+
+Three suites run against mocked tenants, no network and no credentials:
+
+| Suite | Covers |
+|---|---|
+| `Test-Dependencies.ps1` | The pure functions: site location, removal, inversion, reconciliation, plan persistence |
+| `Test-Executor.ps1` | Plan construction and execution end to end, including a clean dependency result and the both-sides-deleted case |
+| `Test-BulkDelete.ps1` | Mode 5 orchestration: the Hold phase, the pre-mutation plan, ledger truthfulness, holding group cleanup, pagination |
 
 ## Support
 
@@ -510,7 +610,37 @@ For issues or questions:
 
 ## Version History
 
-**Version 1.1** (Current)
+**Version 4.1** (Current)
+- Fixed: a clean dependency check was read as a failed one. An empty result array
+  unrolled to `$null` on return, so every dependency-free process blocked the run.
+  `Get-ProcessDependencyClaim` now returns a result object whose `Success` field
+  cannot unroll.
+- Fixed: the delete plan recorded the temporary holding group as each archived
+  target's original group, and recorded them as never archived, because the ledger
+  was built from an index read *after* the Hold phase moved them. State is now
+  snapshotted before the first mutation, and the plan is written to disk before it
+  too, which is what the crash-safety net always claimed.
+- Fixed: reconciliation gated on pairs where both processes were being deleted. On the
+  measured tenant that was 114 of 120 mismatches. Such pairs are now `NotApplicable`:
+  still recorded in the plan for audit, no longer a decision.
+- Added: `-Mode` and friends, so the script runs without the menu, plus a dot-source
+  guard so it can be loaded for tests. The menu used to run at load, and under
+  redirected stdin it looped forever between `Read-Host` and `ReadKey`.
+- Added: retry for a target whose dependency check fails transiently, and the option
+  to proceed with the subset that checked cleanly rather than discarding the batch.
+- Added: `Write-Progress` and counters through discovery, the ledger build and the
+  blind-spot scan.
+- Changed: the holding group is no longer deleted while it still holds processes.
+- Changed: reconciliation mismatches are reported by process name, grouped by holder,
+  with the reference paths, instead of 120 identical unnamed lines.
+- Changed: both archived-list readers share one paginator at 200 per page. Mode 5 used
+  the 20-per-page copy, which was 25 round trips for 497 processes.
+- Changed: the blind-spot scan skips the targets and reuses models already fetched
+  during planning.
+- Security: `config.txt` is no longer tracked in git. `config.template.txt` is, and a
+  pre-commit hook in `.githooks` refuses a commit that stages `config.txt`.
+
+**Version 1.1**
 - Added interactive group tree picker
 - Support for GUID-based group IDs from URLs
 - Hierarchical group display with parent-child relationships

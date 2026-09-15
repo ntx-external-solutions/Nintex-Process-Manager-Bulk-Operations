@@ -601,6 +601,43 @@ reports a mismatch for investigation rather than silently leaving a reference
 behind. Scoping `Linked Process` the same way would under-count and hide real
 sites, so it stays a union.
 
+### Link mismatch shapes measured at scale
+
+A 497-target dry run on the same tenant produced 582 reconciliation entries and 120
+`Link` mismatches. They are not scattered:
+
+| shape | count |
+|---|---|
+| claimed 2, located 1 | 73 |
+| claimed 1, located 0 | 30 |
+| claimed 3, located 1 | 8 |
+| claimed 3, located 2 | 6 |
+| claimed 2, located 0 | 2 |
+| claimed 1, located 2 | 1 |
+
+Every shape but the last has the API claiming **more** than the JSON walk locates, and
+the delta matches the holder's child-procedure count. That is the child-reference
+asymmetry described above, which is why a mismatch of exactly that size is now
+classified `MatchWithKnownAsymmetry` and reported as a warning instead of gating the
+run. Anything that does not fit the shape still gates.
+
+**Still open, and the thing to settle next.** The single `claimed 1, located 2` entry
+runs the other way: the JSON holds more than the API reports. That is the only sample
+where the asymmetry inverts, and it is the interesting one. Capturing a fixture from it,
+and from one `claimed 2, located 1` pair (both process models plus both dependency
+payloads), would settle both this and the (a)/(b) question above. Neither is settled by
+the shape table alone; the table is evidence about the distribution, not about the
+mechanism.
+
+### Reconciliation is skipped when both sides are being deleted
+
+Of those 120 mismatches, 114 were pairs where **both** processes were in the delete set
+and 0 were pairs where neither was. References between two processes that are both
+about to be deleted go away with them: there is no removal to get wrong and no decision
+for an operator to make. Such pairs are recorded with `Status = 'NotApplicable'` so the
+plan file stays a complete audit record, and excluded from the gate. On this tenant that
+took the gate from 120 lines to 6.
+
 ### Counts are per-occurrence, summed across both directions
 
 Each entry in `Dependencies` is one physical reference, not one related process. The same
