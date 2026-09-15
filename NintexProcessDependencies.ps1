@@ -286,7 +286,39 @@ function Find-ProcessReferenceSite {
         }
     }
 
-    # Inputs / Outputs. Live payloads use null, not [], when unused.
+    $sites += @(Find-InputOutputReferenceSite -ProcessObject $ProcessObject -TargetUniqueIds $TargetUniqueIds)
+
+    return $sites
+}
+
+function Find-InputOutputReferenceSite {
+    <#
+    .SYNOPSIS
+        Input and Output references only, without walking the activity tree.
+
+    .DESCRIPTION
+        Split out of Find-ProcessReferenceSite, which calls it, so that the
+        archived blind-spot sweep can ask for exactly what it wants.
+
+        That sweep only ever cares about Input and Output rows, but it used to
+        call the full walk and throw the rest away: every procedure bucket, every
+        node, and the child recursion underneath each one, discarded. Across a
+        479-process archive that is 479 whole activity trees walked for nothing.
+        Inputs and Outputs are two flat collections hanging off the root.
+
+        Pure: no network, no mutation of the input object.
+    #>
+    param(
+        $ProcessObject,
+        [string[]]$TargetUniqueIds
+    )
+
+    $sites = @()
+    if ($null -eq $ProcessObject) { return $sites }
+
+    $holder = [string](Get-NodeValue -Node $ProcessObject -Name 'UniqueId')
+
+    # Live payloads use null, not [], when unused.
     $ioSpecs = @(
         @{ Container = 'Inputs';  Bucket = 'Input';  Field = 'FromProcessUniqueId'; Category = 'Input' },
         @{ Container = 'Outputs'; Bucket = 'Output'; Field = 'ToProcessUniqueId';   Category = 'Output' }
@@ -1134,6 +1166,279 @@ function New-ProcessStateSnapshot {
     return $snapshot
 }
 
+function New-TenantStateSnapshot {
+    <#
+    .SYNOPSIS
+        Archive state and group for EVERY process in the tenant, before the run
+        changes anything.
+
+    .DESCRIPTION
+        The per-target snapshot records what the run means to touch. This one
+        records everything, so that what the run touched can be compared against
+        what it meant to touch.
+
+        That comparison is the only handle available on process variations.
+        Nintex PM stores a variation as its own record, in its own group, and the
+        link to its master appears nowhere in the process model or in a list
+        entry: not in any of the 46 keys of the model, not in the 5 fields of an
+        index entry. So a bulk operation on a variation silently acts on its
+        master as well, and no amount of reading a target tells you it will.
+
+        What you can do is take the tenant's state before and after, and look at
+        what moved that was not asked to move.
+
+        It is built from the index that has already been fetched, so it costs a
+        walk over a hashtable, not a single extra API call.
+    #>
+    param($Index)
+
+    $baseline = @{}
+    if ($null -eq $Index) { return $baseline }
+
+    foreach ($entry in $Index.Values) {
+        if (-not $entry.UniqueId) { continue }
+        $baseline[$entry.UniqueId.ToLowerInvariant()] = [PSCustomObject]@{
+            UniqueId   = $entry.UniqueId
+            Name       = $entry.Name
+            NumericId  = $entry.NumericId
+            IsArchived = $entry.IsArchived
+            GroupId    = $entry.GroupId
+        }
+    }
+
+    return $baseline
+}
+
+function Compare-TenantState {
+    <#
+    .SYNOPSIS
+        Processes that changed state without being asked to.
+
+    .DESCRIPTION
+        Diffs a fresh index against a baseline and returns everything that moved
+        which is not in ExpectedUniqueIds. Each result names what changed, so the
+        caller can both report it and decide what is reversible.
+
+        Change is one of:
+
+          Archived           active before, archived now
+          Unarchived         archived before, active now
+          Moved              same archive state, different group
+          ArchivedAndMoved   both
+          Disappeared        in the baseline, absent from the fresh index
+
+        Disappeared is the one that matters most and the one a naive diff misses.
+        If deleting a variation also deleted its master, this is where it shows.
+
+    .PARAMETER ExpectedUniqueIds
+        Everything the run deliberately changed: the targets, plus any holder it
+        restored on purpose. Those are not collateral and must be passed in, or
+        every run reports its own work as damage.
+    #>
+    param(
+        $Baseline,
+        $Index,
+        [string[]]$ExpectedUniqueIds = @()
+    )
+
+    $collateral = @()
+    if ($null -eq $Baseline -or $null -eq $Index) { return $collateral }
+
+    $expected = @{}
+    foreach ($id in @($ExpectedUniqueIds)) {
+        if ($id) { $expected[$id.ToLowerInvariant()] = $true }
+    }
+
+    foreach ($key in $Baseline.Keys) {
+        if ($expected.ContainsKey($key)) { continue }
+
+        $before = $Baseline[$key]
+        $after = $null
+        if ($Index.ContainsKey($key)) { $after = $Index[$key] }
+
+        if ($null -eq $after) {
+            $collateral += [PSCustomObject]@{
+                UniqueId        = $before.UniqueId
+                Name            = $before.Name
+                Change          = 'Disappeared'
+                WasArchived     = $before.IsArchived
+                IsArchivedNow   = $null
+                OriginalGroupId = $before.GroupId
+                CurrentGroupId  = $null
+            }
+            continue
+        }
+
+        $archiveChanged = ([bool]$before.IsArchived -ne [bool]$after.IsArchived)
+        $groupChanged = ("$($before.GroupId)" -ne "$($after.GroupId)")
+
+        if (-not $archiveChanged -and -not $groupChanged) { continue }
+
+        $change = 'Moved'
+        if ($archiveChanged -and $groupChanged) {
+            $change = 'ArchivedAndMoved'
+        } elseif ($archiveChanged) {
+            $change = if ($after.IsArchived) { 'Archived' } else { 'Unarchived' }
+        }
+
+        $collateral += [PSCustomObject]@{
+            UniqueId        = $before.UniqueId
+            Name            = $before.Name
+            Change          = $change
+            WasArchived     = $before.IsArchived
+            IsArchivedNow   = $after.IsArchived
+            OriginalGroupId = $before.GroupId
+            CurrentGroupId  = $after.GroupId
+        }
+    }
+
+    return $collateral
+}
+
+function Show-CollateralDamage {
+    <#
+    .SYNOPSIS
+        Names every process the run changed that it was not asked to change.
+    #>
+    param($Collateral, [string]$Phase = '')
+
+    $items = @($Collateral)
+    if ($items.Count -eq 0) { return }
+
+    Write-Host "`n========================================" -ForegroundColor Red
+    Write-Host "  COLLATERAL CHANGES DETECTED" -ForegroundColor Red
+    Write-Host "========================================" -ForegroundColor Red
+    if ($Phase) { Write-Host "Phase: $Phase" -ForegroundColor Red }
+    Write-Host "$($items.Count) process(es) changed state without being targets of this run." -ForegroundColor Red
+    Write-Host ""
+
+    foreach ($item in $items) {
+        $name = if ($item.Name) { $item.Name } else { $item.UniqueId }
+        Write-Host "  $name  ($($item.UniqueId))" -ForegroundColor Red
+
+        switch ($item.Change) {
+            'Disappeared' {
+                Write-Host "      DISAPPEARED from the tenant. It was $(if ($item.WasArchived) { 'archived' } else { 'active' }) in group $($item.OriginalGroupId)." -ForegroundColor Red
+            }
+            'Archived' {
+                Write-Host "      was ACTIVE, is now ARCHIVED (group $($item.OriginalGroupId))" -ForegroundColor Red
+            }
+            'Unarchived' {
+                Write-Host "      was ARCHIVED, is now ACTIVE (group $($item.OriginalGroupId))" -ForegroundColor Red
+            }
+            'Moved' {
+                Write-Host "      moved from group $($item.OriginalGroupId) to group $($item.CurrentGroupId)" -ForegroundColor Red
+            }
+            'ArchivedAndMoved' {
+                $state = if ($item.IsArchivedNow) { 'ARCHIVED' } else { 'ACTIVE' }
+                Write-Host "      now $state in group $($item.CurrentGroupId); was $(if ($item.WasArchived) { 'archived' } else { 'active' }) in group $($item.OriginalGroupId)" -ForegroundColor Red
+            }
+        }
+    }
+
+    Write-Host ""
+    Write-Host "The usual cause is a process VARIATION. Nintex PM stores a variation as its" -ForegroundColor Yellow
+    Write-Host "own record in its own group, and acting on one acts on its master too. The" -ForegroundColor Yellow
+    Write-Host "coupling is not visible in the process model or the process lists, so it can" -ForegroundColor Yellow
+    Write-Host "only be caught by comparing tenant state before and after, which is what this" -ForegroundColor Yellow
+    Write-Host "check does." -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Another user editing the tenant during the run produces the same signal." -ForegroundColor Yellow
+}
+
+function Restore-CollateralState {
+    <#
+    .SYNOPSIS
+        Puts back what the run changed without being asked to.
+
+    .DESCRIPTION
+        Only reverses what it can prove and what the endpoints this codebase
+        trusts can actually do:
+
+          Archived    -> restore into the original group
+          Unarchived  -> re-archive
+
+        A pure group move on a still-active process is NOT reversed. The only
+        move endpoint available here is the one Mode 3 uses, which is documented
+        as broken (it sends the wrapper object rather than the ProcessJson string
+        and never publishes). Guessing with a broken endpoint on a process the
+        operator never meant to touch would turn one problem into two, so those
+        are reported for manual correction instead.
+
+        Disappeared is not reversible by anything. It is reported.
+    #>
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        $Collateral,
+        [bool]$ApprovalsEnabled = $false
+    )
+
+    $results = @()
+    $items = @($Collateral)
+    if ($items.Count -eq 0) { return $results }
+
+    Write-Host "`n=== REVERSING COLLATERAL CHANGES ===" -ForegroundColor Cyan
+
+    foreach ($item in $items) {
+        $name = if ($item.Name) { $item.Name } else { $item.UniqueId }
+
+        if ($item.Change -eq 'Disappeared') {
+            Write-Host "  $name is GONE. Nothing can restore it from here." -ForegroundColor Red
+            $results += [PSCustomObject]@{
+                ObjectType = 'Process'; ObjectID = $item.UniqueId; Name = $name
+                Operation = 'ReverseCollateral'; Status = 'Failed'
+                Message = 'Process disappeared during the run and cannot be restored automatically'
+            }
+            continue
+        }
+
+        # Active before, archived now: un-archive it back into its own group.
+        if (-not $item.WasArchived -and $item.IsArchivedNow) {
+            Write-Host "  Restoring $name to group $($item.OriginalGroupId)..." -ForegroundColor Yellow
+            $ok = Restore-NpmProcess -SiteURL $SiteURL -Token $Token `
+                -ProcessUniqueId $item.UniqueId -ProcessGroupId $item.OriginalGroupId
+
+            $results += [PSCustomObject]@{
+                ObjectType = 'Process'; ObjectID = $item.UniqueId; Name = $name
+                Operation = 'ReverseCollateral'
+                Status = $(if ($ok) { 'Success' } else { 'Failed' })
+                Message = $(if ($ok) { "Restored to group $($item.OriginalGroupId)" }
+                            else { "Restore FAILED; still archived. Restore it manually to group $($item.OriginalGroupId)" })
+            }
+            if (-not $ok) { Write-Host "    Failed. Restore $name manually to group $($item.OriginalGroupId)." -ForegroundColor Red }
+            continue
+        }
+
+        # Archived before, active now: put it back in the archive.
+        if ($item.WasArchived -and -not $item.IsArchivedNow) {
+            Write-Host "  Re-archiving $name..." -ForegroundColor Yellow
+            $ok = Set-NpmProcessArchived -SiteURL $SiteURL -Token $Token `
+                -ProcessUniqueId $item.UniqueId -Comment 'Reversing collateral change from bulk operation' `
+                -ApprovalsEnabled $ApprovalsEnabled
+
+            $results += [PSCustomObject]@{
+                ObjectType = 'Process'; ObjectID = $item.UniqueId; Name = $name
+                Operation = 'ReverseCollateral'
+                Status = $(if ($ok) { 'Success' } else { 'Failed' })
+                Message = $(if ($ok) { 'Re-archived' } else { 'Re-archive FAILED; this process is still ACTIVE' })
+            }
+            if (-not $ok) { Write-Host "    Failed. $name is still active and must be archived manually." -ForegroundColor Red }
+            continue
+        }
+
+        # Same archive state, different group.
+        Write-Host "  $name moved from group $($item.OriginalGroupId) to $($item.CurrentGroupId); NOT moving it back automatically." -ForegroundColor Yellow
+        $results += [PSCustomObject]@{
+            ObjectType = 'Process'; ObjectID = $item.UniqueId; Name = $name
+            Operation = 'ReverseCollateral'; Status = 'Skipped'
+            Message = "Moved from group $($item.OriginalGroupId) to $($item.CurrentGroupId). Move it back manually; no trustworthy move endpoint is available here."
+        }
+    }
+
+    return $results
+}
+
 function Set-ProcessSnapshotRestored {
     # Records that the Hold phase pulled this process out of the archive. The
     # flag is what Restore-ProcessPlanState keys off to put it back.
@@ -1187,6 +1492,8 @@ function New-DependencyPlan {
         WorkItems      = @()
         Reconciliation = @()
         FailedTargets  = @()
+        Unresolved     = @()
+        Collateral     = @()
         Log            = @()
     }
 }
@@ -1490,11 +1797,17 @@ function Find-HiddenInputOutputReference {
             $model = Get-NpmCachedModel -UniqueId $id
             if ($null -eq $model) {
                 $model = Get-NpmProcessModel -SiteURL $SiteURL -Token $Token -ProcessUniqueId $id
-                Set-NpmCachedModel -UniqueId $id -Model $model
             }
             if ($null -eq $model) { continue }
-            $found = @(Find-ProcessReferenceSite -ProcessObject $model -TargetUniqueIds $TargetUniqueIds)
-            $sites += @($found | Where-Object { $_.Category -eq 'Input' -or $_.Category -eq 'Output' })
+
+            $found = @(Find-InputOutputReferenceSite -ProcessObject $model -TargetUniqueIds $TargetUniqueIds)
+            $sites += $found
+
+            # Cached only on a hit. A holder found here is added to the ledger
+            # next, which re-reads it; everything else is read once and never
+            # again, and keeping the whole sweep in memory would mean holding
+            # hundreds of full process models to serve no reads at all.
+            if ($found.Count -gt 0) { Set-NpmCachedModel -UniqueId $id -Model $model }
         }
         Complete-NpmProgress -Activity 'Input/Output blind-spot scan' -Id 2
         Write-Host ""
@@ -1513,8 +1826,7 @@ function Find-HiddenInputOutputReference {
     foreach ($id in $archivedIds) {
         $cached = Get-NpmCachedModel -UniqueId $id
         if ($null -ne $cached) {
-            $found = @(Find-ProcessReferenceSite -ProcessObject $cached -TargetUniqueIds $TargetUniqueIds)
-            $sites += @($found | Where-Object { $_.Category -eq 'Input' -or $_.Category -eq 'Output' })
+            $sites += @(Find-InputOutputReferenceSite -ProcessObject $cached -TargetUniqueIds $TargetUniqueIds)
         } else {
             $toFetch += $id
         }
@@ -1533,11 +1845,13 @@ function Find-HiddenInputOutputReference {
             -ProcessUniqueIds $toFetch[$i..$end] -BatchSize $BatchSize)
 
         foreach ($model in $models) {
-            $modelId = [string](Get-NodeValue -Node $model -Name 'UniqueId')
-            Set-NpmCachedModel -UniqueId $modelId -Model $model
+            $found = @(Find-InputOutputReferenceSite -ProcessObject $model -TargetUniqueIds $TargetUniqueIds)
+            $sites += $found
 
-            $found = @(Find-ProcessReferenceSite -ProcessObject $model -TargetUniqueIds $TargetUniqueIds)
-            $sites += @($found | Where-Object { $_.Category -eq 'Input' -or $_.Category -eq 'Output' })
+            # See above: cache the hits, drop the rest on the floor.
+            if ($found.Count -gt 0) {
+                Set-NpmCachedModel -UniqueId ([string](Get-NodeValue -Node $model -Name 'UniqueId')) -Model $model
+            }
         }
 
         Write-NpmProgress -Activity 'Input/Output blind-spot scan' -Status 'Archived processes' `
@@ -1595,7 +1909,54 @@ function New-ProcessDeletePlan {
         if ($ledger.ContainsKey($key)) { return $ledger[$key] }
 
         $entry = Get-NpmIndexEntry -Index $Index -UniqueId $UniqueId
-        if ($null -eq $entry) { return $null }
+
+        if ($null -eq $entry) {
+            # Neither list sweep returned this process, yet the dependency API
+            # named it. Both can be true at once: processes have been observed
+            # that are absent from ListType=7 and ListType=0 but still fetchable
+            # through the mobile batch endpoint.
+            #
+            # Returning $null here dropped it silently, and a holder that is
+            # never fetched is a holder whose reference is never removed. So try
+            # both endpoints before giving up, and if it is genuinely
+            # unreachable, say so loudly rather than continuing as though the
+            # participant did not exist.
+            $recovered = Get-NpmProcessModelAnyState -SiteURL $SiteURL -Token $Token `
+                -UniqueId $UniqueId -IsArchived $true
+            $recoveredArchived = $true
+
+            if ($null -eq $recovered) {
+                $recovered = Get-NpmProcessModelAnyState -SiteURL $SiteURL -Token $Token `
+                    -UniqueId $UniqueId -IsArchived $false
+                $recoveredArchived = $false
+            }
+
+            if ($null -eq $recovered) {
+                $label = Resolve-ClaimName -Claims $allClaims -UniqueId $UniqueId
+                $plan.Unresolved += [PSCustomObject]@{
+                    UniqueId = $UniqueId
+                    Name     = $label
+                    Reason   = 'Absent from both process lists and not fetchable by either endpoint'
+                }
+                $plan.Log += "UNRESOLVED participant $UniqueId ($label): not in the index and not fetchable; any reference it holds will NOT be removed"
+                Write-Host "    Could not resolve participant $label ($UniqueId). Its references cannot be examined." -ForegroundColor Red
+                return $null
+            }
+
+            $stateId = Get-NodeValue -Node $recovered -Name 'StateId'
+            if ($null -ne $stateId) { $recoveredArchived = ([int]$stateId -ne 1) }
+
+            $entry = [PSCustomObject]@{
+                UniqueId   = $UniqueId
+                NumericId  = Get-NodeValue -Node $recovered -Name 'Id'
+                Name       = [string](Get-NodeValue -Node $recovered -Name 'Name')
+                IsArchived = $recoveredArchived
+                GroupId    = Get-NodeValue -Node $recovered -Name 'GroupId'
+            }
+
+            $plan.Log += "Recovered participant $UniqueId ($($entry.Name)) by direct fetch; it is missing from both process list sweeps"
+            Write-Host "    Recovered $($entry.Name) by direct fetch (missing from the process lists)" -ForegroundColor Yellow
+        }
 
         # The index passed in here was refreshed AFTER the Hold phase moved the
         # archived targets into the temp group, so for those targets it reports
@@ -1900,9 +2261,35 @@ function New-ProcessDeletePlan {
 # PLAN PREVIEW
 # ============================================================================
 
+function Resolve-ClaimName {
+    # The dependency payload carries a name alongside every id it reports, which
+    # is the only name available for a process that no list sweep returned.
+    param($Claims, [string]$UniqueId)
+
+    $named = @($Claims | Where-Object { $_.RelatedUniqueId -eq $UniqueId -and $_.RelatedName })
+    if ($named.Count -gt 0) { return ([string]$named[0].RelatedName).Trim() }
+    return $UniqueId
+}
+
 function Resolve-PlanProcessName {
-    # The plan ledger is the first source of truth because it was captured at
-    # plan time; the index is the fallback for anything the ledger never saw.
+    <#
+    .SYNOPSIS
+        Best available human-readable name for a process id.
+
+    .DESCRIPTION
+        Three sources, in descending order of trust:
+
+          1. the plan ledger, captured at plan time from the index
+          2. the live index
+          3. RelatedName on the dependency claims
+
+        The third matters more than it looks. A process the dependency API
+        reports but which is missing from both list sweeps has no ledger entry
+        and no index entry, so it used to print as a bare GUID; that is exactly
+        the process an operator most needs to identify, because it is the one
+        the run could not classify. The API already sent its name in the same
+        payload that raised it.
+    #>
     param($Plan, $Index, [string]$UniqueId)
 
     if (-not $UniqueId) { return '(unknown)' }
@@ -1914,6 +2301,9 @@ function Resolve-PlanProcessName {
         $entry = Get-NpmIndexEntry -Index $Index -UniqueId $UniqueId
         if ($null -ne $entry -and $entry.Name) { return $entry.Name }
     }
+
+    $named = @($Plan.Claims | Where-Object { $_.RelatedUniqueId -eq $UniqueId -and $_.RelatedName })
+    if ($named.Count -gt 0) { return ([string]$named[0].RelatedName).Trim() }
 
     return $UniqueId
 }
@@ -1928,7 +2318,14 @@ function Show-ProcessDeletePlan {
 
     $archived = @($Plan.Ledger | Where-Object { $_.WasArchived })
     if ($archived.Count -gt 0) {
-        Write-Host "Archived involved : $($archived.Count) (restored for the run, re-archived afterwards)" -ForegroundColor Yellow
+        # A preview mutates nothing, so it must not describe restores it did not
+        # perform. The count is reported either way; only the claim changes.
+        $restored = @($Plan.Ledger | Where-Object { $_.RestoredByThisRun })
+        if ($restored.Count -gt 0) {
+            Write-Host "Archived involved : $($archived.Count) ($($restored.Count) restored for the run, re-archived afterwards)" -ForegroundColor Yellow
+        } else {
+            Write-Host "Archived involved : $($archived.Count) (none restored; a real run would restore them)" -ForegroundColor Yellow
+        }
     }
 
     if (@($Plan.WorkItems).Count -gt 0) {
@@ -1950,6 +2347,17 @@ function Show-ProcessDeletePlan {
         Write-Host "`nGroup links (reported, never removed automatically):" -ForegroundColor Yellow
         foreach ($site in $groupSites) {
             Write-Host "  $($site.HolderUniqueId) -> $($site.TargetUniqueId)" -ForegroundColor Gray
+        }
+    }
+
+    $unresolved = @($Plan.Unresolved)
+    if ($unresolved.Count -gt 0) {
+        Write-Host "`nUNRESOLVED PARTICIPANTS ($($unresolved.Count)):" -ForegroundColor Red
+        Write-Host "The dependency API named these processes but neither process list nor either" -ForegroundColor Red
+        Write-Host "fetch endpoint returned them. Any reference they hold will NOT be removed." -ForegroundColor Red
+        foreach ($u in $unresolved) {
+            Write-Host "  $($u.Name)  ($($u.UniqueId))" -ForegroundColor Red
+            Write-Host "      $($u.Reason)" -ForegroundColor DarkGray
         }
     }
 
@@ -2152,13 +2560,37 @@ function Invoke-ProcessDeletePlan {
 }
 
 function Invoke-ProcessTargetDeletion {
-    # Archives then deletes the targets. Split from reference removal so a caller
-    # can stop between verification and the irreversible step.
+    <#
+    .SYNOPSIS
+        Archives then deletes the targets, with a collateral check in between.
+
+    .DESCRIPTION
+        Split from reference removal so a caller can stop between verification
+        and the irreversible step.
+
+        The archive pass is itself a mutation, and archiving a process variation
+        archives its master too. So the tenant is re-read between archiving and
+        deleting, and anything that moved which was not a target stops the run
+        right there. That gap is the last point where stopping still costs
+        nothing: an unwanted archive can be undone, an unwanted delete cannot.
+
+    .PARAMETER TenantBaseline
+        Full tenant state from before the run. Omit it and the check is skipped,
+        which is the old behaviour.
+
+    .PARAMETER OnCollateral
+        Called with the collateral records when the check finds something.
+        Returns $true to continue to deletion, $false to stop. Omitted means
+        stop, because deleting after unexplained changes is the one outcome
+        nobody can undo.
+    #>
     param(
         [string]$SiteURL,
         [string]$Token,
         $Plan,
-        [bool]$ApprovalsEnabled = $false
+        [bool]$ApprovalsEnabled = $false,
+        $TenantBaseline = $null,
+        [scriptblock]$OnCollateral = $null
     )
 
     $results = @()
@@ -2177,6 +2609,48 @@ function Invoke-ProcessTargetDeletion {
             -Comment 'Pre-delete archive' -ApprovalsEnabled $ApprovalsEnabled)
     }
     Write-Host ""
+
+    # ---- Collateral check, between archive and delete ---------------------
+    if ($null -ne $TenantBaseline) {
+        Write-Host "`n=== CHECKING FOR COLLATERAL CHANGES ===" -ForegroundColor Cyan
+        Write-Host "  Re-reading the tenant to see what the archive pass actually changed..." -ForegroundColor Gray
+
+        $freshIndex = Get-NpmProcessIndex -SiteURL $SiteURL -Token $Token
+
+        # Everything this run legitimately changed: the targets, plus any holder
+        # it restored on purpose during planning.
+        $expected = @($targets)
+        $expected += @($Plan.Ledger | Where-Object { $_.RestoredByThisRun } | ForEach-Object { $_.UniqueId })
+
+        $collateral = @(Compare-TenantState -Baseline $TenantBaseline -Index $freshIndex -ExpectedUniqueIds $expected)
+
+        if ($collateral.Count -gt 0) {
+            $Plan.Collateral = @($Plan.Collateral) + $collateral
+            foreach ($c in $collateral) {
+                $Plan.Log += "COLLATERAL after archive phase: $($c.UniqueId) ($($c.Name)) - $($c.Change)"
+            }
+
+            Show-CollateralDamage -Collateral $collateral -Phase 'after archiving targets, before deleting'
+
+            $proceed = $false
+            if ($null -ne $OnCollateral) { $proceed = [bool](& $OnCollateral $collateral) }
+
+            if (-not $proceed) {
+                Write-Host "`nStopping before deletion. Nothing has been deleted." -ForegroundColor Red
+                foreach ($c in $collateral) {
+                    $name = if ($c.Name) { $c.Name } else { $c.UniqueId }
+                    $results += [PSCustomObject]@{
+                        ObjectType = 'Process'; ObjectID = $c.UniqueId; Name = $name
+                        Operation = 'Collateral'; Status = 'Failed'
+                        Message = "Changed without being a target ($($c.Change)); run stopped before deletion"
+                    }
+                }
+                return $results
+            }
+        } else {
+            Write-Host "  No collateral changes. Only the targets moved." -ForegroundColor Green
+        }
+    }
 
     Write-Host "`n=== DELETING TARGETS ===" -ForegroundColor Red
     $i = 0

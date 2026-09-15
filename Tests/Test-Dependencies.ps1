@@ -317,6 +317,115 @@ Assert-Equal $null (Import-DependencyPlan -Path (Join-Path ([System.IO.Path]::Ge
     'importing a missing plan returns null rather than throwing'
 
 # ---------------------------------------------------------------------------
+Write-Host "`nCollateral detection (process variations)" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# A variation is its own record in its own group, and acting on one acts on its
+# master. Nothing in the model or a list entry says so, so the only handle is a
+# before/after diff of the whole tenant.
+
+function New-MockIndex {
+    param($Rows)
+    $ix = @{}
+    foreach ($r in $Rows) {
+        $ix[$r.UniqueId.ToLowerInvariant()] = [PSCustomObject]@{
+            UniqueId   = $r.UniqueId
+            NumericId  = $r.NumericId
+            Name       = $r.Name
+            IsArchived = $r.IsArchived
+            GroupId    = $r.GroupId
+        }
+    }
+    return $ix
+}
+
+$TargetId  = 'aaaa0000-0000-0000-0000-00000000000a'   # the variation being deleted
+$MasterId  = 'bbbb0000-0000-0000-0000-00000000000b'   # its master, in another group
+$BystandId = 'cccc0000-0000-0000-0000-00000000000c'   # unrelated, must not be flagged
+$VanishId  = 'dddd0000-0000-0000-0000-00000000000d'
+
+$before = New-MockIndex @(
+    @{ UniqueId=$TargetId;  NumericId=1; Name='Order Handling (AU)'; IsArchived=$true;  GroupId=493 },
+    @{ UniqueId=$MasterId;  NumericId=2; Name='Order Handling';      IsArchived=$false; GroupId=493 },
+    @{ UniqueId=$BystandId; NumericId=3; Name='Unrelated';           IsArchived=$false; GroupId=200 },
+    @{ UniqueId=$VanishId;  NumericId=4; Name='Doomed';              IsArchived=$false; GroupId=200 }
+)
+
+$baseline = New-TenantStateSnapshot -Index $before
+Assert-Equal 4 $baseline.Count 'the baseline covers every process in the tenant, not just the targets'
+Assert-Equal $true $baseline[$TargetId.ToLowerInvariant()].IsArchived 'the baseline records archive state'
+Assert-Equal 493 $baseline[$MasterId.ToLowerInvariant()].GroupId 'the baseline records the home group'
+
+# The Hold phase restores the target into temp group 831. The master follows it
+# out of the archive, and an unrelated process vanishes.
+$after = New-MockIndex @(
+    @{ UniqueId=$TargetId;  NumericId=1; Name='Order Handling (AU)'; IsArchived=$false; GroupId=831 },
+    @{ UniqueId=$MasterId;  NumericId=2; Name='Order Handling';      IsArchived=$true;  GroupId=493 },
+    @{ UniqueId=$BystandId; NumericId=3; Name='Unrelated';           IsArchived=$false; GroupId=200 }
+)
+
+$collateral = @(Compare-TenantState -Baseline $baseline -Index $after -ExpectedUniqueIds @($TargetId))
+
+Assert-Equal 2 $collateral.Count 'only the unexpected changes are reported'
+Assert-Equal 0 @($collateral | Where-Object { $_.UniqueId -eq $TargetId }).Count `
+    'the target is expected to move and is not reported as collateral'
+Assert-Equal 0 @($collateral | Where-Object { $_.UniqueId -eq $BystandId }).Count `
+    'an untouched process is not reported'
+
+$master = @($collateral | Where-Object { $_.UniqueId -eq $MasterId })[0]
+Assert-Equal 'Archived' $master.Change 'the master is reported as newly archived'
+Assert-Equal $false $master.WasArchived 'the master was active before the run'
+Assert-Equal 493 $master.OriginalGroupId 'the home group is carried so it can be put back'
+
+$vanished = @($collateral | Where-Object { $_.UniqueId -eq $VanishId })[0]
+Assert-Equal 'Disappeared' $vanished.Change 'a process that vanished from the tenant is caught'
+
+# A pure move, with archive state unchanged.
+$moved = New-MockIndex @(
+    @{ UniqueId=$TargetId;  NumericId=1; Name='Order Handling (AU)'; IsArchived=$true;  GroupId=493 },
+    @{ UniqueId=$MasterId;  NumericId=2; Name='Order Handling';      IsArchived=$false; GroupId=831 },
+    @{ UniqueId=$BystandId; NumericId=3; Name='Unrelated';           IsArchived=$false; GroupId=200 },
+    @{ UniqueId=$VanishId;  NumericId=4; Name='Doomed';              IsArchived=$false; GroupId=200 }
+)
+$movedCollateral = @(Compare-TenantState -Baseline $baseline -Index $moved -ExpectedUniqueIds @($TargetId))
+Assert-Equal 1 $movedCollateral.Count 'a group move with no archive change is still collateral'
+Assert-Equal 'Moved' $movedCollateral[0].Change 'it is classified as a move'
+Assert-Equal 831 $movedCollateral[0].CurrentGroupId 'the group it was parked in is named'
+
+# A clean run reports nothing.
+$clean = @(Compare-TenantState -Baseline $baseline -Index $before -ExpectedUniqueIds @($TargetId))
+Assert-Equal 0 $clean.Count 'an unchanged tenant produces no collateral'
+
+# Holders the run restored on purpose are expected, not collateral.
+$expected = @(Compare-TenantState -Baseline $baseline -Index $after -ExpectedUniqueIds @($TargetId, $MasterId, $VanishId))
+Assert-Equal 0 $expected.Count 'processes the run deliberately changed are excluded'
+
+# ---------------------------------------------------------------------------
+Write-Host "`nInput/Output finder matches the full walk" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# The blind-spot sweep uses the narrow finder instead of walking every activity
+# tree and discarding the result. The two must agree on Input and Output sites.
+
+$acr = Get-Content (Join-Path $root 'Tests/Fixtures/ActionCustomerRequest.json') -Raw | ConvertFrom-Json
+$dtTarget = '2e917985-9446-4969-bfad-eef7350532a4'
+
+$viaFull = @(Find-ProcessReferenceSite -ProcessObject $acr -TargetUniqueIds @($dtTarget) |
+    Where-Object { $_.Category -eq 'Input' -or $_.Category -eq 'Output' })
+$viaNarrow = @(Find-InputOutputReferenceSite -ProcessObject $acr -TargetUniqueIds @($dtTarget))
+
+Assert-Equal $viaFull.Count $viaNarrow.Count 'the narrow finder finds the same number of Input/Output sites'
+if ($viaFull.Count -gt 0 -and $viaNarrow.Count -eq $viaFull.Count) {
+    $samePaths = $true
+    for ($i = 0; $i -lt $viaFull.Count; $i++) {
+        if ($viaFull[$i].Path -ne $viaNarrow[$i].Path) { $samePaths = $false }
+    }
+    Assert-True $samePaths 'the narrow finder reports the same paths as the full walk'
+}
+Assert-Equal 0 @(Find-InputOutputReferenceSite -ProcessObject $acr -TargetUniqueIds @($dtTarget) |
+    Where-Object { $_.Category -eq 'Link' }).Count 'the narrow finder never returns Link sites'
+Assert-Equal 0 @(Find-InputOutputReferenceSite -ProcessObject $null -TargetUniqueIds @($dtTarget)).Count `
+    'a null process yields no sites rather than throwing'
+
+# ---------------------------------------------------------------------------
 Write-Host "`n======================================" -ForegroundColor Cyan
 Write-Host "  Passed: $script:Pass   Failed: $script:Fail" -ForegroundColor $(if ($script:Fail -eq 0) { 'Green' } else { 'Red' })
 Write-Host "======================================`n" -ForegroundColor Cyan
