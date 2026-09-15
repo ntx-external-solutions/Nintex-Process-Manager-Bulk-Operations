@@ -1,6 +1,6 @@
 # Nintex Process Manager Bulk Operations
 
-**Version 4.2.** The version is defined once, in `$script:ScriptVersion` at the top of
+**Version 4.3.** The version is defined once, in `$script:ScriptVersion` at the top of
 `Nintex-BulkOperations.ps1`, and printed at startup.
 
 A PowerShell script for bulk operations on Nintex Process Manager (Promapp) processes
@@ -172,7 +172,8 @@ This is what makes the script scriptable and schedulable; the menu path is uncha
 | `-IncludeSubgroups` | Include subgroups for `-Source Group` |
 
 `-Force` does **not** wave through a Mode 5 reconciliation mismatch, a failed
-verification, an unresolved participant, or a collateral change. Those still stop the
+verification, an unresolved participant, a collateral change, or a variation
+pre-flight warning. Those still stop the
 run, because they mean the plan does not match the tenant, and that is precisely when
 nobody should be deleting anything unattended.
 
@@ -587,6 +588,15 @@ Known broken or incomplete as of this revision:
   worth a look on a first run against a new tenant. One `claimed 1, located 2` pair,
   where the JSON holds more than the API reports, still gates deliberately: it is the
   only observed shape that could mean a reference is being missed.
+- **The variation pre-flight is a name heuristic.** It matches `<master>::<variant>`
+  against existing process names. It had no false negatives on the only sample
+  available, which was five targets, but nothing in the API exposes the real link,
+  so it can miss a variation whose master was renamed and can flag two unrelated
+  processes that share a prefix. Treat a warning as a prompt to check, not a verdict.
+- **The before/after baseline cannot cover the whole tenant.** It is built from the
+  two list sweeps, and processes exist that neither returns. Those cannot be
+  diffed at all; the run reports them as `NotInBaseline` when it encounters one and
+  reverses nothing for them, because no prior state was recorded.
 - **Group moves are not reversed automatically.** When a run changes a process it was
   not asked to change, an unwanted archive or un-archive is undone, but a process that
   merely moved group while staying active is named for manual correction instead. The
@@ -617,7 +627,34 @@ For issues or questions:
 
 ## Version History
 
-**Version 4.2** (Current)
+**Version 4.3** (Current)
+- Fixed: the collateral guard reported clean while five non-target processes
+  changed state. Measurement settled why. A lone archived process was restored,
+  polled, re-archived and polled again, and each poll showed the new state
+  immediately: the index does not lag, so the existing checkpoints were not
+  blind, they ran before anything had happened. The variation coupling fires on
+  **delete**, not on restore or archive, and there was no checkpoint after the
+  delete. There is now. It cannot prevent the delete, which is why the two
+  earlier checkpoints still exist, but it names what changed and restores what
+  is still restorable.
+- Fixed: a run that changed processes it was not asked to change could still
+  finish reporting `0 failed`. Collateral is now counted as failure and printed
+  under its own heading, naming every process and what is left to do by hand.
+- Added: a pre-flight warning, which is the only check that can **prevent** the
+  damage rather than report it. A target named `<master>::<variant>` whose base
+  name matches an existing process that is not itself a target means the run is
+  about to touch a master nobody listed. It warns an attended run and stops an
+  unattended one. This is a name heuristic, not an API guarantee: it can miss a
+  variation whose master was renamed and can flag two unrelated processes that
+  share a prefix. The separator is configurable.
+- Changed: the baseline no longer implies it covers the tenant. It covers what
+  the two list sweeps return, and processes exist that neither returns. Any id
+  the run encounters that the baseline never saw is reported as `NotInBaseline`
+  rather than passed over, and nothing is reversed for it because no prior state
+  was ever recorded. Processes left stranded in the holding group feed the
+  collateral report instead of appearing only in the group-deletion message.
+
+**Version 4.2**
 - Fixed: a bulk operation on a process **variation** silently acted on its master.
   A live run archived two processes and moved a third, none of them targets and
   none in the ledger. Nintex PM stores a variation as its own record in its own
