@@ -661,15 +661,78 @@ operate on something else. **There is no read that answers the question.**
 What can be done is to record the state of every process in the tenant before
 the run, and compare after each mutating phase. Anything that moved which was
 not asked to move is collateral. That is what `New-TenantStateSnapshot` and
-`Compare-TenantState` do, and the check runs twice:
+`Compare-TenantState` do, and the check runs three times:
 
-1. after the Hold phase restores archived targets, and
+1. after the Hold phase restores archived targets,
 2. after the pre-delete archive pass, which is the last point before the
-   irreversible step.
+   irreversible step, and
+3. after the deletes.
 
-Collateral stops the run. `-Force` cannot approve it: a run that has just
-demonstrated it affects processes nobody listed has no business proceeding to a
-delete unattended.
+Collateral at 1 or 2 stops the run. `-Force` cannot approve it: a run that has
+just demonstrated it affects processes nobody listed has no business proceeding
+to a delete unattended.
+
+### The coupling fires on DELETE, and the index does not lag
+
+Measured, because two explanations fitted the first observation equally well:
+either the damage lands after the last checkpoint, or the post-mutation index
+read is stale and every checkpoint is blind.
+
+A single archived process with no variation relatives was restored, polled,
+re-archived and polled again:
+
+```
+picked: 'Request Information from Support' 03e9c212 archived=True grp=333
+BASELINE          archived=True  grp=333  indexSize=654
+
+MUTATION 1: restore
+  restore returned: True (2s)
+  t+13s  archived=False grp=333   visible in index? YES
+
+MUTATION 2: re-archive
+  archive returned: True (3s)
+  t+15s  archived=True grp=333    visible in index? YES
+
+FINAL: archived=True grp=333      RESTORED TO BASELINE: True
+```
+
+**The index does not lag.** The first read after each mutation already showed
+the new state, and the 13 to 15 seconds is how long the sweep itself takes.
+There is no staleness to work around, no settle-and-retry is needed, and
+`Get-NpmProcessIndex` can be trusted immediately after a write.
+
+So checkpoints 1 and 2 report clean because nothing has happened yet. Restoring
+a variation and archiving it are both harmless; the master moves when the
+variation is **deleted**. That also explains masters found archived and sitting
+in the temporary group after a run: the archive pass only ever archives targets,
+so their archiving can only have come from the delete.
+
+Checkpoint 3 cannot prevent any of it, which is precisely why 1 and 2 exist. It
+turns a silent failure into a reported one and reverses the part that is still
+reversible — an unwanted archive can be undone even after the delete that caused
+it. A run that finds collateral does not report `0 failed`; an earlier one
+printed `6 operations, 5 successful, 1 skipped, 0 failed` over five processes it
+never named.
+
+### Warning before the fact: the name heuristic
+
+Checkpoints report damage. Preventing it needs the coupling known in advance,
+and no field carries it. The naming convention does, imperfectly: a variation is
+named `<master name>::<variant>`. On this tenant 62 processes carry the
+separator and 43 of those have a process with the matching base name.
+
+So `Find-VariationMaster` treats a target whose name contains the separator as a
+variation, and warns when a process with its base name exists and is not itself
+a target. It selected all five targets of the run that produced collateral, and
+all five produced it: no false negatives on the only sample available, which is
+a sample of five.
+
+It is a heuristic, not an API contract. It can miss a variation whose master was
+renamed, and it can flag two unrelated processes sharing a prefix. That is why
+it warns an attended run rather than blocking it, and why an unattended one
+stops: a heuristic is the wrong thing to block a human on, and the right thing
+to stop a machine on. The separator is a parameter, because it is a convention
+and another tenant may not share it.
 
 The same signal is produced by another user editing the tenant mid-run, which is
 indistinguishable from the outside and is treated the same way.
@@ -681,6 +744,24 @@ move endpoint available here is the one Mode 3 uses, which is documented below
 as broken, and guessing with a broken endpoint on a process the operator never
 meant to touch makes two problems out of one. Those are named for manual
 correction. A process that disappeared cannot be recovered by anything.
+
+### The baseline cannot cover the whole tenant
+
+`Compare-TenantState` iterates the baseline, and the baseline is built from the
+two list sweeps. Those sweeps are incomplete (see the next section), so a
+process neither returns has no before-state and **no placement of any checkpoint
+can classify it**. One turned up stranded in a holding group after a run, having
+never appeared in any before-state.
+
+This cannot be closed while the listing endpoints are incomplete, so the output
+stops implying total coverage: the snapshot line says what the number counts and
+that processes exist outside it. Beyond that, any id the run actually
+encounters that is absent from the baseline is reported under its own category,
+`NotInBaseline` — it cannot be said whether it changed, only that the run
+touched it and its prior state is unknown. Nothing is reversed for one of those,
+because there is no recorded state to reverse to. Processes stranded in the
+holding group feed this report rather than appearing only in the
+group-deletion message, which is not where anyone looks for damage.
 
 ### Some processes are in no list but are still fetchable
 

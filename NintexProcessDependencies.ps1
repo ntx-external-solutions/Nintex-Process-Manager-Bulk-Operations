@@ -1209,6 +1209,123 @@ function New-TenantStateSnapshot {
     return $baseline
 }
 
+function Find-VariationMaster {
+    <#
+    .SYNOPSIS
+        Targets that look like variations, whose master is not also a target.
+
+    .DESCRIPTION
+        The only thing that prevents collateral damage is knowing about the
+        coupling BEFORE anything mutates, and no field in the API exposes it.
+        The name does, imperfectly.
+
+        On this tenant a variation is named "<master name>::<variant>". 62
+        processes carry the separator and 43 of those have a process with the
+        matching base name. So: a target whose name contains the separator is
+        treated as a variation, and if a process with its base name exists and
+        is NOT itself a target, the run is about to touch something nobody
+        listed.
+
+        This is a heuristic and is documented as one. It selected all five
+        targets of the run that produced collateral, and all five produced it,
+        so it has no false negatives on the only sample available. That is a
+        sample of five. It can miss a variation whose master was renamed, and it
+        can flag two unrelated processes that happen to share a prefix.
+
+        Being a heuristic is why it warns rather than blocks an attended run.
+        Being the only warning available before the damage is why an unattended
+        run stops on it.
+
+    .PARAMETER Separator
+        Default '::'. Configurable because it is a naming convention, not an API
+        contract, and another tenant may not use it.
+    #>
+    param(
+        $Index,
+        [string[]]$TargetUniqueIds,
+        [string]$Separator = '::'
+    )
+
+    $found = @()
+    if ($null -eq $Index) { return $found }
+
+    $targetLookup = @{}
+    foreach ($id in @($TargetUniqueIds)) {
+        if ($id) { $targetLookup[$id.ToLowerInvariant()] = $true }
+    }
+
+    # Name to entries. Names are not unique, so every match is reported.
+    $byName = @{}
+    foreach ($entry in $Index.Values) {
+        if (-not $entry.Name) { continue }
+        $nameKey = ([string]$entry.Name).Trim().ToLowerInvariant()
+        if (-not $byName.ContainsKey($nameKey)) { $byName[$nameKey] = @() }
+        $byName[$nameKey] += $entry
+    }
+
+    foreach ($id in @($TargetUniqueIds)) {
+        if (-not $id) { continue }
+        $entry = Get-NpmIndexEntry -Index $Index -UniqueId $id
+        if ($null -eq $entry -or -not $entry.Name) { continue }
+
+        $name = [string]$entry.Name
+        $at = $name.IndexOf($Separator)
+        if ($at -lt 1) { continue }
+
+        $baseName = $name.Substring(0, $at).Trim()
+        if (-not $baseName) { continue }
+
+        $baseKey = $baseName.ToLowerInvariant()
+        if (-not $byName.ContainsKey($baseKey)) { continue }
+
+        foreach ($master in $byName[$baseKey]) {
+            # A master that is itself being deleted is not a surprise.
+            if ($targetLookup.ContainsKey($master.UniqueId.ToLowerInvariant())) { continue }
+
+            $found += [PSCustomObject]@{
+                TargetUniqueId  = $entry.UniqueId
+                TargetName      = $name
+                BaseName        = $baseName
+                MasterUniqueId  = $master.UniqueId
+                MasterName      = $master.Name
+                MasterGroupId   = $master.GroupId
+                MasterIsArchived = $master.IsArchived
+            }
+        }
+    }
+
+    return $found
+}
+
+function Show-VariationWarning {
+    param($Matches, [string]$Separator = '::')
+
+    $items = @($Matches)
+    if ($items.Count -eq 0) { return }
+
+    Write-Host "`n========================================" -ForegroundColor Yellow
+    Write-Host "  VARIATION TARGETS DETECTED" -ForegroundColor Yellow
+    Write-Host "========================================" -ForegroundColor Yellow
+    Write-Host "$($items.Count) target(s) are named like variations, and their master is NOT in" -ForegroundColor Yellow
+    Write-Host "the target set. Acting on a variation acts on its master too." -ForegroundColor Yellow
+    Write-Host ""
+
+    foreach ($group in ($items | Group-Object TargetUniqueId)) {
+        $first = $group.Group[0]
+        Write-Host "  $($first.TargetName)" -ForegroundColor Yellow
+        Write-Host "      ($($first.TargetUniqueId))" -ForegroundColor DarkGray
+        foreach ($m in $group.Group) {
+            $state = if ($m.MasterIsArchived) { 'archived' } else { 'active' }
+            Write-Host "      master: $($m.MasterName)  ($($m.MasterUniqueId)) - $state, group $($m.MasterGroupId)" -ForegroundColor Red
+        }
+    }
+
+    Write-Host ""
+    Write-Host "This is a NAME heuristic, matching on '$Separator', not an API guarantee. It can" -ForegroundColor Yellow
+    Write-Host "miss a variation whose master was renamed, and it can flag two unrelated" -ForegroundColor Yellow
+    Write-Host "processes that share a prefix. Nothing in the API exposes the real link." -ForegroundColor Yellow
+}
+
 function Compare-TenantState {
     <#
     .SYNOPSIS
@@ -1234,11 +1351,24 @@ function Compare-TenantState {
         Everything the run deliberately changed: the targets, plus any holder it
         restored on purpose. Those are not collateral and must be passed in, or
         every run reports its own work as damage.
+
+    .PARAMETER ObservedUniqueIds
+        Processes the run actually came across, whatever the lists said. Any of
+        them that is absent from the baseline is reported as NotInBaseline.
+
+        The baseline is built from the two list sweeps, and those sweeps are not
+        complete: processes exist that neither returns. One such process turned
+        up stranded in a holding group after a run, having never appeared in any
+        before-state, so no placement of any checkpoint could have classified it.
+        It cannot be said whether it changed, only that the run touched it and
+        its prior state is unknown. That is worth reporting as its own category
+        rather than passing over in silence.
     #>
     param(
         $Baseline,
         $Index,
-        [string[]]$ExpectedUniqueIds = @()
+        [string[]]$ExpectedUniqueIds = @(),
+        [string[]]$ObservedUniqueIds = @()
     )
 
     $collateral = @()
@@ -1292,6 +1422,38 @@ function Compare-TenantState {
         }
     }
 
+    # Anything the run met that the baseline never knew about. No before-state
+    # exists for these, so no comparison is possible; they are flagged on the
+    # strength of having been encountered at all.
+    $alreadyReported = @{}
+    foreach ($c in $collateral) { $alreadyReported[$c.UniqueId.ToLowerInvariant()] = $true }
+
+    foreach ($id in @($ObservedUniqueIds)) {
+        if (-not $id) { continue }
+        $key = $id.ToLowerInvariant()
+        if ($expected.ContainsKey($key)) { continue }
+        if ($Baseline.ContainsKey($key)) { continue }
+        if ($alreadyReported.ContainsKey($key)) { continue }
+        $alreadyReported[$key] = $true
+
+        $name = ''
+        $groupId = $null
+        if ($Index.ContainsKey($key)) {
+            $name = $Index[$key].Name
+            $groupId = $Index[$key].GroupId
+        }
+
+        $collateral += [PSCustomObject]@{
+            UniqueId        = $id
+            Name            = $name
+            Change          = 'NotInBaseline'
+            WasArchived     = $null
+            IsArchivedNow   = $(if ($Index.ContainsKey($key)) { $Index[$key].IsArchived } else { $null })
+            OriginalGroupId = $null
+            CurrentGroupId  = $groupId
+        }
+    }
+
     return $collateral
 }
 
@@ -1332,6 +1494,13 @@ function Show-CollateralDamage {
             'ArchivedAndMoved' {
                 $state = if ($item.IsArchivedNow) { 'ARCHIVED' } else { 'ACTIVE' }
                 Write-Host "      now $state in group $($item.CurrentGroupId); was $(if ($item.WasArchived) { 'archived' } else { 'active' }) in group $($item.OriginalGroupId)" -ForegroundColor Red
+            }
+            'NotInBaseline' {
+                Write-Host "      NOT IN THE BEFORE-STATE. The run encountered it, but neither process" -ForegroundColor Red
+                Write-Host "      list returned it beforehand, so what it looked like before is unknown." -ForegroundColor Red
+                if ($null -ne $item.CurrentGroupId) {
+                    Write-Host "      It is now in group $($item.CurrentGroupId)." -ForegroundColor Red
+                }
             }
         }
     }
@@ -1382,6 +1551,16 @@ function Restore-CollateralState {
 
     foreach ($item in $items) {
         $name = if ($item.Name) { $item.Name } else { $item.UniqueId }
+
+        if ($item.Change -eq 'NotInBaseline') {
+            Write-Host "  $name has no recorded before-state; not guessing at one." -ForegroundColor Yellow
+            $results += [PSCustomObject]@{
+                ObjectType = 'Process'; ObjectID = $item.UniqueId; Name = $name
+                Operation = 'ReverseCollateral'; Status = 'Skipped'
+                Message = 'No before-state was captured for this process; check it manually'
+            }
+            continue
+        }
 
         if ($item.Change -eq 'Disappeared') {
             Write-Host "  $name is GONE. Nothing can restore it from here." -ForegroundColor Red
@@ -2574,6 +2753,12 @@ function Invoke-ProcessTargetDeletion {
         right there. That gap is the last point where stopping still costs
         nothing: an unwanted archive can be undone, an unwanted delete cannot.
 
+        A third check runs AFTER the deletes, because measurement showed the
+        variation coupling actually fires on delete rather than on restore or
+        archive. It cannot stop anything. It exists so that the run reports what
+        it did instead of finishing with "0 failed" over five processes it never
+        named, and so that the reversible part is reversed.
+
     .PARAMETER TenantBaseline
         Full tenant state from before the run. Omit it and the check is skipped,
         which is the old behaviour.
@@ -2590,7 +2775,8 @@ function Invoke-ProcessTargetDeletion {
         $Plan,
         [bool]$ApprovalsEnabled = $false,
         $TenantBaseline = $null,
-        [scriptblock]$OnCollateral = $null
+        [scriptblock]$OnCollateral = $null,
+        [string[]]$ObservedUniqueIds = @()
     )
 
     $results = @()
@@ -2681,6 +2867,62 @@ function Invoke-ProcessTargetDeletion {
         }
     }
     Write-Host ""
+
+    # ---- Third checkpoint, after the deletes ------------------------------
+    # The variation coupling fires on DELETE, not on restore or archive. That
+    # was established by measurement: a lone archived process with no variation
+    # relatives was restored, polled, re-archived and polled again, and each
+    # poll showed the new state immediately. The index does not lag, so the two
+    # earlier checkpoints report clean because at that point nothing has
+    # happened yet.
+    #
+    # This one cannot prevent anything, which is exactly why the earlier two
+    # exist. What it can do is turn a silent failure into a reported one and
+    # recover the part that is still recoverable: an unwanted archive can be
+    # undone even after the delete that caused it.
+    if ($null -ne $TenantBaseline) {
+        Write-Host "`n=== CHECKING FOR COLLATERAL CHANGES (POST-DELETE) ===" -ForegroundColor Cyan
+        Write-Host "  Re-reading the tenant to see what the delete pass actually changed..." -ForegroundColor Gray
+
+        $postIndex = Get-NpmProcessIndex -SiteURL $SiteURL -Token $Token
+
+        $expectedAfter = @($targets)
+        $expectedAfter += @($Plan.Ledger | Where-Object { $_.RestoredByThisRun } | ForEach-Object { $_.UniqueId })
+
+        $postCollateral = @(Compare-TenantState -Baseline $TenantBaseline -Index $postIndex `
+            -ExpectedUniqueIds $expectedAfter -ObservedUniqueIds $ObservedUniqueIds)
+
+        # Anything already reported at an earlier checkpoint is not news.
+        $seen = @{}
+        foreach ($c in @($Plan.Collateral)) { $seen[$c.UniqueId.ToLowerInvariant()] = $true }
+        $newCollateral = @($postCollateral | Where-Object { -not $seen.ContainsKey($_.UniqueId.ToLowerInvariant()) })
+
+        if ($newCollateral.Count -gt 0) {
+            $Plan.Collateral = @($Plan.Collateral) + $newCollateral
+            foreach ($c in $newCollateral) {
+                $Plan.Log += "COLLATERAL after delete phase: $($c.UniqueId) ($($c.Name)) - $($c.Change)"
+            }
+
+            Show-CollateralDamage -Collateral $newCollateral -Phase 'after deleting targets'
+
+            Write-Host "The deletes have already happened and cannot be undone. What follows puts" -ForegroundColor Yellow
+            Write-Host "back the changes that are still reversible." -ForegroundColor Yellow
+
+            foreach ($c in $newCollateral) {
+                $cname = if ($c.Name) { $c.Name } else { $c.UniqueId }
+                $results += [PSCustomObject]@{
+                    ObjectType = 'Process'; ObjectID = $c.UniqueId; Name = $cname
+                    Operation = 'Collateral'; Status = 'Failed'
+                    Message = "Changed without being a target ($($c.Change)); detected after deletion"
+                }
+            }
+
+            $results += @(Restore-CollateralState -SiteURL $SiteURL -Token $Token `
+                -Collateral $newCollateral -ApprovalsEnabled $ApprovalsEnabled)
+        } else {
+            Write-Host "  No collateral changes from the delete pass." -ForegroundColor Green
+        }
+    }
 
     return $results
 }

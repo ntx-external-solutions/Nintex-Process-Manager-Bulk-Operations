@@ -400,6 +400,103 @@ $expected = @(Compare-TenantState -Baseline $baseline -Index $after -ExpectedUni
 Assert-Equal 0 $expected.Count 'processes the run deliberately changed are excluded'
 
 # ---------------------------------------------------------------------------
+Write-Host "`nVariation pre-flight heuristic" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# The only check that can PREVENT collateral damage, because it runs before the
+# first mutation. Nothing in the API exposes the variation/master link; the
+# naming convention "<master>::<variant>" does, imperfectly.
+
+$VarA   = '1111aaaa-0000-0000-0000-00000000000a'   # "Order Handling::AU"
+$MastA  = '2222bbbb-0000-0000-0000-00000000000b'   # "Order Handling"
+$VarB   = '3333cccc-0000-0000-0000-00000000000c'   # "Invoicing::NZ", master also a target
+$MastB  = '4444dddd-0000-0000-0000-00000000000d'   # "Invoicing"
+$Orphan = '5555eeee-0000-0000-0000-00000000000e'   # "Shipping::EU", no master exists
+$Plain  = '6666ffff-0000-0000-0000-00000000000f'   # no separator at all
+
+$varIndex = New-MockIndex @(
+    @{ UniqueId=$VarA;   NumericId=1; Name='Order Handling::AU'; IsArchived=$true;  GroupId=333 },
+    @{ UniqueId=$MastA;  NumericId=2; Name='Order Handling';     IsArchived=$false; GroupId=100 },
+    @{ UniqueId=$VarB;   NumericId=3; Name='Invoicing::NZ';      IsArchived=$true;  GroupId=333 },
+    @{ UniqueId=$MastB;  NumericId=4; Name='Invoicing';          IsArchived=$false; GroupId=100 },
+    @{ UniqueId=$Orphan; NumericId=5; Name='Shipping::EU';       IsArchived=$true;  GroupId=333 },
+    @{ UniqueId=$Plain;  NumericId=6; Name='Just A Process';     IsArchived=$true;  GroupId=333 }
+)
+
+# Deleting the AU variation alone: its master is not a target, so warn.
+$hits = @(Find-VariationMaster -Index $varIndex -TargetUniqueIds @($VarA))
+Assert-Equal 1 $hits.Count 'a variation whose master is not a target is flagged'
+Assert-Equal $MastA $hits[0].MasterUniqueId 'the master is identified by id'
+Assert-Equal 'Order Handling' $hits[0].BaseName 'the base name is the text before the separator'
+Assert-Equal $false $hits[0].MasterIsArchived 'the master state is carried so the warning can describe it'
+Assert-Equal 100 $hits[0].MasterGroupId 'the master group is carried too'
+
+# Deleting the variation AND its master: nothing surprising about that.
+$bothTargets = @(Find-VariationMaster -Index $varIndex -TargetUniqueIds @($VarB, $MastB))
+Assert-Equal 0 $bothTargets.Count 'a master that is itself a target is not flagged'
+
+# A separator with no matching base name cannot warn about anything.
+$orphaned = @(Find-VariationMaster -Index $varIndex -TargetUniqueIds @($Orphan))
+Assert-Equal 0 $orphaned.Count 'a variation with no existing master is not flagged'
+
+$plainOnly = @(Find-VariationMaster -Index $varIndex -TargetUniqueIds @($Plain))
+Assert-Equal 0 $plainOnly.Count 'a process with no separator is not treated as a variation'
+
+# The whole set at once, which is how a real run calls it.
+$allHits = @(Find-VariationMaster -Index $varIndex -TargetUniqueIds @($VarA, $VarB, $Orphan, $Plain))
+Assert-Equal 2 $allHits.Count 'both AU and NZ warn when neither master is a target'
+
+Assert-Equal 0 @(Find-VariationMaster -Index $varIndex -TargetUniqueIds @()).Count 'no targets, no warnings'
+Assert-Equal 0 @(Find-VariationMaster -Index $null -TargetUniqueIds @($VarA)).Count 'a null index does not throw'
+
+# The separator is a naming convention, not an API contract.
+$pipeIndex = New-MockIndex @(
+    @{ UniqueId=$VarA;  NumericId=1; Name='Order Handling|AU'; IsArchived=$true;  GroupId=333 },
+    @{ UniqueId=$MastA; NumericId=2; Name='Order Handling';    IsArchived=$false; GroupId=100 }
+)
+Assert-Equal 1 @(Find-VariationMaster -Index $pipeIndex -TargetUniqueIds @($VarA) -Separator '|').Count `
+    'the separator is configurable for tenants with another convention'
+Assert-Equal 0 @(Find-VariationMaster -Index $pipeIndex -TargetUniqueIds @($VarA)).Count `
+    'and the default does not match a different convention'
+
+# ---------------------------------------------------------------------------
+Write-Host "`nProcesses the baseline never covered" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# The baseline is built from the two list sweeps and those sweeps are not
+# complete. A process the run meets but that no sweep returned has no
+# before-state, so it cannot be diffed, only reported.
+
+$Ghost = '7777aaaa-0000-0000-0000-00000000000a'
+$smallBase = New-TenantStateSnapshot -Index (New-MockIndex @(
+    @{ UniqueId=$TargetId; NumericId=1; Name='Target'; IsArchived=$true; GroupId=493 }
+))
+$smallAfter = New-MockIndex @(
+    @{ UniqueId=$TargetId; NumericId=1; Name='Target'; IsArchived=$true;  GroupId=493 },
+    @{ UniqueId=$Ghost;    NumericId=9; Name='Issue Building Consent'; IsArchived=$false; GroupId=832 }
+)
+
+$withGhost = @(Compare-TenantState -Baseline $smallBase -Index $smallAfter `
+    -ExpectedUniqueIds @($TargetId) -ObservedUniqueIds @($Ghost))
+Assert-Equal 1 $withGhost.Count 'a process the run met but the baseline never saw is reported'
+Assert-Equal 'NotInBaseline' $withGhost[0].Change 'it gets its own category rather than a guessed one'
+Assert-Equal $Ghost $withGhost[0].UniqueId 'it is named by id'
+Assert-Equal $null $withGhost[0].WasArchived 'no before-state is invented for it'
+Assert-Equal 832 $withGhost[0].CurrentGroupId 'where it is now is recorded'
+
+# Without the observed list there is nothing to notice it by.
+Assert-Equal 0 @(Compare-TenantState -Baseline $smallBase -Index $smallAfter -ExpectedUniqueIds @($TargetId)).Count `
+    'an unobserved absent process cannot be detected and is not invented'
+
+# A target is expected even when it is not in the baseline.
+Assert-Equal 0 @(Compare-TenantState -Baseline $smallBase -Index $smallAfter `
+    -ExpectedUniqueIds @($TargetId, $Ghost) -ObservedUniqueIds @($Ghost)).Count `
+    'an observed id that was expected is not reported'
+
+# Reversal must not guess at a state it never recorded.
+$noGuess = @(Restore-CollateralState -SiteURL 'https://mock' -Token 't' -Collateral $withGhost)
+Assert-Equal 1 $noGuess.Count 'the unbaselined process still produces a result row'
+Assert-Equal 'Skipped' $noGuess[0].Status 'it is skipped rather than guessed at'
+
+# ---------------------------------------------------------------------------
 Write-Host "`nInput/Output finder matches the full walk" -ForegroundColor Cyan
 # ---------------------------------------------------------------------------
 # The blind-spot sweep uses the narrow finder instead of walking every activity

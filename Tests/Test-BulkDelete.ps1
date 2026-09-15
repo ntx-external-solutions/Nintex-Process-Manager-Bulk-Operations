@@ -452,6 +452,174 @@ finally {
 }
 
 # ---------------------------------------------------------------------------
+Write-Host "`nScenario: the coupling fires on DELETE, and the run says so" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# Measurement settled where the damage lands: restoring and archiving a process
+# leave the tenant exactly as found, and the index shows each change on the
+# first read afterwards. So the two earlier checkpoints report clean because
+# nothing has happened yet. The master moves when the variation is DELETED.
+#
+# The post-delete checkpoint cannot prevent that. It must report it, reverse
+# what is reversible, and above all not finish claiming 0 failed.
+
+$M2 = '88888888-8888-8888-8888-888888888888'
+
+function Reset-DeleteTimeTenant {
+    $script:Archived = @{ $T1 = $true;  $M2 = $false }
+    $script:GroupOf  = @{ $T1 = 333;    $M2 = 100 }
+    $script:Names    = @{ $T1 = 'Order Handling::AU'; $M2 = 'Something Unrelated' }
+    $script:Deleted  = @()
+    $script:RestoreCalls = @()
+    $script:ArchiveCalls = @()
+    $script:TempGroupDeleted = $false
+    $script:TempGroupContents = @()
+    $script:LastResults = @()
+}
+Reset-DeleteTimeTenant
+
+function Invoke-ApiGet {
+    param([string]$Url,[string]$Token)
+    if ($Url -match 'ListType=7') {
+        $page = 1
+        if ($Url -match 'Page=(\d+)') { $page = [int]$Matches[1] }
+        if ($page -gt 1) { return [PSCustomObject]@{ items = @() } }
+        $items = @()
+        foreach ($id in @($T1,$M2)) {
+            if (-not $script:Archived[$id]) { continue }
+            $items += [PSCustomObject]@{ processUniqueId=$id; processName=$script:Names[$id]; groupId=$script:GroupOf[$id] }
+        }
+        return [PSCustomObject]@{ items = $items }
+    }
+    return [PSCustomObject]@{ items = @() }
+}
+
+function Invoke-NpmApi {
+    param([string]$Url,[string]$Token,[string]$Method='Get',$Body=$null,[int]$MaxRetries=0)
+    function Ok($r) { return [PSCustomObject]@{ Success=$true; StatusCode=200; Response=$r; Error=$null } }
+
+    if ($Url -match 'ListType=(\d+)') {
+        $wantArchived = ([int]$Matches[1] -eq 7)
+        $items = @()
+        foreach ($id in @($T1,$M2)) {
+            if ($null -eq $script:Archived[$id]) { continue }      # deleted
+            if ($script:Archived[$id] -ne $wantArchived) { continue }
+            $items += [PSCustomObject]@{
+                processUniqueId=$id; id=1; processName=$script:Names[$id]; groupId=$script:GroupOf[$id] }
+        }
+        return Ok ([PSCustomObject]@{ items = $items })
+    }
+    if ($Url -match 'CheckProcessDependencies') { return Ok $null }
+
+    # Restore and archive are clean. Nothing follows the target out.
+    if ($Url -match 'RestoreProcess') {
+        $id = $Body.processUniqueId
+        $script:RestoreCalls += $id
+        $script:Archived[$id] = $false
+        $script:GroupOf[$id] = [int]$Body.processGroupId
+        return Ok @{}
+    }
+    if ($Url -match 'ArchiveProcess') {
+        $id = $Body.processUniqueId
+        $script:ArchiveCalls += $id
+        $script:Archived[$id] = $true
+        return Ok @{}
+    }
+
+    # The delete is where the coupling actually fires.
+    if ($Url -match 'DeleteProcess') {
+        $id = $Body.processUniqueId
+        $script:Deleted += $id
+        $script:Archived.Remove($id)
+        if ($id -eq $T1) { $script:Archived[$M2] = $true }
+        return Ok @{}
+    }
+
+    if ($Url -match 'mobile/api/v1/processes') {
+        $data = @()
+        foreach ($m in ($Url -split '&')) {
+            if ($m -match 'processUniqueIds=([0-9a-fA-F\-]+)') {
+                $id = $Matches[1]
+                if ($null -ne $script:Archived[$id]) {
+                    $data += [PSCustomObject]@{ ProcessModel = [PSCustomObject]@{
+                        UniqueId=$id; Name=$script:Names[$id]; GroupId=$script:GroupOf[$id]; StateId=2 } }
+                }
+            }
+        }
+        return Ok ([PSCustomObject]@{ data = $data })
+    }
+    if ($Method -eq 'Get' -and $Url -match '/Api/v1/Processes/([0-9a-fA-F\-]+)$') {
+        $id = $Matches[1]
+        return Ok ([PSCustomObject]@{ processJson = [PSCustomObject]@{
+            UniqueId=$id; Name=$script:Names[$id]; GroupId=$script:GroupOf[$id]; StateId=1 } })
+    }
+    return Ok $null
+}
+
+$work3 = Join-Path ([System.IO.Path]::GetTempPath()) "deltime-$([guid]::NewGuid())"
+New-Item -ItemType Directory -Path $work3 -Force | Out-Null
+Push-Location $work3
+try {
+    # -Force would be refused by the variation pre-flight, which is the point of
+    # the next scenario. Here the master has an unrelated name, so the heuristic
+    # stays quiet and the post-delete checkpoint is what has to catch it.
+    Invoke-BulkDeleteProcesses -SiteURL 'https://mock' -Token 't' -SourceType 'Archived' `
+        -TempGroupName 'Bulk Delete Temporary Group' -CurrentUsername 'u' -Force
+
+    Assert-Equal 1 $script:Deleted.Count 'the target is deleted, as asked'
+    Assert-True ($script:Deleted -contains $T1) 'and it is the right one'
+
+    $rows = @($script:LastResults)
+    $collateralRows = @($rows | Where-Object { $_.Operation -eq 'Collateral' })
+    Assert-Equal 1 $collateralRows.Count 'the post-delete checkpoint reports the master'
+    Assert-Equal $M2 $collateralRows[0].ObjectID 'by id'
+    Assert-Equal 'Failed' $collateralRows[0].Status 'as a failure, so the run cannot report 0 failed'
+    Assert-True (@($rows | Where-Object { $_.Status -eq 'Failed' }).Count -gt 0) `
+        'the run does NOT finish with zero failures'
+
+    Assert-Equal $false $script:Archived[$M2] 'the reversible damage is reversed: the master is active again'
+    Assert-Equal 100 $script:GroupOf[$M2] 'and back in its own group'
+
+    $planFile = @(Get-ChildItem -Path . -Filter 'Delete_Plan_*.json')[0]
+    $plan = Get-Content $planFile.FullName -Raw | ConvertFrom-Json
+    Assert-Equal 1 @($plan.Collateral).Count 'the plan records the collateral for audit'
+    Assert-True ((@($plan.Log) -join ' ') -like '*after delete phase*') 'the log says which phase found it'
+}
+finally {
+    Pop-Location
+    Remove-Item $work3 -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# ---------------------------------------------------------------------------
+Write-Host "`nScenario: the pre-flight stops an unattended run before it mutates" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+
+Reset-DeleteTimeTenant
+$script:Names = @{ $T1 = 'Order Handling::AU'; $M2 = 'Order Handling' }   # now it matches
+
+$work4 = Join-Path ([System.IO.Path]::GetTempPath()) "preflight-$([guid]::NewGuid())"
+New-Item -ItemType Directory -Path $work4 -Force | Out-Null
+Push-Location $work4
+try {
+    Invoke-BulkDeleteProcesses -SiteURL 'https://mock' -Token 't' -SourceType 'Archived' `
+        -TempGroupName 'Bulk Delete Temporary Group' -CurrentUsername 'u' -Force
+
+    Assert-Equal 0 $script:Deleted.Count 'nothing is deleted'
+    Assert-Equal 0 $script:RestoreCalls.Count 'nothing is even restored; the run stops before the Hold phase'
+    Assert-Equal 0 $script:ArchiveCalls.Count 'and before anything is archived'
+    Assert-Equal $false $script:Archived[$M2] 'the master is untouched'
+
+    $rows = @($script:LastResults)
+    $warnRows = @($rows | Where-Object { $_.Operation -eq 'VariationWarning' })
+    Assert-Equal 1 $warnRows.Count 'the master is named in the results'
+    Assert-Equal $M2 $warnRows[0].ObjectID 'by id'
+    Assert-Equal 'Failed' $warnRows[0].Status 'and counted as a failure, not a clean finish'
+}
+finally {
+    Pop-Location
+    Remove-Item $work4 -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# ---------------------------------------------------------------------------
 Write-Host "`nScenario: both archived-list readers page identically" -ForegroundColor Cyan
 # ---------------------------------------------------------------------------
 $script:PageSizesSeen = @()
