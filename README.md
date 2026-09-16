@@ -602,6 +602,11 @@ Known broken or incomplete as of this revision:
   references were never checked, so deleting it risks leaving a dangling reference
   behind. Re-run it once the tenant will restore it, or pass `-AllowUnheldTargets`
   to accept the risk explicitly.
+- **Orphan detection depends on a field the tenant may not send.** It reads
+  `groupExists` from the process listing. Where the listing omits it, every row
+  falls back to "the group is there" and the run reports zero orphans because it
+  cannot see them, not because there are none. The run says so rather than
+  leaving a silent zero to be read as a clean result.
 - **A process whose group was deleted cannot be put back.** The process listing reports
   this per row as `groupExists: false`; on the demo tenant it is 177 of 467 archived
   rows. Such a process can be archived, because archiving takes no group, but it cannot
@@ -642,7 +647,26 @@ For issues or questions:
 
 ## Version History
 
-**Version 4.6** (Current)
+**Version 4.7** (Current)
+- Fixed: the target list of things needing manual attention was never
+  re-verified. A run reported two targets as `still active and must be archived
+  manually`; a read afterwards found all three archived. The archive call
+  reported failure and took effect anyway. The collateral list was already
+  re-checked against a fresh read at the end of a run; the target list was built
+  from a different source and was not. Both are now re-derived from one sweep
+  taken at the moment the run ends, which also halves the cost of doing it. A
+  process that really is still active is still reported as still active, and a
+  process absent from both list sweeps is never cleared, because those sweeps are
+  known to be incomplete.
+- Added: `groupExists` is now three-state. Absent and false are different claims,
+  and collapsing them lost the ability to say which. Control flow is unchanged,
+  absence still reads as "the group is there", but a run against a listing that
+  omits the field now says orphan detection is unavailable rather than reporting
+  a clean zero from an unmeasured tenant. Mixed presence, where some rows carry
+  the field and some do not, is called out separately: that is the shape where an
+  absent field probably does mean the group is gone.
+
+**Version 4.6**
 - Fixed: restores failed for every process whose group had been deleted while it
   sat in the archive. The process listing has been reporting this all along, in a
   field called `groupExists`, and the script was discarding it. On the demo tenant

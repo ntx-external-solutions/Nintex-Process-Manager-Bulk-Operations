@@ -95,6 +95,15 @@ function Get-NodeValue {
     return $prop.Value
 }
 
+function Test-NodeHasProperty {
+    # Whether the payload carried this field at all. Distinct from its value
+    # being null or false: absent means "this listing does not report it".
+    param($Node, [string]$Name)
+
+    if ($null -eq $Node) { return $false }
+    return ($null -ne $Node.PSObject.Properties[$Name])
+}
+
 function Set-NodeValue {
     # Only assigns to properties that already exist. Never invents schema.
     param($Node, [string]$Name, $Value)
@@ -1344,6 +1353,85 @@ function Find-OrphanedGroupProcess {
     return $orphans
 }
 
+function Get-NpmGroupExistsCoverage {
+    <#
+    .SYNOPSIS
+        Whether this tenant's listing reports groupExists at all.
+
+    .DESCRIPTION
+        Orphan detection is only as good as the field it reads. On the measured
+        tenant the field is present on all 467 archived rows, 177 false and 290
+        true, so the detection is genuinely available there.
+
+        On a listing that omits it, every row falls back to "the group is
+        there", the run reports zero orphans, and a tenant that was never
+        measured is indistinguishable from a clean one. That is worth saying out
+        loud rather than inferring from a silent zero.
+
+        Mixed presence is the one to alarm on. If some rows carry the field and
+        some do not, absence is unlikely to be a payload-wide omission and may
+        well be the vanished-group case arriving in a different shape.
+
+    .OUTPUTS
+        State is 'Full', 'None' or 'Mixed'.
+    #>
+    param($Index)
+
+    $total = 0
+    $reported = 0
+    $orphans = 0
+
+    if ($null -ne $Index) {
+        foreach ($entry in $Index.Values) {
+            $total++
+            if ($entry.GroupExistsReported) {
+                $reported++
+                if (-not (ConvertTo-NpmGroupExists -Value $entry.GroupExists)) { $orphans++ }
+            }
+        }
+    }
+
+    $state = 'Full'
+    if ($total -eq 0 -or $reported -eq 0) { $state = 'None' }
+    elseif ($reported -lt $total) { $state = 'Mixed' }
+
+    return [PSCustomObject]@{
+        Total    = $total
+        Reported = $reported
+        Missing  = ($total - $reported)
+        Orphans  = $orphans
+        State    = $state
+    }
+}
+
+function Show-GroupExistsCoverage {
+    <#
+    .SYNOPSIS
+        Says when a zero-orphan result means "none" and when it means "unknown".
+    #>
+    param($Coverage)
+
+    if ($null -eq $Coverage) { return }
+
+    if ($Coverage.State -eq 'None') {
+        Write-Host "`nThis tenant's process listing does not report groupExists." -ForegroundColor Yellow
+        Write-Host "Orphan detection is unavailable here: a process whose group was deleted" -ForegroundColor Yellow
+        Write-Host "cannot be told apart from one whose group is fine, so this run reports no" -ForegroundColor Yellow
+        Write-Host "orphans because it cannot see them, not because there are none." -ForegroundColor Yellow
+        Write-Host "A restore into a vanished group will fail with HTTP 500 and fall back." -ForegroundColor Yellow
+        return
+    }
+
+    if ($Coverage.State -eq 'Mixed') {
+        Write-Host "`n$($Coverage.Missing) of $($Coverage.Total) listing row(s) do not report groupExists," -ForegroundColor Red
+        Write-Host "while $($Coverage.Reported) do. Those rows are being treated as though their group" -ForegroundColor Red
+        Write-Host "exists, which is the safe default but may be wrong: on a listing that reports" -ForegroundColor Red
+        Write-Host "the field everywhere else, a missing one is more likely to mean the group is" -ForegroundColor Red
+        Write-Host "gone than that the field was omitted. Check those processes before relying on" -ForegroundColor Red
+        Write-Host "this run's orphan count." -ForegroundColor Red
+    }
+}
+
 function Show-OrphanedGroupWarning {
     <#
     .SYNOPSIS
@@ -1644,7 +1732,8 @@ function Resolve-CollateralOutcome {
         [string]$SiteURL,
         [string]$Token,
         $Collateral,
-        $Results
+        $Results,
+        $FreshIndex = $null
     )
 
     $rows = @($Results)
@@ -1656,8 +1745,11 @@ function Resolve-CollateralOutcome {
     })
     if ($outstanding.Count -eq 0) { return $rows }
 
-    Write-Host "`n=== RE-CHECKING WHAT STILL NEEDS ATTENTION ===" -ForegroundColor Cyan
-    $freshIndex = Get-NpmProcessIndex -SiteURL $SiteURL -Token $Token
+    $freshIndex = $FreshIndex
+    if ($null -eq $freshIndex) {
+        Write-Host "`n=== RE-CHECKING WHAT STILL NEEDS ATTENTION ===" -ForegroundColor Cyan
+        $freshIndex = Get-NpmProcessIndex -SiteURL $SiteURL -Token $Token
+    }
 
     # Latest record per id, so a process reported at more than one checkpoint is
     # checked against one expectation rather than several.
@@ -1712,6 +1804,165 @@ function Resolve-CollateralOutcome {
     Write-Host "  $($stillOpen.Count) item(s) genuinely outstanding." -ForegroundColor $(if ($stillOpen.Count -gt 0) { 'Yellow' } else { 'Green' })
 
     return $updated
+}
+
+function Resolve-TargetOutcome {
+    <#
+    .SYNOPSIS
+        Re-checks the run's own targets after the unwind, the way the collateral
+        list is re-checked.
+
+    .DESCRIPTION
+        The unwind reports what each API call SAID, and the calls do not always
+        say what happened. A measured run told the operator that two targets were
+        "still active and must be archived manually"; a read afterwards found all
+        three archived. The archive call reported failure and took effect anyway.
+
+        Resolve-CollateralOutcome already fixed this for the collateral list. The
+        same defect survived in the target list, because that list is built from
+        a different source and was never re-read.
+
+        So every ReArchive row that is not already a success is re-derived from a
+        fresh read: is the process archived, and which group is it in. Both of
+        those are claims the row makes, and both are checkable.
+
+        This only ever corrects a row to match the tenant. A process that really
+        is still active stays reported as still active.
+    #>
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        $Ledger,
+        $Results,
+        $FreshIndex = $null
+    )
+
+    $rows = @($Results)
+    $entries = @($Ledger)
+    if ($entries.Count -eq 0) { return $rows }
+
+    $outstanding = @($rows | Where-Object {
+        $_.Operation -eq 'ReArchive' -and $_.Status -ne 'Success'
+    })
+    if ($outstanding.Count -eq 0) { return $rows }
+
+    $freshIndex = $FreshIndex
+    if ($null -eq $freshIndex) {
+        $freshIndex = Get-NpmProcessIndex -SiteURL $SiteURL -Token $Token
+    }
+
+    $ledgerByid = @{}
+    foreach ($entry in $entries) {
+        if (-not $entry.UniqueId) { continue }
+        $ledgerByid[([string]$entry.UniqueId).ToLowerInvariant()] = $entry
+    }
+
+    $corrected = 0
+    $updated = @()
+
+    foreach ($row in $rows) {
+        if ($row.Operation -ne 'ReArchive' -or $row.Status -eq 'Success') {
+            $updated += $row
+            continue
+        }
+
+        $key = ([string]$row.ObjectID).ToLowerInvariant()
+        if (-not $ledgerByid.ContainsKey($key)) { $updated += $row; continue }
+
+        $entry = $ledgerByid[$key]
+        $now = $null
+        if ($freshIndex.ContainsKey($key)) { $now = $freshIndex[$key] }
+
+        # Absent from both list sweeps is not evidence of anything. The sweeps
+        # are known to be incomplete, so a missing row cannot clear a warning.
+        if ($null -eq $now) { $updated += $row; continue }
+
+        $homeGroupId = $entry.OriginalGroupId
+        $homeExists = ConvertTo-NpmGroupExists -Value $entry.OriginalGroupExists
+        $inHome = ($null -ne $homeGroupId -and "$($now.GroupId)" -eq "$homeGroupId")
+
+        $status = 'Failed'
+        $message = "Still ACTIVE in group $($now.GroupId); archive it manually"
+
+        if ($now.IsArchived) {
+            if ($inHome) {
+                $status = 'Success'
+                $message = "Re-archived in group $homeGroupId; confirmed by a read after the run"
+            }
+            elseif ($null -eq $homeGroupId) {
+                $status = 'Skipped'
+                $message = "Archived in group $($now.GroupId); no original group was recorded"
+            }
+            elseif (-not $homeExists) {
+                $status = 'Skipped'
+                $message = "Archived in group $($now.GroupId); its original group $homeGroupId no longer exists"
+            }
+            else {
+                $status = 'Skipped'
+                $message = "Archived in group $($now.GroupId), NOT the original group $homeGroupId; move it manually"
+            }
+        }
+
+        if ($status -eq $row.Status -and $message -eq $row.Message) {
+            $updated += $row
+            continue
+        }
+
+        $corrected++
+        if ($row.Status -eq 'Failed' -and $status -ne 'Failed') {
+            Write-Host "  $($row.Name): the archive call reported failure but took effect." -ForegroundColor Green
+        } else {
+            Write-Host "  $($row.Name): $message" -ForegroundColor Yellow
+        }
+
+        $updated += [PSCustomObject]@{
+            ObjectType = $row.ObjectType; ObjectID = $row.ObjectID; Name = $row.Name
+            Operation = 'ReArchive'; Status = $status; Message = $message
+        }
+    }
+
+    if ($corrected -gt 0) {
+        Write-Host "  $corrected target row(s) corrected against a read taken after the run." -ForegroundColor Green
+    }
+
+    return $updated
+}
+
+function Resolve-RunOutcome {
+    <#
+    .SYNOPSIS
+        Re-checks both manual-attention lists against one fresh read of the
+        tenant, at the moment the run ends.
+
+    .DESCRIPTION
+        Both lists describe the tenant, and both were built from what API calls
+        said rather than from what the tenant shows. They are re-checked
+        together so the index is swept once rather than twice.
+    #>
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        $Collateral,
+        $Ledger,
+        $Results
+    )
+
+    $rows = @($Results)
+
+    $needsCheck = @($rows | Where-Object {
+        ($_.Operation -eq 'ReverseCollateral' -or $_.Operation -eq 'ReArchive') -and $_.Status -ne 'Success'
+    })
+    if ($needsCheck.Count -eq 0) { return $rows }
+
+    Write-Host "`n=== RE-CHECKING WHAT STILL NEEDS ATTENTION ===" -ForegroundColor Cyan
+    $fresh = Get-NpmProcessIndex -SiteURL $SiteURL -Token $Token
+
+    $rows = @(Resolve-CollateralOutcome -SiteURL $SiteURL -Token $Token `
+        -Collateral $Collateral -Results $rows -FreshIndex $fresh)
+    $rows = @(Resolve-TargetOutcome -SiteURL $SiteURL -Token $Token `
+        -Ledger $Ledger -Results $rows -FreshIndex $fresh)
+
+    return $rows
 }
 
 function Restore-CollateralState {
@@ -2031,6 +2282,10 @@ function Get-NpmProcessIndex {
                     IsArchived  = $isArchived
                     GroupId     = Get-NodeValue -Node $item -Name 'groupId'
                     GroupExists = ConvertTo-NpmGroupExists -Value (Get-NodeValue -Node $item -Name 'groupExists')
+                    # Absent and false are not the same claim. Control flow
+                    # treats absence as "the group is there"; reporting needs to
+                    # be able to say the listing never answered.
+                    GroupExistsReported = (Test-NodeHasProperty -Node $item -Name 'groupExists')
                 }
             }
 

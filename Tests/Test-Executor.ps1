@@ -773,6 +773,7 @@ $script:OrphanCalls = @()
 $script:OrphanGroups = @{ $OrphanId = 1; $HolderId = 500; $LiveId = 500 }
 $script:OrphanArchived = @($OrphanId, $HolderId)
 $script:OrphanDeps = @{}
+$script:OrphanEmitGroupExists = $true
 $TempGroupId = 900
 
 function Invoke-NpmApi {
@@ -787,15 +788,19 @@ function Invoke-NpmApi {
         foreach ($id in @($OrphanId, $HolderId, $LiveId)) {
             $isArch = ($script:OrphanArchived -contains $id)
             if (($listType -eq 7) -ne $isArch) { continue }
-            $items += [PSCustomObject]@{
+            $row = [PSCustomObject]@{
                 processUniqueId = $id
                 id              = 700
                 processName     = "P-$($id.Substring(29))"
                 groupId         = $script:OrphanGroups[$id]
                 groupName       = 'Promapp Demo Ltd.'
-                # The one field this whole scenario turns on.
-                groupExists     = ($id -ne $OrphanId)
             }
+            # The one field this whole scenario turns on. A tenant whose listing
+            # omits it is a different case from one that reports it false.
+            if ($script:OrphanEmitGroupExists) {
+                $row | Add-Member -NotePropertyName 'groupExists' -NotePropertyValue ($id -ne $OrphanId)
+            }
+            $items += $row
         }
         return Ok ([PSCustomObject]@{ items = $items; totalItemCount = $items.Count })
     }
@@ -855,6 +860,24 @@ Assert-Equal $false (Get-NpmIndexEntry -Index $oIndex -UniqueId $OrphanId).Group
     'the index carries groupExists through from the listing payload'
 Assert-Equal $true (Get-NpmIndexEntry -Index $oIndex -UniqueId $HolderId).GroupExists `
     'and does not mark a process whose group is fine'
+Assert-Equal $true (Get-NpmIndexEntry -Index $oIndex -UniqueId $OrphanId).GroupExistsReported `
+    'and records that this listing answered the question at all'
+Assert-Equal 'Full' (Get-NpmGroupExistsCoverage -Index $oIndex).State `
+    'so orphan detection is genuinely available on this tenant'
+
+# A listing that omits the field is a tenant that was never measured, not a
+# clean one. The flag still reads as "the group is there" for control flow.
+$script:OrphanEmitGroupExists = $false
+$quietIndex = Get-NpmProcessIndex -SiteURL 'https://mock' -Token 't'
+Assert-Equal $false (Get-NpmIndexEntry -Index $quietIndex -UniqueId $OrphanId).GroupExistsReported `
+    'a listing that omits groupExists is recorded as not having answered'
+Assert-Equal $true (Get-NpmIndexEntry -Index $quietIndex -UniqueId $OrphanId).GroupExists `
+    'while control flow still degrades to "the group is there"'
+Assert-Equal 'None' (Get-NpmGroupExistsCoverage -Index $quietIndex).State `
+    'so the run can say orphan detection is unavailable rather than reporting a clean zero'
+Assert-Equal 0 @(Find-OrphanedGroupProcess -Index $quietIndex -UniqueIds @($OrphanId)).Count `
+    'and finds no orphans, which is why the unavailability has to be said out loud'
+$script:OrphanEmitGroupExists = $true
 
 # ---- The endpoint is not asked a question already answered ------------------
 $script:OrphanCalls = @()
@@ -957,6 +980,121 @@ Assert-Equal 'Failed' $collateralRows[0].Status 'a collateral archive whose grou
 Assert-True ($collateralRows[0].Message -match 'no longer exists') 'and the row says why'
 Assert-Equal 0 @($script:OrphanCalls | Where-Object { $_.Url -match 'RestoreProcess' }).Count `
     'without calling an endpoint that can only answer 500'
+
+# ---------------------------------------------------------------------------
+Write-Host "`nScenario: the unwind reported what the API said, not what happened" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# A measured run told the operator that two targets were "still active and must
+# be archived manually". A read afterwards found all three archived: the archive
+# call reported failure and took effect anyway. The collateral list is already
+# re-checked at the end of a run; the target list was not.
+
+# The orphan mock above is still installed. Reuse its tenant.
+$script:OrphanArchived = @($OrphanId, $HolderId, $LiveId)
+$script:OrphanGroups = @{ $OrphanId = 900; $HolderId = 500; $LiveId = 777 }
+
+$ledger = @(
+    [PSCustomObject]@{ UniqueId = $HolderId; Name = 'Reported failed, actually archived'
+        OriginalGroupId = 500; OriginalGroupExists = $true }
+    [PSCustomObject]@{ UniqueId = $LiveId; Name = 'Reported failed, actually in the wrong group'
+        OriginalGroupId = 500; OriginalGroupExists = $true }
+    [PSCustomObject]@{ UniqueId = $OrphanId; Name = 'Orphan'
+        OriginalGroupId = 1; OriginalGroupExists = $false }
+)
+$reported = @(
+    [PSCustomObject]@{ ObjectType='Process'; ObjectID=$HolderId; Name='Reported failed, actually archived'
+        Operation='ReArchive'; Status='Failed'; Message='Re-archive failed; this process is still ACTIVE in group 500' }
+    [PSCustomObject]@{ ObjectType='Process'; ObjectID=$LiveId; Name='Reported failed, actually in the wrong group'
+        Operation='ReArchive'; Status='Failed'; Message='Re-archive failed; this process is still ACTIVE in group 500' }
+    [PSCustomObject]@{ ObjectType='Process'; ObjectID=$OrphanId; Name='Orphan'
+        Operation='ReArchive'; Status='Failed'; Message='Re-archive failed; this process is still ACTIVE in group 1' }
+)
+
+$checked = @(Resolve-TargetOutcome -SiteURL 'https://mock' -Token 't' -Ledger $ledger -Results $reported)
+
+$fixed = @($checked | Where-Object { $_.ObjectID -eq $HolderId })[0]
+Assert-Equal 'Success' $fixed.Status 'an archive that reported failure but took effect is no longer on the manual list'
+Assert-True ($fixed.Message -match 'group 500') 'and the row names where it actually is'
+
+$wrongGroup = @($checked | Where-Object { $_.ObjectID -eq $LiveId })[0]
+Assert-Equal 'Skipped' $wrongGroup.Status 'archived but in the wrong group is not a failure and not a success'
+Assert-True ($wrongGroup.Message -match 'group 777') 'and the row names the group it is really in'
+Assert-True ($wrongGroup.Message -notmatch 'still ACTIVE') 'and stops claiming it is still active'
+
+$orphanRow2 = @($checked | Where-Object { $_.ObjectID -eq $OrphanId })[0]
+Assert-Equal 'Skipped' $orphanRow2.Status 'an orphan archived where it sits is reported as such'
+Assert-True ($orphanRow2.Message -match 'no longer exists') 'with the reason it is not in its original group'
+
+# The narrow test: a target that really is still active stays on the list.
+$script:OrphanArchived = @()
+$stillActive = @(Resolve-TargetOutcome -SiteURL 'https://mock' -Token 't' `
+    -Ledger $ledger -Results $reported)
+Assert-Equal 3 @($stillActive | Where-Object { $_.Status -eq 'Failed' }).Count `
+    'a process that really is still active is still reported as still active'
+Assert-True (@($stillActive | Where-Object { $_.ObjectID -eq $HolderId })[0].Message -match 'archive it manually') `
+    'and is still told to be archived manually'
+
+# Rows that are already right are left alone, and so are rows with no ledger entry.
+$script:OrphanArchived = @($HolderId)
+$untouched = @(
+    [PSCustomObject]@{ ObjectType='Process'; ObjectID=$HolderId; Name='Fine'
+        Operation='ReArchive'; Status='Success'; Message='Re-archived in group 500' }
+    [PSCustomObject]@{ ObjectType='Process'; ObjectID='99999999-0000-0000-0000-000000000000'; Name='Not in the ledger'
+        Operation='ReArchive'; Status='Failed'; Message='Re-archive failed' }
+    [PSCustomObject]@{ ObjectType='Process'; ObjectID=$HolderId; Name='Different operation'
+        Operation='Delete'; Status='Failed'; Message='Delete failed' }
+)
+$kept = @(Resolve-TargetOutcome -SiteURL 'https://mock' -Token 't' -Ledger $ledger -Results $untouched)
+Assert-Equal 'Success' $kept[0].Status 'a row that was already a success is untouched'
+Assert-Equal 'Failed' $kept[1].Status 'a row with no ledger entry is left alone'
+Assert-Equal 'Failed' $kept[2].Status 'and so is a row for a different operation'
+
+# A process the fresh sweeps do not return proves nothing: the sweeps are known
+# to be incomplete, so a missing row cannot clear a warning.
+$script:OrphanGroups = @{}
+$script:OrphanArchived = @()
+$gone = @([PSCustomObject]@{ ObjectType='Process'; ObjectID='88888888-0000-0000-0000-000000000000'
+    Name='Absent'; Operation='ReArchive'; Status='Failed'; Message='Re-archive failed' })
+$goneLedger = @([PSCustomObject]@{ UniqueId='88888888-0000-0000-0000-000000000000'; Name='Absent'
+    OriginalGroupId=500; OriginalGroupExists=$true })
+$goneRows = @(Resolve-TargetOutcome -SiteURL 'https://mock' -Token 't' -Ledger $goneLedger -Results $gone)
+Assert-Equal 'Failed' $goneRows[0].Status 'a process absent from both sweeps does not get cleared'
+
+# Both lists are re-checked against ONE fresh read, not two.
+$script:OrphanArchived = @($HolderId)
+$script:OrphanGroups = @{ $HolderId = 500; $LiveId = 500 }
+$script:OrphanCalls = @()
+
+$bothLists = @(
+    [PSCustomObject]@{ ObjectType='Process'; ObjectID=$HolderId; Name='Target'
+        Operation='ReArchive'; Status='Failed'; Message='Re-archive failed; this process is still ACTIVE in group 500' }
+    [PSCustomObject]@{ ObjectType='Process'; ObjectID=$LiveId; Name='Collateral'
+        Operation='ReverseCollateral'; Status='Skipped'; Message='Still misplaced' }
+)
+$bothCollateral = @([PSCustomObject]@{ UniqueId=$LiveId; Name='Collateral'; Change='Archived'
+    WasArchived=$false; IsArchivedNow=$true; OriginalGroupId=500; OriginalGroupExists=$true; CurrentGroupId=500 })
+$bothLedger = @([PSCustomObject]@{ UniqueId=$HolderId; Name='Target'
+    OriginalGroupId=500; OriginalGroupExists=$true })
+
+$both = @(Resolve-RunOutcome -SiteURL 'https://mock' -Token 't' `
+    -Collateral $bothCollateral -Ledger $bothLedger -Results $bothLists)
+
+Assert-Equal 'Success' @($both | Where-Object { $_.Operation -eq 'ReArchive' })[0].Status `
+    'the target list is corrected'
+Assert-Equal 'Success' @($both | Where-Object { $_.Operation -eq 'ReverseCollateral' })[0].Status `
+    'and the collateral list is corrected in the same pass'
+
+$sweeps = @($script:OrphanCalls | Where-Object { $_.Url -match 'ListType=0' }).Count
+Assert-Equal 1 $sweeps 'against a single index sweep, not one per list'
+
+# Nothing outstanding means no sweep at all.
+$script:OrphanCalls = @()
+$allFine = @([PSCustomObject]@{ ObjectType='Process'; ObjectID=$HolderId; Name='Target'
+    Operation='ReArchive'; Status='Success'; Message='Re-archived in group 500' })
+[void](Resolve-RunOutcome -SiteURL 'https://mock' -Token 't' `
+    -Collateral $bothCollateral -Ledger $bothLedger -Results $allFine)
+Assert-Equal 0 @($script:OrphanCalls | Where-Object { $_.Url -match 'ListType=0' }).Count `
+    'a clean run does not pay for a re-check it does not need'
 
 Write-Host "`n======================================" -ForegroundColor Cyan
 Write-Host "  Passed: $script:Pass   Failed: $script:Fail" -ForegroundColor $(if ($script:Fail -eq 0) { 'Green' } else { 'Red' })
