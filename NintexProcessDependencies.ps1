@@ -1072,7 +1072,8 @@ function New-ProcessLedgerEntry {
         [string]$Name,
         [bool]$WasArchived,
         [string]$OriginalGroupUniqueId,
-        $OriginalGroupId
+        $OriginalGroupId,
+        [bool]$OriginalGroupExists = $true
     )
 
     return [PSCustomObject]@{
@@ -1081,6 +1082,7 @@ function New-ProcessLedgerEntry {
         WasArchived           = $WasArchived
         OriginalGroupUniqueId = $OriginalGroupUniqueId
         OriginalGroupId       = $OriginalGroupId
+        OriginalGroupExists   = $OriginalGroupExists
         RestoredByThisRun     = $false
         RestoredToGroupId     = $null
         Denormalized          = $false
@@ -1159,6 +1161,7 @@ function New-ProcessStateSnapshot {
             IsArchivedNow         = $entry.IsArchived
             OriginalGroupId       = $entry.GroupId
             OriginalGroupUniqueId = $groupUniqueId
+            OriginalGroupExists   = (ConvertTo-NpmGroupExists -Value $entry.GroupExists)
             RestoredByThisRun     = $false
         }
     }
@@ -1198,11 +1201,12 @@ function New-TenantStateSnapshot {
     foreach ($entry in $Index.Values) {
         if (-not $entry.UniqueId) { continue }
         $baseline[$entry.UniqueId.ToLowerInvariant()] = [PSCustomObject]@{
-            UniqueId   = $entry.UniqueId
-            Name       = $entry.Name
-            NumericId  = $entry.NumericId
-            IsArchived = $entry.IsArchived
-            GroupId    = $entry.GroupId
+            UniqueId    = $entry.UniqueId
+            Name        = $entry.Name
+            NumericId   = $entry.NumericId
+            IsArchived  = $entry.IsArchived
+            GroupId     = $entry.GroupId
+            GroupExists = (ConvertTo-NpmGroupExists -Value $entry.GroupExists)
         }
     }
 
@@ -1296,6 +1300,82 @@ function Find-VariationMaster {
     }
 
     return $found
+}
+
+function Find-OrphanedGroupProcess {
+    <#
+    .SYNOPSIS
+        Targets whose group no longer exists.
+
+    .DESCRIPTION
+        A process archived before its group was deleted is left pointing at a
+        group that is gone. The listing reports this per row as groupExists,
+        and reports groupId 1 with the tenant's own name in groupName as the
+        placeholder for the vanished group. On the measured tenant that is 177
+        of 467 archived rows, so it is an ordinary state, not an edge case.
+
+        It matters because such a process can be archived but cannot be restored
+        anywhere: RestoreProcess takes a group id, and answers HTTP 500 for one
+        that does not exist.
+
+        This keys on groupExists and not on groupId 1. Two of the measured rows
+        report a real numeric group that has since been deleted, and an id test
+        would miss both.
+    #>
+    param($Index, [string[]]$UniqueIds)
+
+    $orphans = @()
+    if ($null -eq $Index) { return $orphans }
+
+    foreach ($id in @($UniqueIds)) {
+        if (-not $id) { continue }
+        $entry = Get-NpmIndexEntry -Index $Index -UniqueId $id
+        if ($null -eq $entry) { continue }
+        if (ConvertTo-NpmGroupExists -Value $entry.GroupExists) { continue }
+
+        $orphans += [PSCustomObject]@{
+            UniqueId        = $entry.UniqueId
+            Name            = $entry.Name
+            OriginalGroupId = $entry.GroupId
+            IsArchived      = $entry.IsArchived
+        }
+    }
+
+    return $orphans
+}
+
+function Show-OrphanedGroupWarning {
+    <#
+    .SYNOPSIS
+        Says, before the first mutation, which targets cannot be put back.
+    #>
+    param($Orphans, [int]$TotalTargets = 0, [string]$HoldingGroupName = '')
+
+    $items = @($Orphans)
+    if ($items.Count -eq 0) { return }
+
+    Write-Host "`n========================================" -ForegroundColor Yellow
+    Write-Host "  TARGETS WHOSE GROUP NO LONGER EXISTS" -ForegroundColor Yellow
+    Write-Host "========================================" -ForegroundColor Yellow
+
+    $total = if ($TotalTargets -gt 0) { $TotalTargets } else { $items.Count }
+    Write-Host "$($items.Count) of $total target(s) belong to a group that no longer exists." -ForegroundColor Yellow
+    Write-Host "They can be archived but cannot be returned to their original group." -ForegroundColor Yellow
+    Write-Host ""
+
+    foreach ($item in ($items | Sort-Object Name)) {
+        $state = if ($item.IsArchived) { 'archived' } else { 'active' }
+        Write-Host "  $($item.Name)  ($($item.UniqueId))" -ForegroundColor Yellow
+        Write-Host "      $state; group $($item.OriginalGroupId) is gone" -ForegroundColor Gray
+    }
+
+    Write-Host ""
+    Write-Host "If the run does not delete them, they are archived where they sit and the" -ForegroundColor Yellow
+    Write-Host "results file names the group they are actually in." -ForegroundColor Yellow
+    if ($HoldingGroupName) {
+        Write-Host "That is inside '$HoldingGroupName', so the holding group is left in place" -ForegroundColor Yellow
+        Write-Host "rather than deleted. Move them somewhere real to clear it." -ForegroundColor Yellow
+    }
 }
 
 function Show-VariationWarning {
@@ -1413,6 +1493,7 @@ function Compare-TenantState {
                 WasArchived     = $before.IsArchived
                 IsArchivedNow   = $null
                 OriginalGroupId = $before.GroupId
+                OriginalGroupExists = (ConvertTo-NpmGroupExists -Value $before.GroupExists)
                 CurrentGroupId  = $null
             }
             continue
@@ -1437,6 +1518,7 @@ function Compare-TenantState {
             WasArchived     = $before.IsArchived
             IsArchivedNow   = $after.IsArchived
             OriginalGroupId = $before.GroupId
+            OriginalGroupExists = (ConvertTo-NpmGroupExists -Value $before.GroupExists)
             CurrentGroupId  = $after.GroupId
         }
     }
@@ -1469,6 +1551,7 @@ function Compare-TenantState {
             WasArchived     = $null
             IsArchivedNow   = $(if ($Index.ContainsKey($key)) { $Index[$key].IsArchived } else { $null })
             OriginalGroupId = $null
+            OriginalGroupExists = $true
             CurrentGroupId  = $groupId
         }
     }
@@ -1690,9 +1773,25 @@ function Restore-CollateralState {
 
         # Active before, archived now: un-archive it back into its own group.
         if (-not $item.WasArchived -and $item.IsArchivedNow) {
+            $homeExists = ConvertTo-NpmGroupExists -Value $item.OriginalGroupExists
+
+            if (-not $homeExists) {
+                # Nowhere to restore it to. Saying so is the whole of what this
+                # path can honestly do; restoring it into some other group would
+                # be a second unasked-for change on top of the first.
+                Write-Host "  $name cannot be restored: group $($item.OriginalGroupId) no longer exists." -ForegroundColor Red
+                $results += [PSCustomObject]@{
+                    ObjectType = 'Process'; ObjectID = $item.UniqueId; Name = $name
+                    Operation = 'ReverseCollateral'; Status = 'Failed'
+                    Message = "Cannot be restored: its group $($item.OriginalGroupId) no longer exists. It is archived; restore it manually into a group that does."
+                }
+                continue
+            }
+
             Write-Host "  Restoring $name to group $($item.OriginalGroupId)..." -ForegroundColor Yellow
             $ok = Restore-NpmProcess -SiteURL $SiteURL -Token $Token `
-                -ProcessUniqueId $item.UniqueId -ProcessGroupId $item.OriginalGroupId
+                -ProcessUniqueId $item.UniqueId -ProcessGroupId $item.OriginalGroupId `
+                -DestinationGroupExists $homeExists
 
             $results += [PSCustomObject]@{
                 ObjectType = 'Process'; ObjectID = $item.UniqueId; Name = $name
@@ -1762,6 +1861,7 @@ function ConvertTo-PlanLedgerEntry {
             WasArchived           = $_.WasArchived
             OriginalGroupUniqueId = $_.OriginalGroupUniqueId
             OriginalGroupId       = $_.OriginalGroupId
+            OriginalGroupExists   = (ConvertTo-NpmGroupExists -Value $_.OriginalGroupExists)
             RestoredByThisRun     = $_.RestoredByThisRun
             Denormalized          = $false
             Deleted               = $false
@@ -1788,6 +1888,7 @@ function New-DependencyPlan {
         Reconciliation = @()
         FailedTargets  = @()
         Unresolved     = @()
+        OrphanedHolders = @()
         Collateral     = @()
         Log            = @()
     }
@@ -1863,6 +1964,34 @@ function Start-NpmThrottle {
     if ($script:NpmThrottleMs -gt 0) { Start-Sleep -Milliseconds $script:NpmThrottleMs }
 }
 
+function ConvertTo-NpmGroupExists {
+    <#
+    .SYNOPSIS
+        Reads a groupExists flag, treating "not reported" as "the group is there".
+
+    .DESCRIPTION
+        The process listing returns groupExists per row, and false means the
+        row's group was deleted while the process sat in the archive. On the
+        measured tenant 177 of 467 archived rows report false, and every one of
+        the 175 rows that also report groupId 1 is among them: groupId 1 with
+        the tenant's own name in groupName is the placeholder the API returns
+        for that state. There is no group 1 in a 243-group tree.
+
+        A missing field is not a missing group. Absence means this payload does
+        not report the flag, and reading that as false would mark every process
+        orphaned and make the pre-flight warn about the whole tenant. So only an
+        explicit false counts.
+    #>
+    param($Value)
+
+    if ($null -eq $Value) { return $true }
+    if ($Value -is [bool]) { return $Value }
+
+    $text = "$Value".Trim()
+    if ($text -eq '') { return $true }
+    return ($text -notmatch '^(?i:false|0)$')
+}
+
 function Get-NpmProcessIndex {
     <#
     .SYNOPSIS
@@ -1901,6 +2030,7 @@ function Get-NpmProcessIndex {
                     Name        = [string](Get-NodeValue -Node $item -Name 'processName')
                     IsArchived  = $isArchived
                     GroupId     = Get-NodeValue -Node $item -Name 'groupId'
+                    GroupExists = ConvertTo-NpmGroupExists -Value (Get-NodeValue -Node $item -Name 'groupExists')
                 }
             }
 
@@ -1947,14 +2077,43 @@ function Get-NpmProcessModelAnyState {
     return $model
 }
 
+# Why the last Restore-NpmProcess call returned false. '' when it succeeded or
+# when the endpoint itself refused; 'MissingGroup' when it was never called
+# because the destination group is gone.
+$script:NpmLastRestoreFailure = ''
+
+function Get-NpmLastRestoreFailure { return $script:NpmLastRestoreFailure }
+
 function Restore-NpmProcess {
+    <#
+    .SYNOPSIS
+        Un-archives a process into a named group.
+
+    .PARAMETER DestinationGroupExists
+        False when the caller already knows the destination group is gone.
+
+        RestoreProcess answers HTTP 500 for a group that does not exist, and
+        then answers it three more times on the way up the retry ladder: 14
+        seconds to establish something the process listing already said in a
+        field called groupExists. That answer is definitive, not transient, so
+        the call is not made at all and the reason is distinct from an endpoint
+        failure, which lets the caller pick somewhere real instead of retrying.
+    #>
     param(
         [string]$SiteURL,
         [string]$Token,
         [string]$ProcessUniqueId,
         $ProcessGroupId,
-        [int]$MaxRetries = $script:NpmMaxRetries
+        [int]$MaxRetries = $script:NpmMaxRetries,
+        [bool]$DestinationGroupExists = $true
     )
+
+    $script:NpmLastRestoreFailure = ''
+
+    if (-not $DestinationGroupExists) {
+        $script:NpmLastRestoreFailure = 'MissingGroup'
+        return $false
+    }
 
     Clear-NpmCachedModel -UniqueId $ProcessUniqueId
     Start-NpmThrottle
@@ -2243,11 +2402,12 @@ function New-ProcessDeletePlan {
             if ($null -ne $stateId) { $recoveredArchived = ([int]$stateId -ne 1) }
 
             $entry = [PSCustomObject]@{
-                UniqueId   = $UniqueId
-                NumericId  = Get-NodeValue -Node $recovered -Name 'Id'
-                Name       = [string](Get-NodeValue -Node $recovered -Name 'Name')
-                IsArchived = $recoveredArchived
-                GroupId    = Get-NodeValue -Node $recovered -Name 'GroupId'
+                UniqueId    = $UniqueId
+                NumericId   = Get-NodeValue -Node $recovered -Name 'Id'
+                Name        = [string](Get-NodeValue -Node $recovered -Name 'Name')
+                IsArchived  = $recoveredArchived
+                GroupId     = Get-NodeValue -Node $recovered -Name 'GroupId'
+                GroupExists = $true
             }
 
             $plan.Log += "Recovered participant $UniqueId ($($entry.Name)) by direct fetch; it is missing from both process list sweeps"
@@ -2279,12 +2439,17 @@ function New-ProcessDeletePlan {
 
         $wasArchived = $entry.IsArchived
         $restoredByThisRun = $false
+        $groupExists = ConvertTo-NpmGroupExists -Value $entry.GroupExists
 
         if ($null -ne $snap) {
             $wasArchived = [bool]$snap.WasArchived
             $restoredByThisRun = [bool]$snap.RestoredByThisRun
             if ($null -ne $snap.OriginalGroupId) { $groupId = $snap.OriginalGroupId }
             if ($snap.OriginalGroupUniqueId) { $groupUniqueId = [string]$snap.OriginalGroupUniqueId }
+            # The snapshot reports the home group, so it also reports whether
+            # that group is still there. The index may since have been refreshed
+            # and now name the temporary group, which does exist.
+            $groupExists = ConvertTo-NpmGroupExists -Value $snap.OriginalGroupExists
         }
 
         $record = [PSCustomObject]@{
@@ -2294,6 +2459,7 @@ function New-ProcessDeletePlan {
             WasArchived           = $wasArchived
             OriginalGroupUniqueId = $groupUniqueId
             OriginalGroupId       = $groupId
+            OriginalGroupExists   = $groupExists
             RestoredByThisRun     = $restoredByThisRun
             Denormalized          = $false
             Deleted               = $false
@@ -2419,6 +2585,7 @@ function New-ProcessDeletePlan {
         # Restore archived participants so their suppressed Input/Output edges
         # become visible to the next pass.
         $restoredThisPass = 0
+        $orphanedHolders = @()
         if ($AllowRestore -and $null -ne $HoldingGroupId) {
             foreach ($candidate in $candidates) {
                 $record = $ledger[$candidate.ToLowerInvariant()]
@@ -2428,6 +2595,27 @@ function New-ProcessDeletePlan {
                 # parking them in the temp group would strand them there.
                 $groupId = $record.OriginalGroupId
                 if ($null -eq $groupId) { $groupId = $HoldingGroupId }
+
+                # A holder whose own group was deleted has nowhere to be restored
+                # to. It cannot be parked in the temp group either, because it
+                # survives this run and would be stranded when the group goes.
+                # Un-restored, its Input/Output edges stay hidden, so a target it
+                # points at would be deleted on an incomplete reading.
+                #
+                # That is a blocker, and it is named as one. It used to surface
+                # three floors down as a reconciliation mismatch, which describes
+                # the symptom and not the cause.
+                if ($null -ne $record.OriginalGroupId -and
+                    -not (ConvertTo-NpmGroupExists -Value $record.OriginalGroupExists)) {
+                    $orphanedHolders += [PSCustomObject]@{
+                        UniqueId        = $record.UniqueId
+                        Name            = $record.Name
+                        OriginalGroupId = $record.OriginalGroupId
+                        Reason          = 'its group no longer exists'
+                    }
+                    Write-Host "    Cannot restore $($record.Name): its group ($($record.OriginalGroupId)) no longer exists." -ForegroundColor Red
+                    continue
+                }
 
                 Write-Host "    Restoring archived process: $($record.Name)" -ForegroundColor Yellow
                 if (Restore-NpmProcess -SiteURL $SiteURL -Token $Token -ProcessUniqueId $record.UniqueId -ProcessGroupId $groupId) {
@@ -2440,6 +2628,16 @@ function New-ProcessDeletePlan {
                     Write-Host "    Failed to restore $($record.Name)" -ForegroundColor Red
                 }
             }
+        }
+
+        if ($orphanedHolders.Count -gt 0) {
+            $plan.OrphanedHolders = @($orphanedHolders)
+            $plan.Status = 'Blocked'
+            foreach ($holder in $orphanedHolders) {
+                $plan.Log += "BLOCKED: dependency holder $($holder.UniqueId) ($($holder.Name)) is archived and cannot be restored because $($holder.Reason) (group $($holder.OriginalGroupId)). Its Input/Output references cannot be read, so a target it points at cannot be deleted safely."
+            }
+            $plan.Log += 'Move these holders into a group that exists, then re-run.'
+            return $plan
         }
 
         if ($restoredThisPass -eq 0) {
@@ -2531,6 +2729,7 @@ function New-ProcessDeletePlan {
             WasArchived           = $_.WasArchived
             OriginalGroupUniqueId = $_.OriginalGroupUniqueId
             OriginalGroupId       = $_.OriginalGroupId
+            OriginalGroupExists   = (ConvertTo-NpmGroupExists -Value $_.OriginalGroupExists)
             RestoredByThisRun     = $_.RestoredByThisRun
             Denormalized          = $_.Denormalized
             Deleted               = $_.Deleted
@@ -3103,10 +3302,17 @@ function Move-NpmProcessToGroup {
         [string]$Token,
         [string]$ProcessUniqueId,
         $TargetGroupId,
-        [bool]$ApprovalsEnabled = $false
+        [bool]$ApprovalsEnabled = $false,
+        [bool]$TargetGroupExists = $true
     )
 
     if ($null -eq $TargetGroupId) {
+        return [PSCustomObject]@{ Moved = $false; ActualGroupId = $null; Verified = $false }
+    }
+
+    # A group that is gone is not somewhere to move to, and the fallback below
+    # would archive the process on the way to finding that out.
+    if (-not $TargetGroupExists) {
         return [PSCustomObject]@{ Moved = $false; ActualGroupId = $null; Verified = $false }
     }
 
@@ -3199,6 +3405,22 @@ function Restore-ProcessPlanState {
             # rather than implying a placement that was never attempted.
             Write-Host "  $($entry.Name): no original group recorded; archiving where it sits." -ForegroundColor Yellow
             $placement = 'no original group was recorded, so it was archived where it sat'
+            $movedOk = $false
+        }
+        elseif (-not (ConvertTo-NpmGroupExists -Value $entry.OriginalGroupExists)) {
+            # Home is gone: this process was orphaned before the run started,
+            # and the run cannot put it somewhere that does not exist. Archiving
+            # takes no group, so it can always be archived; the only question is
+            # where, and the honest answer is where it sits.
+            #
+            # Attempting the move instead cost three HTTP 500s and a results row
+            # asserting a placement that never happened.
+            $current = Get-NpmProcessGroupId -SiteURL $SiteURL -Token $Token `
+                -ProcessUniqueId $entry.UniqueId -IsArchived $false
+
+            $where = if ($null -ne $current) { "group $current" } else { 'the group it currently sits in' }
+            Write-Host "  $($entry.Name): its original group ($homeGroupId) no longer exists; archiving in place in $where." -ForegroundColor Yellow
+            $placement = "$where; its original group $homeGroupId no longer exists"
             $movedOk = $false
         }
         else {

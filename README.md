@@ -602,6 +602,16 @@ Known broken or incomplete as of this revision:
   references were never checked, so deleting it risks leaving a dangling reference
   behind. Re-run it once the tenant will restore it, or pass `-AllowUnheldTargets`
   to accept the risk explicitly.
+- **A process whose group was deleted cannot be put back.** The process listing reports
+  this per row as `groupExists: false`; on the demo tenant it is 177 of 467 archived
+  rows. Such a process can be archived, because archiving takes no group, but it cannot
+  be restored anywhere, because `RestoreProcess` needs a group id and answers HTTP 500
+  for one that does not exist. The run names these targets before it starts, never
+  attempts the doomed restore, archives them where they sit, and the results file names
+  the group they are actually in. A dependency *holder* in this state blocks the run
+  instead: its Input and Output references cannot be read while it is archived, and it
+  cannot be un-archived, so a target pointing at it cannot be deleted on a complete
+  reading of the tenant. Move it into a group that exists and re-run.
 - **Group moves are not reversed automatically.** When a run changes a process it was
   not asked to change, an unwanted archive or un-archive is undone, but a process that
   merely moved group while staying active is named for manual correction instead. The
@@ -619,7 +629,7 @@ Three suites run against mocked tenants, no network and no credentials:
 |---|---|
 | `Test-Dependencies.ps1` | The pure functions: site location, removal, inversion, reconciliation, plan persistence |
 | `Test-Executor.ps1` | Plan construction and execution end to end, including a clean dependency result and the both-sides-deleted case |
-| `Test-BulkDelete.ps1` | Mode 5 orchestration: the Hold phase, the pre-mutation plan, ledger truthfulness, holding group cleanup, pagination, and collateral detection at both checkpoints |
+| `Test-BulkDelete.ps1` | Mode 5 orchestration: the Hold phase, the pre-mutation plan, ledger truthfulness, holding group cleanup, pagination, collateral detection at both checkpoints, and the pre-flight warnings |
 
 ## Support
 
@@ -632,7 +642,35 @@ For issues or questions:
 
 ## Version History
 
-**Version 4.5** (Current)
+**Version 4.6** (Current)
+- Fixed: restores failed for every process whose group had been deleted while it
+  sat in the archive. The process listing has been reporting this all along, in a
+  field called `groupExists`, and the script was discarding it. On the demo tenant
+  it is 177 of 467 archived rows, so it is an ordinary state rather than an edge
+  case: `RestoreProcess` was being asked to restore into a group that does not
+  exist, answering HTTP 500 and then answering it three more times on the way up
+  the retry ladder. The flag is now carried on the index, the snapshot, the tenant
+  baseline and the plan ledger, and nothing asks the endpoint a question the
+  listing already answered.
+- Added: a pre-flight that names these targets before the first mutation, the same
+  way the variation warning does. It is a warning, not a gate. They can be held and
+  deleted normally; what they cannot do is go home if the run stops short.
+- Fixed: the unwind now archives such a process where it sits and the results file
+  names the group it is actually in, rather than attempting a move that cannot
+  succeed and then reporting a placement that never happened.
+- Fixed: a dependency holder in this state now blocks the run and is named, with
+  the reason given as its group no longer existing. It cannot be un-archived, so
+  its Input and Output references cannot be read, so a target that points at it
+  cannot be deleted on a complete reading of the tenant. That used to surface
+  three floors down as a reconciliation mismatch, which describes the symptom and
+  not the cause.
+- Note: the test is on `groupExists`, never on `groupId -eq 1`. The API returns
+  `groupId: 1` with the tenant's own name as a placeholder for the vanished group,
+  and there is no group 1 in a 243-group tree, but two of the measured rows are
+  orphaned with a real numeric group that has since been deleted. An id test
+  misses both.
+
+**Version 4.5**
 - Fixed: a target whose Hold restore failed was deleted anyway. The Hold phase
   exists because archiving hides Input and Output rows, so a target that never
   came out of the archive was never checked; the run logged exactly that and

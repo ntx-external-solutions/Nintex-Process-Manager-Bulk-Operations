@@ -34,6 +34,41 @@ $url = "$SiteURL/Bff/Process/api/v1/processes?Page=1&PageSize=20&ListType=7"
 
 **Returns:** List of process metadata (UniqueId, Name, etc.) without full process details
 
+#### `groupExists`: the process whose group was deleted underneath it
+
+Each row carries a `groupExists` flag, and `false` means the group the row names was
+deleted while the process sat in the archive. The process is still there; its home is
+not.
+
+When that happens the API does not return an empty group. It returns a placeholder:
+`groupId: 1` with the tenant's own name in `groupName`.
+
+```
+processName   : (PAUSED due to COVID19) How do I cater for a Film Club library program?
+groupId       : 1
+groupUniqueId : 919ecb42-7ecb-42ad-9830-fb7f520181ea
+groupName     : Promapp Demo Ltd.
+groupExists   : False
+```
+
+Measured on the demo tenant: the group tree returns 243 groups and **none of them has
+numeric id 1**. The archived listing returns 467 rows, 177 report `groupExists: false`,
+and all 175 rows reporting `groupId: 1` are among those 177. The remaining two report
+a real numeric group that has since been deleted.
+
+Two consequences:
+
+1. **`RestoreProcess` returns HTTP 500 for a destination group that does not exist.**
+   This is definitive, not transient, so it must not go up a retry ladder. It is the
+   same shape of mistake as retrying the relocation probe: the answer is already in
+   hand, in a field called `groupExists`.
+2. **Test the flag, never the id.** Two of the measured rows are orphaned with a real
+   numeric group id, and a `groupId -eq 1` test misses both.
+
+An orphaned process can still be **archived**, because `ArchiveProcess` takes no group
+and archives a process where it currently sits. It simply cannot be **restored**
+anywhere until someone gives it a group that exists.
+
 ---
 
 ### Get Individual Process Details
