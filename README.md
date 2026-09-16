@@ -1,6 +1,6 @@
 # Nintex Process Manager Bulk Operations
 
-**Version 4.3.** The version is defined once, in `$script:ScriptVersion` at the top of
+**Version 4.4.** The version is defined once, in `$script:ScriptVersion` at the top of
 `Nintex-BulkOperations.ps1`, and printed at startup.
 
 A PowerShell script for bulk operations on Nintex Process Manager (Promapp) processes
@@ -627,7 +627,37 @@ For issues or questions:
 
 ## Version History
 
-**Version 4.3** (Current)
+**Version 4.4** (Current)
+- Fixed: a cancelled run left its targets archived in the temporary group. The
+  unwind archived each process where it stood, and at that point they stood in
+  the holding group, so three ended up under group 834 instead of 134, 649 and
+  493. Worse, the results row asserted the home group regardless, so the one
+  file operators are told to check claimed a placement that never happened. The
+  unwind now returns each process to its recorded group first, verifies where it
+  actually landed, and reports that rather than the intention. A relocation that
+  fails is reported as such instead of as a clean success.
+- Fixed: the `NotInBaseline` classification could never fire. The observed-id
+  list was gathered before the deletes, and at that moment the holding group
+  contains only targets, all of which are expected and skipped; the processes
+  worth catching are stranded there *by* the delete. Each checkpoint now
+  collects the list at the moment it runs. This is why a checkpoint counted 2
+  changed where 5 were affected.
+- Fixed: collateral was reported by two producers that merged neither ids nor
+  names, giving 7 rows for 5 processes, with one id under two different names
+  because the group listing drops the variation suffix and returns the master's
+  name. Rows are merged by id, the index name wins, and the count is of
+  processes affected rather than rows emitted.
+- Fixed: the variation warning counted target/master pairs and called them
+  targets, reporting 13 for 3. Targets and candidate masters are now counted
+  separately.
+- Fixed: a cleanup path computed its result rows and discarded them, so a
+  process stranded during a blocked run never reached the results file.
+- Changed: candidate masters are ordered with active ones first, then by group
+  proximity to the target, then by name. Only an active master can be
+  collaterally archived, so the row carrying the risk is now the first one read,
+  and it is marked.
+
+**Version 4.3**
 - Fixed: the collateral guard reported clean while five non-target processes
   changed state. Measurement settled why. A lone archived process was restored,
   polled, re-archived and polled again, and each poll showed the new state

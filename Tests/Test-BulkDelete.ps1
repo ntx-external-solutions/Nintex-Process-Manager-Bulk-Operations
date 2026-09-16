@@ -620,6 +620,145 @@ finally {
 }
 
 # ---------------------------------------------------------------------------
+Write-Host "`nScenario: a process stranded BY the delete is seen and named once" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# Two defects meet here.
+#
+# W3: the observed-id list was gathered before the deletes. At that moment the
+# holding group holds only the targets, every one of which is expected and so
+# skipped, and the NotInBaseline branch could never fire on a real run. The
+# process worth catching is stranded there BY the delete.
+#
+# W2: two producers raise collateral rows, the checkpoints and the holding-group
+# sweep, and neither merged with the other. The group listing also drops the
+# " :: Premium" suffix and returns the master's name, so one id printed under
+# two different names.
+
+$Ghost = 'ea181982-0000-0000-0000-0000000000aa'
+
+function Reset-StrandTenant {
+    $script:Archived = @{ $T1 = $true }
+    $script:GroupOf  = @{ $T1 = 333 }
+    $script:Names    = @{ $T1 = 'Create sales order' }
+    $script:Deleted  = @()
+    $script:RestoreCalls = @(); $script:ArchiveCalls = @()
+    $script:TempGroupDeleted = $false
+    $script:TempGroupContents = @()
+    $script:LastResults = @()
+}
+Reset-StrandTenant
+
+function Invoke-ApiGet {
+    param([string]$Url,[string]$Token)
+    if ($Url -match 'ListType=7') {
+        $page = 1
+        if ($Url -match 'Page=(\d+)') { $page = [int]$Matches[1] }
+        if ($page -gt 1) { return [PSCustomObject]@{ items = @() } }
+        $items = @()
+        if ($script:Archived[$T1]) {
+            $items += [PSCustomObject]@{ processUniqueId=$T1; processName=$script:Names[$T1]; groupId=$script:GroupOf[$T1] }
+        }
+        return [PSCustomObject]@{ items = $items }
+    }
+    return [PSCustomObject]@{ items = @() }
+}
+
+# The holding group is read live, so it reflects whatever the run has done.
+function Get-ProcessesFromGroup {
+    param([string]$SiteURL,[string]$Token,$GroupID,[string]$GroupUniqueId,$IncludeSubgroups)
+    return @($script:TempGroupContents)
+}
+
+function Invoke-NpmApi {
+    param([string]$Url,[string]$Token,[string]$Method='Get',$Body=$null,[int]$MaxRetries=0)
+    function Ok($r) { return [PSCustomObject]@{ Success=$true; StatusCode=200; Response=$r; Error=$null } }
+
+    if ($Url -match 'ListType=(\d+)') {
+        $wantArchived = ([int]$Matches[1] -eq 7)
+        $items = @()
+        foreach ($id in @($T1)) {
+            if ($null -eq $script:Archived[$id]) { continue }
+            if ($script:Archived[$id] -ne $wantArchived) { continue }
+            $items += [PSCustomObject]@{
+                processUniqueId=$id; id=1; processName=$script:Names[$id]; groupId=$script:GroupOf[$id] }
+        }
+        return Ok ([PSCustomObject]@{ items = $items })
+    }
+    if ($Url -match 'CheckProcessDependencies') { return Ok $null }
+    if ($Url -match 'RestoreProcess') {
+        $id = $Body.processUniqueId
+        $script:RestoreCalls += $id
+        $script:Archived[$id] = $false
+        $script:GroupOf[$id] = [int]$Body.processGroupId
+        $script:TempGroupContents = @([PSCustomObject]@{ processUniqueId = $T1; processName = 'Create sales order' })
+        return Ok @{}
+    }
+    if ($Url -match 'ArchiveProcess') {
+        $script:ArchiveCalls += $Body.processUniqueId
+        $script:Archived[$Body.processUniqueId] = $true
+        return Ok @{}
+    }
+    if ($Url -match 'DeleteProcess') {
+        $id = $Body.processUniqueId
+        $script:Deleted += $id
+        $script:Archived.Remove($id)
+
+        # The delete strands a process that NO list sweep ever returned, and the
+        # group listing reports it under its master's name without the suffix.
+        $script:TempGroupContents = @([PSCustomObject]@{
+            processUniqueId = $Ghost; processName = 'Issue Building Consent' })
+        return Ok @{}
+    }
+    if ($Url -match 'mobile/api/v1/processes') { return Ok ([PSCustomObject]@{ data = @() }) }
+    if ($Method -eq 'Get' -and $Url -match '/Api/v1/Processes/([0-9a-fA-F\-]+)$') {
+        $id = $Matches[1]
+        return Ok ([PSCustomObject]@{ processJson = [PSCustomObject]@{
+            UniqueId=$id; Name=$script:Names[$id]; GroupId=$script:GroupOf[$id]; StateId=1 } })
+    }
+    return Ok $null
+}
+
+$work5 = Join-Path ([System.IO.Path]::GetTempPath()) "strand-$([guid]::NewGuid())"
+New-Item -ItemType Directory -Path $work5 -Force | Out-Null
+Push-Location $work5
+try {
+    Invoke-BulkDeleteProcesses -SiteURL 'https://mock' -Token 't' -SourceType 'Archived' `
+        -TempGroupName 'Bulk Delete Temporary Group' -CurrentUsername 'u' -Force
+
+    $rows = @($script:LastResults)
+    $ghostRows = @($rows | Where-Object { $_.Operation -eq 'Collateral' -and $_.ObjectID -eq $Ghost })
+
+    Assert-True ($ghostRows.Count -gt 0) `
+        'a process stranded by the DELETE is caught, which the pre-delete list never could'
+    Assert-Equal 1 $ghostRows.Count 'and it is reported once, not once per producer'
+
+    Assert-Equal 1 @($rows | Where-Object { $_.Operation -eq 'Collateral' } |
+        ForEach-Object { $_.ObjectID } | Select-Object -Unique).Count `
+        'one collateral row per affected process'
+    Assert-Equal 1 @($rows | Where-Object { $_.Operation -eq 'Collateral' }).Count `
+        'no duplicate rows across the two producers'
+
+    Assert-True (@($rows | Where-Object { $_.Status -eq 'Failed' }).Count -gt 0) `
+        'and the run does not report it as clean'
+
+    # The plan's Collateral is written ONLY by the checkpoints, so this isolates
+    # W3 from the holding-group sweep, which would otherwise cover for it and
+    # make the checkpoint look like it worked when it had never fired.
+    $planFile = @(Get-ChildItem -Path . -Filter 'Delete_Plan_*.json')[0]
+    $plan = Get-Content $planFile.FullName -Raw | ConvertFrom-Json
+    $planGhost = @($plan.Collateral | Where-Object { $_.UniqueId -eq $Ghost })
+
+    Assert-Equal 1 $planGhost.Count 'the CHECKPOINT itself sees the stranded process, not just the cleanup sweep'
+    Assert-Equal 'NotInBaseline' $planGhost[0].Change `
+        'and classifies it as a process the baseline never covered'
+    Assert-True ((@($plan.Log) -join ' ') -like '*NotInBaseline*') 'the plan log records it'
+}
+finally {
+    Pop-Location
+    Remove-Item $work5 -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# ---------------------------------------------------------------------------
 Write-Host "`nScenario: both archived-list readers page identically" -ForegroundColor Cyan
 # ---------------------------------------------------------------------------
 $script:PageSizesSeen = @()

@@ -84,7 +84,7 @@ param(
     [switch]$IncludeSubgroups
 )
 
-$script:ScriptVersion = '4.3'
+$script:ScriptVersion = '4.4'
 
 # ----------------------------------------------------------------------------
 # Dependency engine. Mode 5 delegates all dependency discovery, reference
@@ -2592,6 +2592,22 @@ function Delete-ArchivedDocuments {
 
 # Object-based version that works directly with PSObjects (avoids double serialization)
 # Object-based version that works directly with PSObjects (avoids double serialization)
+function Resolve-CollateralName {
+    # One name per process, whoever is reporting it. The holding-group listing
+    # returns the master's name for a variation (the " :: Premium" suffix is
+    # dropped), so two producers could print one id under two names.
+    param($NameLookup, [string]$UniqueId, [string]$Fallback = '')
+
+    if ($null -ne $NameLookup -and $UniqueId) {
+        $key = $UniqueId.ToLowerInvariant()
+        if ($NameLookup.ContainsKey($key) -and $NameLookup[$key].Name) {
+            return [string]$NameLookup[$key].Name
+        }
+    }
+    if ($Fallback) { return $Fallback }
+    return $UniqueId
+}
+
 function Remove-HoldingGroup {
     <#
     .SYNOPSIS
@@ -2613,7 +2629,9 @@ function Remove-HoldingGroup {
         [string]$Token,
         $TempGroup,
         [string]$GroupName,
-        [string[]]$TargetUniqueIds = @()
+        [string[]]$TargetUniqueIds = @(),
+        [string[]]$ReportedUniqueIds = @(),
+        $NameLookup = $null
     )
 
     $results = @()
@@ -2651,16 +2669,36 @@ function Remove-HoldingGroup {
         # left behind, which makes it collateral whatever the list sweeps said.
         # It used to be mentioned only in the group-deletion message, which is
         # not where anyone looks for damage.
+        #
+        # The checkpoints are the other producer of collateral rows, so anything
+        # they already reported is skipped here. Emitting both gave 7 rows for 5
+        # processes.
+        $alreadyReported = @{}
+        foreach ($id in @($ReportedUniqueIds)) {
+            if ($id) { $alreadyReported[([string]$id).ToLowerInvariant()] = $true }
+        }
+
         foreach ($proc in $remaining) {
-            $name = if ($proc.processName) { $proc.processName } else { $proc.processUniqueId }
+            $procId = [string]$proc.processUniqueId
+            if (-not $procId) { continue }
+            $key = $procId.ToLowerInvariant()
+
             $isTarget = $false
             foreach ($t in @($TargetUniqueIds)) {
-                if ($t -and $t.ToLowerInvariant() -eq ([string]$proc.processUniqueId).ToLowerInvariant()) { $isTarget = $true }
+                if ($t -and $t.ToLowerInvariant() -eq $key) { $isTarget = $true }
             }
             if ($isTarget) { continue }
+            if ($alreadyReported.ContainsKey($key)) { continue }
+
+            # The group listing drops the variation suffix and shows the master's
+            # name, so the same id could print under two different names across
+            # the two producers. The index name wins: it is what the rest of the
+            # run calls this process.
+            $name = Resolve-CollateralName -NameLookup $NameLookup -UniqueId $procId `
+                -Fallback ([string]$proc.processName)
 
             $results += [PSCustomObject]@{
-                ObjectType = 'Process'; ObjectID = $proc.processUniqueId; Name = $name
+                ObjectType = 'Process'; ObjectID = $procId; Name = $name
                 Operation = 'Collateral'; Status = 'Failed'
                 Message = "Left stranded in the holding group '$GroupName' and was not a target; move it back manually"
             }
@@ -2979,7 +3017,15 @@ function Invoke-BulkDeleteProcesses {
 
         # ---- Collateral check, straight after the first mutating phase ----
         Write-Host "`n=== CHECKING FOR COLLATERAL CHANGES ===" -ForegroundColor Cyan
-        $holdCollateral = @(Compare-TenantState -Baseline $tenantBaseline -Index $index -ExpectedUniqueIds $targetUniqueIds)
+        $heldNow = @()
+        try {
+            $heldNow = @(Get-ProcessesFromGroup -SiteURL $SiteURL -Token $Token `
+                -GroupID $tempGroup.id -GroupUniqueId $tempGroup.uniqueId -IncludeSubgroups $false |
+                ForEach-Object { $_.processUniqueId } | Where-Object { $_ })
+        } catch { }
+
+        $holdCollateral = @(Compare-TenantState -Baseline $tenantBaseline -Index $index `
+            -ExpectedUniqueIds $targetUniqueIds -ObservedUniqueIds $heldNow)
 
         if ($holdCollateral.Count -gt 0) {
             Show-CollateralDamage -Collateral $holdCollateral -Phase 'after holding archived targets'
@@ -3010,7 +3056,10 @@ function Invoke-BulkDeleteProcesses {
                 # processes it was never asked to touch.
                 $results += @(Restore-ProcessPlanState -SiteURL $SiteURL -Token $Token -Plan $aborted -PlanPath $planPath -ApprovalsEnabled $approvalsEnabled)
                 $results += @(Restore-CollateralState -SiteURL $SiteURL -Token $Token -Collateral $holdCollateral -ApprovalsEnabled $approvalsEnabled)
-                $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds)
+                $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup `
+                    -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds `
+                    -ReportedUniqueIds @(@($aborted.Collateral) | ForEach-Object { $_.UniqueId }) `
+                    -NameLookup $tenantBaseline)
 
                 Save-DeleteResults -Results $results -Timestamp $timestamp
                 return
@@ -3059,7 +3108,10 @@ function Invoke-BulkDeleteProcesses {
             $plan.Ledger = @(ConvertTo-PlanLedgerEntry -Snapshot $snapshot)
             [void](Export-DependencyPlan -Plan $plan -Path $planPath)
             $results += @(Restore-ProcessPlanState -SiteURL $SiteURL -Token $Token -Plan $plan -PlanPath $planPath -ApprovalsEnabled $approvalsEnabled)
-            Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName
+            $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup `
+                -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds `
+                -ReportedUniqueIds @(@($plan.Collateral) | ForEach-Object { $_.UniqueId }) `
+                -NameLookup $tenantBaseline)
             Save-DeleteResults -Results $results -Timestamp $timestamp
         }
         return
@@ -3101,7 +3153,9 @@ function Invoke-BulkDeleteProcesses {
         if (-not $continue) {
             Write-Host "Operation cancelled. Nothing has been deleted." -ForegroundColor Yellow
             $results += @(Restore-ProcessPlanState -SiteURL $SiteURL -Token $Token -Plan $plan -PlanPath $planPath -ApprovalsEnabled $approvalsEnabled)
-            if ($tempGroup) { $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds) }
+            if ($tempGroup) { $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds `
+            -ReportedUniqueIds @(@($plan.Collateral) | ForEach-Object { $_.UniqueId }) `
+            -NameLookup $tenantBaseline) }
             Save-DeleteResults -Results $results -Timestamp $timestamp
             return
         }
@@ -3122,7 +3176,9 @@ function Invoke-BulkDeleteProcesses {
             Write-Host "Operation cancelled. Nothing has been deleted." -ForegroundColor Yellow
             Write-Host "Restored processes still need re-archiving; see $planPath" -ForegroundColor Yellow
             $results += @(Restore-ProcessPlanState -SiteURL $SiteURL -Token $Token -Plan $plan -PlanPath $planPath -ApprovalsEnabled $approvalsEnabled)
-            if ($tempGroup) { $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds) }
+            if ($tempGroup) { $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds `
+            -ReportedUniqueIds @(@($plan.Collateral) | ForEach-Object { $_.UniqueId }) `
+            -NameLookup $tenantBaseline) }
             Save-DeleteResults -Results $results -Timestamp $timestamp
             return
         }
@@ -3142,7 +3198,9 @@ function Invoke-BulkDeleteProcesses {
         if (-not $continue) {
             Write-Host "Operation cancelled before deletion." -ForegroundColor Yellow
             $results += @(Restore-ProcessPlanState -SiteURL $SiteURL -Token $Token -Plan $plan -PlanPath $planPath -ApprovalsEnabled $approvalsEnabled)
-            if ($tempGroup) { $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds) }
+            if ($tempGroup) { $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds `
+            -ReportedUniqueIds @(@($plan.Collateral) | ForEach-Object { $_.UniqueId }) `
+            -NameLookup $tenantBaseline) }
             Save-DeleteResults -Results $results -Timestamp $timestamp
             return
         }
@@ -3164,7 +3222,9 @@ function Invoke-BulkDeleteProcesses {
     if (-not $confirmed) {
         Write-Host "Deletion cancelled." -ForegroundColor Yellow
         $results += @(Restore-ProcessPlanState -SiteURL $SiteURL -Token $Token -Plan $plan -PlanPath $planPath -ApprovalsEnabled $approvalsEnabled)
-        if ($tempGroup) { $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds) }
+        if ($tempGroup) { $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds `
+            -ReportedUniqueIds @(@($plan.Collateral) | ForEach-Object { $_.UniqueId }) `
+            -NameLookup $tenantBaseline) }
         Save-DeleteResults -Results $results -Timestamp $timestamp
         return
     }
@@ -3172,20 +3232,22 @@ function Invoke-BulkDeleteProcesses {
     # Whatever is sitting in the holding group is something this run touched,
     # whether or not any list sweep ever returned it. That is the one signal
     # available for a process the baseline could not cover.
-    $observedIds = @()
-    if ($tempGroup) {
-        try {
-            $observedIds = @(Get-ProcessesFromGroup -SiteURL $SiteURL -Token $Token `
-                -GroupID $tempGroup.id -GroupUniqueId $tempGroup.uniqueId -IncludeSubgroups $false |
-                ForEach-Object { $_.processUniqueId } | Where-Object { $_ })
-        } catch {
-            Write-Host "  Could not read the holding group before deletion: $($_.Exception.Message)" -ForegroundColor Yellow
-        }
+    #
+    # Passed as a closure rather than a list, because WHEN it is read decides
+    # whether it contains anything. Read before the deletes it holds only the
+    # targets, which are all expected and all skipped; the processes worth
+    # catching are stranded there BY the delete. Each checkpoint calls this at
+    # the moment it runs.
+    $holdingGroupReader = {
+        if (-not $tempGroup) { return @() }
+        return @(Get-ProcessesFromGroup -SiteURL $SiteURL -Token $Token `
+            -GroupID $tempGroup.id -GroupUniqueId $tempGroup.uniqueId -IncludeSubgroups $false |
+            ForEach-Object { $_.processUniqueId } | Where-Object { $_ })
     }
 
     $deletionResults = @(Invoke-ProcessTargetDeletion -SiteURL $SiteURL -Token $Token -Plan $plan `
         -ApprovalsEnabled $approvalsEnabled -TenantBaseline $tenantBaseline -OnCollateral $collateralDecision `
-        -ObservedUniqueIds $observedIds)
+        -GetObservedUniqueIds $holdingGroupReader)
     $results += $deletionResults
 
     # The deletion step stops before deleting anything if the archive pass moved
@@ -3194,7 +3256,9 @@ function Invoke-BulkDeleteProcesses {
         [void](Export-DependencyPlan -Plan $plan -Path $planPath)
         $results += @(Restore-ProcessPlanState -SiteURL $SiteURL -Token $Token -Plan $plan -PlanPath $planPath -ApprovalsEnabled $approvalsEnabled)
         $results += @(Restore-CollateralState -SiteURL $SiteURL -Token $Token -Collateral $plan.Collateral -ApprovalsEnabled $approvalsEnabled)
-        if ($tempGroup) { $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds) }
+        if ($tempGroup) { $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds `
+            -ReportedUniqueIds @(@($plan.Collateral) | ForEach-Object { $_.UniqueId }) `
+            -NameLookup $tenantBaseline) }
         Save-DeleteResults -Results $results -Timestamp $timestamp
         return
     }
@@ -3205,7 +3269,9 @@ function Invoke-BulkDeleteProcesses {
     # ---- Clean up the holding group --------------------------------------
     if ($tempGroup) {
         Write-Host "`n=== CLEANUP ===" -ForegroundColor Cyan
-        $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds)
+        $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds `
+            -ReportedUniqueIds @(@($plan.Collateral) | ForEach-Object { $_.UniqueId }) `
+            -NameLookup $tenantBaseline)
     }
 
     # ---- Optional: delete the source group folders ------------------------
@@ -3260,14 +3326,30 @@ function Save-DeleteResults {
     # "6 operations, 5 successful, 1 skipped, 0 failed" while five processes it
     # never named had changed state.
     if ($collateral.Count -gt 0) {
+        # Merged by id. Two producers raise these (the checkpoints and the
+        # holding-group sweep) and a process caught by both is one process, not
+        # two: the count is of processes affected, not of rows emitted.
+        $byProcess = @($collateral | Group-Object { ([string]$_.ObjectID).ToLowerInvariant() })
+
         Write-Host "`n========================================" -ForegroundColor Red
         Write-Host "  THIS RUN CHANGED PROCESSES IT WAS NOT ASKED TO" -ForegroundColor Red
         Write-Host "========================================" -ForegroundColor Red
-        Write-Host "$($collateral.Count) process(es) affected without being targets:" -ForegroundColor Red
-        foreach ($c in $collateral) {
-            $label = if ($c.Name) { $c.Name } else { $c.ObjectID }
-            Write-Host "  $label  ($($c.ObjectID))" -ForegroundColor Red
-            Write-Host "      $($c.Message)" -ForegroundColor DarkGray
+        Write-Host "$($byProcess.Count) process(es) affected without being targets:" -ForegroundColor Red
+
+        foreach ($group in $byProcess) {
+            $rows = @($group.Group)
+            $id = $rows[0].ObjectID
+
+            # Longest name wins where they disagree: the group listing truncates
+            # a variation name to its master's, so the fuller one is the real one.
+            $label = $id
+            $named = @($rows | Where-Object { $_.Name } | Sort-Object { ([string]$_.Name).Length } -Descending)
+            if ($named.Count -gt 0) { $label = $named[0].Name }
+
+            Write-Host "  $label  ($id)" -ForegroundColor Red
+            foreach ($msg in @($rows | ForEach-Object { $_.Message } | Select-Object -Unique)) {
+                Write-Host "      $msg" -ForegroundColor DarkGray
+            }
         }
 
         if ($unreversed.Count -gt 0) {

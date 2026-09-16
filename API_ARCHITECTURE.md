@@ -714,6 +714,26 @@ it. A run that finds collateral does not report `0 failed`; an earlier one
 printed `6 operations, 5 successful, 1 skipped, 0 failed` over five processes it
 never named.
 
+### ArchiveProcess archives in place
+
+`ArchiveProcess` takes a process id and a comment. It does **not** take a group,
+and it archives the process wherever it currently sits. That matters at unwind
+time, because by then the targets are sitting in the temporary holding group:
+archiving without relocating first leaves them archived under a group that
+cleanup is about to delete.
+
+`RestoreProcess` is the only endpoint here that takes a group id. Its documented
+job is un-archiving, and whether it also relocates a process that is already
+active is not documented, so `Move-NpmProcessToGroup` tries it and then verifies
+rather than assuming. If the optimistic call does not move the process, the
+fallback uses only documented behaviour: archive, restore into the target group.
+That costs an extra archive event in the process's history and lands it in the
+right place.
+
+Whatever happens, the reported group is the one read back afterwards, not the
+one intended. A results file that asserts a placement which never happened is
+worse than one that admits it does not know.
+
 ### Warning before the fact: the name heuristic
 
 Checkpoints report damage. Preventing it needs the coupling known in advance,

@@ -1285,6 +1285,7 @@ function Find-VariationMaster {
             $found += [PSCustomObject]@{
                 TargetUniqueId  = $entry.UniqueId
                 TargetName      = $name
+                TargetGroupId   = $entry.GroupId
                 BaseName        = $baseName
                 MasterUniqueId  = $master.UniqueId
                 MasterName      = $master.Name
@@ -1303,20 +1304,38 @@ function Show-VariationWarning {
     $items = @($Matches)
     if ($items.Count -eq 0) { return }
 
+    # One row per (target, candidate master) pair, so the row count is not the
+    # target count. Reporting 13 "targets" for 3 targets is how a warning stops
+    # being read.
+    $byTarget = @($items | Group-Object TargetUniqueId)
+    $masterCount = @($items | ForEach-Object { $_.MasterUniqueId } | Select-Object -Unique).Count
+
     Write-Host "`n========================================" -ForegroundColor Yellow
     Write-Host "  VARIATION TARGETS DETECTED" -ForegroundColor Yellow
     Write-Host "========================================" -ForegroundColor Yellow
-    Write-Host "$($items.Count) target(s) are named like variations, and their master is NOT in" -ForegroundColor Yellow
-    Write-Host "the target set. Acting on a variation acts on its master too." -ForegroundColor Yellow
+    Write-Host "$($byTarget.Count) target(s) are named like variations, with $masterCount candidate master(s)" -ForegroundColor Yellow
+    Write-Host "not in the target set. Acting on a variation acts on its master too." -ForegroundColor Yellow
     Write-Host ""
 
-    foreach ($group in ($items | Group-Object TargetUniqueId)) {
+    foreach ($group in $byTarget) {
         $first = $group.Group[0]
         Write-Host "  $($first.TargetName)" -ForegroundColor Yellow
         Write-Host "      ($($first.TargetUniqueId))" -ForegroundColor DarkGray
-        foreach ($m in $group.Group) {
+
+        # W5: the row that carries the risk goes first. Only an ACTIVE master can
+        # be collaterally archived, and a master in the target's own group is a
+        # likelier relative than one elsewhere. Name breaks the remaining ties so
+        # the order is stable rather than whatever the hashtable happened to give.
+        $ordered = @($group.Group | Sort-Object `
+            @{ Expression = { if ($_.MasterIsArchived) { 1 } else { 0 } } }, `
+            @{ Expression = { if ("$($_.MasterGroupId)" -eq "$($_.TargetGroupId)") { 0 } else { 1 } } }, `
+            @{ Expression = { [string]$_.MasterName } })
+
+        foreach ($m in $ordered) {
             $state = if ($m.MasterIsArchived) { 'archived' } else { 'active' }
-            Write-Host "      master: $($m.MasterName)  ($($m.MasterUniqueId)) - $state, group $($m.MasterGroupId)" -ForegroundColor Red
+            $risk = if ($m.MasterIsArchived) { '' } else { '  <-- can be archived by this run' }
+            $colour = if ($m.MasterIsArchived) { 'DarkGray' } else { 'Red' }
+            Write-Host "      master: $($m.MasterName)  ($($m.MasterUniqueId)) - $state, group $($m.MasterGroupId)$risk" -ForegroundColor $colour
         }
     }
 
@@ -2776,7 +2795,8 @@ function Invoke-ProcessTargetDeletion {
         [bool]$ApprovalsEnabled = $false,
         $TenantBaseline = $null,
         [scriptblock]$OnCollateral = $null,
-        [string[]]$ObservedUniqueIds = @()
+        [string[]]$ObservedUniqueIds = @(),
+        [scriptblock]$GetObservedUniqueIds = $null
     )
 
     $results = @()
@@ -2808,7 +2828,13 @@ function Invoke-ProcessTargetDeletion {
         $expected = @($targets)
         $expected += @($Plan.Ledger | Where-Object { $_.RestoredByThisRun } | ForEach-Object { $_.UniqueId })
 
-        $collateral = @(Compare-TenantState -Baseline $TenantBaseline -Index $freshIndex -ExpectedUniqueIds $expected)
+        $observedNow = @($ObservedUniqueIds)
+        if ($null -ne $GetObservedUniqueIds) {
+            try { $observedNow += @(& $GetObservedUniqueIds) } catch { }
+        }
+
+        $collateral = @(Compare-TenantState -Baseline $TenantBaseline -Index $freshIndex `
+            -ExpectedUniqueIds $expected -ObservedUniqueIds $observedNow)
 
         if ($collateral.Count -gt 0) {
             $Plan.Collateral = @($Plan.Collateral) + $collateral
@@ -2889,8 +2915,19 @@ function Invoke-ProcessTargetDeletion {
         $expectedAfter = @($targets)
         $expectedAfter += @($Plan.Ledger | Where-Object { $_.RestoredByThisRun } | ForEach-Object { $_.UniqueId })
 
+        # Collected HERE, not handed in from before the deletes. A process the
+        # delete strands in the holding group is not there yet when the caller
+        # is assembling arguments, so a list gathered earlier contains only the
+        # targets, every one of which is expected and therefore skipped. That is
+        # why NotInBaseline never fired on a real run despite being wired up.
+        $observed = @($ObservedUniqueIds)
+        if ($null -ne $GetObservedUniqueIds) {
+            try { $observed += @(& $GetObservedUniqueIds) }
+            catch { Write-Host "  Could not list what the run left behind: $($_.Exception.Message)" -ForegroundColor Yellow }
+        }
+
         $postCollateral = @(Compare-TenantState -Baseline $TenantBaseline -Index $postIndex `
-            -ExpectedUniqueIds $expectedAfter -ObservedUniqueIds $ObservedUniqueIds)
+            -ExpectedUniqueIds $expectedAfter -ObservedUniqueIds $observed)
 
         # Anything already reported at an earlier checkpoint is not news.
         $seen = @{}
@@ -2927,15 +2964,91 @@ function Invoke-ProcessTargetDeletion {
     return $results
 }
 
+function Get-NpmProcessGroupId {
+    # Current numeric group of a process, or $null if it cannot be read.
+    param([string]$SiteURL, [string]$Token, [string]$ProcessUniqueId, [bool]$IsArchived = $false)
+
+    $model = Get-NpmProcessModelAnyState -SiteURL $SiteURL -Token $Token `
+        -UniqueId $ProcessUniqueId -IsArchived $IsArchived
+    if ($null -eq $model) { return $null }
+    return (Get-NodeValue -Node $model -Name 'GroupId')
+}
+
+function Move-NpmProcessToGroup {
+    <#
+    .SYNOPSIS
+        Puts an ACTIVE process back into a named group, and verifies it landed.
+
+    .DESCRIPTION
+        RestoreProcess takes a group id and is the only endpoint here that does.
+        Its documented job is un-archiving, and whether it also relocates a
+        process that is already active is not documented, so this tries it and
+        then checks, rather than assuming either way.
+
+        If the optimistic call does not move it, the fallback uses only
+        documented behaviour: archive it, restore it into the target group, and
+        leave it active there. That costs an extra archive event in the
+        process's history, which is worth it to land in the right place.
+
+        Returns the group the process is actually in afterwards, which the
+        caller reports rather than reporting the group it hoped for.
+    #>
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [string]$ProcessUniqueId,
+        $TargetGroupId,
+        [bool]$ApprovalsEnabled = $false
+    )
+
+    if ($null -eq $TargetGroupId) {
+        return [PSCustomObject]@{ Moved = $false; ActualGroupId = $null; Verified = $false }
+    }
+
+    [void](Restore-NpmProcess -SiteURL $SiteURL -Token $Token `
+        -ProcessUniqueId $ProcessUniqueId -ProcessGroupId $TargetGroupId)
+
+    $actual = Get-NpmProcessGroupId -SiteURL $SiteURL -Token $Token -ProcessUniqueId $ProcessUniqueId -IsArchived $false
+    if ($null -ne $actual -and "$actual" -eq "$TargetGroupId") {
+        return [PSCustomObject]@{ Moved = $true; ActualGroupId = $actual; Verified = $true }
+    }
+
+    # Fallback: archive, then restore into the group we want.
+    [void](Set-NpmProcessArchived -SiteURL $SiteURL -Token $Token -ProcessUniqueId $ProcessUniqueId `
+        -Comment 'Relocating to original group' -ApprovalsEnabled $ApprovalsEnabled)
+    [void](Restore-NpmProcess -SiteURL $SiteURL -Token $Token `
+        -ProcessUniqueId $ProcessUniqueId -ProcessGroupId $TargetGroupId)
+
+    $actual = Get-NpmProcessGroupId -SiteURL $SiteURL -Token $Token -ProcessUniqueId $ProcessUniqueId -IsArchived $false
+    if ($null -eq $actual) {
+        return [PSCustomObject]@{ Moved = $false; ActualGroupId = $null; Verified = $false }
+    }
+    return [PSCustomObject]@{
+        Moved = ("$actual" -eq "$TargetGroupId"); ActualGroupId = $actual; Verified = $true
+    }
+}
+
 function Restore-ProcessPlanState {
     <#
     .SYNOPSIS
-        Re-archives everything this run restored, back to its original group.
+        Puts back everything this run restored: into its original group, then
+        archived.
 
     .DESCRIPTION
         Idempotent and resumable. The plan is re-written after each entry, so a
         run interrupted here can be finished by re-importing the plan and calling
         this again: entries already marked Denormalized are skipped.
+
+        The group move is not optional. ArchiveProcess archives a process WHERE
+        IT CURRENTLY SITS, and at this point the targets sit in the temporary
+        holding group. Archiving without moving them first leaves them archived
+        under a group that cleanup is about to delete: three targets ended up
+        under group 834 instead of 134, 649 and 493.
+
+        The result row reports the group the process is VERIFIABLY in afterwards.
+        It used to report OriginalGroupUniqueId unconditionally, so the results
+        CSV asserted a placement that had never happened, in the one file
+        operators are told to check.
     #>
     param(
         [string]$SiteURL,
@@ -2952,21 +3065,62 @@ function Restore-ProcessPlanState {
 
     if ($toRestore.Count -eq 0) { return $results }
 
-    Write-Host "`n=== RE-ARCHIVING RESTORED PROCESSES ===" -ForegroundColor Cyan
+    Write-Host "`n=== RETURNING PROCESSES TO THEIR GROUPS AND RE-ARCHIVING ===" -ForegroundColor Cyan
 
     foreach ($entry in $toRestore) {
-        Write-Host "  Re-archiving $($entry.Name)..." -ForegroundColor Gray
+        $homeGroupId = $entry.OriginalGroupId
+        $placement = ''
+        $movedOk = $true
 
+        if ($null -eq $homeGroupId) {
+            # Nothing recorded to move it back to. Archive in place and say so,
+            # rather than implying a placement that was never attempted.
+            Write-Host "  $($entry.Name): no original group recorded; archiving where it sits." -ForegroundColor Yellow
+            $placement = 'no original group was recorded, so it was archived where it sat'
+            $movedOk = $false
+        }
+        else {
+            $current = Get-NpmProcessGroupId -SiteURL $SiteURL -Token $Token `
+                -ProcessUniqueId $entry.UniqueId -IsArchived $false
+
+            if ($null -ne $current -and "$current" -eq "$homeGroupId") {
+                Write-Host "  $($entry.Name) is already in group $homeGroupId." -ForegroundColor Gray
+                $placement = "group $homeGroupId"
+            }
+            else {
+                Write-Host "  Returning $($entry.Name) to group $homeGroupId..." -ForegroundColor Gray
+                $move = Move-NpmProcessToGroup -SiteURL $SiteURL -Token $Token `
+                    -ProcessUniqueId $entry.UniqueId -TargetGroupId $homeGroupId -ApprovalsEnabled $ApprovalsEnabled
+
+                $movedOk = [bool]$move.Moved
+                if ($move.Moved) {
+                    $placement = "group $homeGroupId"
+                } elseif ($move.Verified) {
+                    $placement = "group $($move.ActualGroupId), NOT the original group $homeGroupId"
+                    Write-Host "    Could not move it; it is in group $($move.ActualGroupId)." -ForegroundColor Red
+                } else {
+                    $placement = "an UNVERIFIED group; the move to $homeGroupId could not be confirmed"
+                    Write-Host "    Could not confirm where it ended up." -ForegroundColor Red
+                }
+            }
+        }
+
+        Write-Host "  Re-archiving $($entry.Name)..." -ForegroundColor Gray
         $ok = Set-NpmProcessArchived -SiteURL $SiteURL -Token $Token -ProcessUniqueId $entry.UniqueId `
             -Comment 'Re-archiving after dependency cleanup' -ApprovalsEnabled $ApprovalsEnabled
 
         $entry.Denormalized = $ok
+
+        $status = 'Success'
+        if (-not $ok) { $status = 'Failed' }
+        elseif (-not $movedOk) { $status = 'Skipped' }
+
         $results += [PSCustomObject]@{
             ObjectType = 'Process'; ObjectID = $entry.UniqueId; Name = $entry.Name
             Operation = 'ReArchive'
-            Status = $(if ($ok) { 'Success' } else { 'Failed' })
-            Message = $(if ($ok) { "Re-archived to group $($entry.OriginalGroupUniqueId)" }
-                        else { 'Re-archive failed; this process is still ACTIVE' })
+            Status = $status
+            Message = $(if ($ok) { "Re-archived in $placement" }
+                        else { "Re-archive failed; this process is still ACTIVE in $placement" })
         }
 
         if (-not $ok) {
