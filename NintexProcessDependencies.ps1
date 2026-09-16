@@ -1647,6 +1647,59 @@ function Compare-TenantState {
     return $collateral
 }
 
+# What to print where no name could be found. A validation run left two rows
+# showing a bare GUID twice over, which reads as a broken tool rather than as
+# the genuinely unnameable process it is: absent from the baseline, absent from
+# the index, and named by no dependency claim, so all three name sources are
+# empty. Saying so is cheap and stops an operator hunting for a defect.
+$script:NpmUnknownProcessName = '(name unavailable; not in any process list)'
+
+function Get-NpmUnknownProcessName { return $script:NpmUnknownProcessName }
+
+function Format-NpmProcessName {
+    <#
+    .SYNOPSIS
+        A name to print for a process, or an explicit statement that there is none.
+    #>
+    param([string]$Name, [string]$UniqueId)
+
+    # A "name" that is just the id is not a name. Some producers fall back to it.
+    if ($Name -and ($Name -ne $UniqueId)) { return $Name }
+    return $script:NpmUnknownProcessName
+}
+
+function Test-NpmNameIsReal {
+    # Whether a label carries information, for callers choosing between labels.
+    param([string]$Name, [string]$UniqueId = '')
+
+    if (-not $Name) { return $false }
+    if ($Name -eq $script:NpmUnknownProcessName) { return $false }
+    if ($UniqueId -and $Name -eq $UniqueId) { return $false }
+    return $true
+}
+
+function Select-NpmDisplayName {
+    <#
+    .SYNOPSIS
+        One label for a process that several producers have named differently.
+
+    .DESCRIPTION
+        Longest wins where they disagree: the holding-group listing truncates a
+        variation's name to its master's, so the fuller string is the real one.
+
+        The "no name" marker is excluded before the contest. It is longer than
+        most real names and would otherwise beat them.
+    #>
+    param($Rows, [string]$UniqueId)
+
+    $named = @(@($Rows) |
+        Where-Object { Test-NpmNameIsReal -Name ([string]$_.Name) -UniqueId $UniqueId } |
+        Sort-Object { ([string]$_.Name).Length } -Descending)
+
+    if ($named.Count -gt 0) { return [string]$named[0].Name }
+    return $script:NpmUnknownProcessName
+}
+
 function Show-CollateralDamage {
     <#
     .SYNOPSIS
@@ -1665,7 +1718,7 @@ function Show-CollateralDamage {
     Write-Host ""
 
     foreach ($item in $items) {
-        $name = if ($item.Name) { $item.Name } else { $item.UniqueId }
+        $name = Format-NpmProcessName -Name ([string]$item.Name) -UniqueId ([string]$item.UniqueId)
         Write-Host "  $name  ($($item.UniqueId))" -ForegroundColor Red
 
         switch ($item.Change) {

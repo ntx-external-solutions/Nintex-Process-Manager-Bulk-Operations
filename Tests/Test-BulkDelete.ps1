@@ -298,6 +298,23 @@ finally {
 }
 
 # ---------------------------------------------------------------------------
+Write-Host "`nScenario: a collateral process no source can name" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+
+$ghost = 'b3aacf24-4d4a-4888-9aa1-1f4e9696247b'
+$marker = Get-NpmUnknownProcessName
+
+Assert-Equal 'From the index' (Resolve-CollateralName -NameLookup @{ $ghost.ToLowerInvariant() =
+    [PSCustomObject]@{ Name = 'From the index' } } -UniqueId $ghost -Fallback 'From the group listing') `
+    'the index name still wins over the group listing'
+Assert-Equal 'From the group listing' (Resolve-CollateralName -NameLookup @{} -UniqueId $ghost `
+    -Fallback 'From the group listing') 'and the listing is still used when the index has nothing'
+Assert-Equal $marker (Resolve-CollateralName -NameLookup @{} -UniqueId $ghost -Fallback '') `
+    'but with every source empty the row says the name is unavailable, not the id'
+Assert-Equal $marker (Resolve-CollateralName -NameLookup @{} -UniqueId $ghost -Fallback $ghost) `
+    'and a fallback that is only the id counts as empty'
+
+# ---------------------------------------------------------------------------
 Write-Host "`nScenario: a holding group that still holds processes is NOT deleted" -ForegroundColor Cyan
 # ---------------------------------------------------------------------------
 

@@ -563,6 +563,29 @@ verified against a live tenant. Full evidence is in API_ARCHITECTURE.md.
    participant is archived, and never verify a removal after re-archiving. Both return
    falsely clean results.
 
+## What a first run is expected to do
+
+**Stop.** At least once, on a real tenant, without deleting anything. That is the
+tool working, not failing.
+
+A validation run over the first 20 rows of a 463-process archive, taken in listing
+order and unfiltered, is the measured example. The target set contained three
+processes named as variations whose masters had been renamed or removed, so the
+variation pre-flight found nothing to match on and did not fire. That is the
+documented blind spot in a name heuristic, and it behaved exactly as documented.
+The Hold phase then restored those three, which pulled in twelve sibling
+variations, and the collateral checkpoint caught all twelve and refused to
+continue. `-Force` cannot approve collateral changes, so the run stopped itself.
+Verified afterwards against the tenant rather than against the run's own output:
+the archive count was unchanged, all twenty targets were back to archived, and no
+temporary group was left behind.
+
+So the shape to expect is: the cheap check misses something, the expensive check
+catches it, and the run stops with the affected processes named. Read what it
+names, decide whether those processes should be in the target set, and re-run.
+The one thing not to do is reach for a flag to push past it; `-Force` deliberately
+cannot.
+
 ## Limitations
 
 Known broken or incomplete as of this revision:
@@ -589,11 +612,17 @@ Known broken or incomplete as of this revision:
   worth a look on a first run against a new tenant. One `claimed 1, located 2` pair,
   where the JSON holds more than the API reports, still gates deliberately: it is the
   only observed shape that could mean a reference is being missed.
-- **The variation pre-flight is a name heuristic.** It matches `<master>::<variant>`
-  against existing process names. It had no false negatives on the only sample
-  available, which was five targets, but nothing in the API exposes the real link,
-  so it can miss a variation whose master was renamed and can flag two unrelated
-  processes that share a prefix. Treat a warning as a prompt to check, not a verdict.
+- **The variation pre-flight is a name heuristic, and its blind spot is measured.**
+  It matches `<master>::<variant>` against existing process names, so it can only
+  fire when a process named `<master>` still exists. A validation run over 20
+  archived processes contained three variation-named targets whose masters had all
+  been renamed or removed: the pre-flight correctly found nothing to match and did
+  not fire, and the Hold phase then pulled in twelve sibling variations. The
+  collateral checkpoint caught them and stopped the run, which is why this is a
+  documented limitation rather than a defect. Nothing in the API exposes the real
+  link. The heuristic can also flag two unrelated processes that share a prefix.
+  Treat a warning as a prompt to check, not a verdict, and treat its silence as no
+  evidence either way.
 - **The before/after baseline cannot cover the whole tenant.** It is built from the
   two list sweeps, and processes exist that neither returns. Those cannot be
   diffed at all; the run reports them as `NotInBaseline` when it encounters one and
@@ -647,7 +676,18 @@ For issues or questions:
 
 ## Version History
 
-**Version 4.7** (Current)
+**Version 4.8** (Current)
+- Fixed: a collateral process that no source could name printed as a bare GUID
+  where the name goes, and again as the id, which reads as a broken tool. Such a
+  process is real: absent from the before-state, absent from both process lists,
+  and named by no dependency claim, so all three name sources are genuinely
+  empty. The run now says `(name unavailable; not in any process list)` and
+  prints the id once. The marker is excluded from the longest-name contest used
+  to reconcile two producers naming one process differently, since it is longer
+  than most real names and would otherwise win it.
+- Documented: what a first bulk run against a real tenant is expected to do.
+
+**Version 4.7**
 - Fixed: the target list of things needing manual attention was never
   re-verified. A run reported two targets as `still active and must be archived
   manually`; a read afterwards found all three archived. The archive call

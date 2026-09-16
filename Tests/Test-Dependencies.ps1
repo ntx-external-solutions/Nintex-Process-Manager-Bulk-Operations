@@ -685,6 +685,59 @@ Assert-Equal 'None' (Get-NpmGroupExistsCoverage -Index $null).State 'a null inde
 Assert-Equal 'None' (Get-NpmGroupExistsCoverage -Index @{}).State 'and so does an empty one'
 
 # ---------------------------------------------------------------------------
+Write-Host "`nA process that no source can name" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# A validation run printed two collateral rows as a bare GUID twice over. The
+# processes were absent from the baseline, absent from the index, and named by
+# no claim, so all three name sources were genuinely empty. That is a real state
+# and worth saying, but printing the id where a name goes reads as a broken tool.
+
+$ghostId = 'b3aacf24-4d4a-4888-9aa1-1f4e9696247b'
+$marker = Get-NpmUnknownProcessName
+
+Assert-Equal 'Real Name' (Format-NpmProcessName -Name 'Real Name' -UniqueId $ghostId) 'a real name is used as-is'
+Assert-Equal $marker (Format-NpmProcessName -Name '' -UniqueId $ghostId) 'an empty name says so explicitly'
+Assert-Equal $marker (Format-NpmProcessName -Name $ghostId -UniqueId $ghostId) `
+    'a "name" that is only the id is not a name'
+Assert-True ($marker -match 'not in any process list') 'and the marker says why there is no name'
+
+Assert-True (Test-NpmNameIsReal -Name 'Real Name' -UniqueId $ghostId) 'a real name carries information'
+Assert-Equal $false (Test-NpmNameIsReal -Name '' -UniqueId $ghostId) 'an empty one does not'
+Assert-Equal $false (Test-NpmNameIsReal -Name $ghostId -UniqueId $ghostId) 'nor does the id'
+Assert-Equal $false (Test-NpmNameIsReal -Name $marker -UniqueId $ghostId) 'nor does the marker itself'
+
+# Longest wins, because the group listing truncates a variation to its master.
+$rows = @(
+    [PSCustomObject]@{ Name = 'Advertise Job Position' }
+    [PSCustomObject]@{ Name = 'Advertise Job Position :: Thailand' }
+)
+Assert-Equal 'Advertise Job Position :: Thailand' (Select-NpmDisplayName -Rows $rows -UniqueId $ghostId) `
+    'the fuller name wins where two producers disagree'
+
+# But the marker is longer than most real names and must not win on length.
+$mixed = @(
+    [PSCustomObject]@{ Name = $marker }
+    [PSCustomObject]@{ Name = 'Short' }
+)
+Assert-Equal 'Short' (Select-NpmDisplayName -Rows $mixed -UniqueId $ghostId) `
+    'the no-name marker never beats a real name, however short'
+
+$allEmpty = @([PSCustomObject]@{ Name = '' }, [PSCustomObject]@{ Name = $ghostId })
+Assert-Equal $marker (Select-NpmDisplayName -Rows $allEmpty -UniqueId $ghostId) `
+    'and when nothing names it, the label says so'
+Assert-Equal $marker (Select-NpmDisplayName -Rows @() -UniqueId $ghostId) 'no rows at all is the same answer'
+
+# The display path: a NotInBaseline row with no name prints the marker, not a
+# GUID twice.
+$ghostRow = @([PSCustomObject]@{ UniqueId = $ghostId; Name = ''; Change = 'NotInBaseline'
+    WasArchived = $null; IsArchivedNow = $false; OriginalGroupId = $null; CurrentGroupId = 836 })
+$shown = (Show-CollateralDamage -Collateral $ghostRow -Phase 'test') 6>&1 | Out-String
+Assert-True ($shown -match 'not in any process list') 'the collateral list says the name is unavailable'
+Assert-True ($shown -match [regex]::Escape($ghostId)) 'while still printing the id, which is what identifies it'
+Assert-Equal 1 ([regex]::Matches($shown, [regex]::Escape($ghostId)).Count) `
+    'the id appears once, not twice over as name and id'
+
+# ---------------------------------------------------------------------------
 Write-Host "`n======================================" -ForegroundColor Cyan
 Write-Host "  Passed: $script:Pass   Failed: $script:Fail" -ForegroundColor $(if ($script:Fail -eq 0) { 'Green' } else { 'Red' })
 Write-Host "======================================`n" -ForegroundColor Cyan
