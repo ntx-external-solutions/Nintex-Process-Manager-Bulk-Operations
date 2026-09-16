@@ -97,7 +97,7 @@ param(
     [switch]$AllowUnheldTargets
 )
 
-$script:ScriptVersion = '4.7'
+$script:ScriptVersion = '4.8'
 
 # ----------------------------------------------------------------------------
 # Dependency engine. Mode 5 delegates all dependency discovery, reference
@@ -2617,8 +2617,11 @@ function Resolve-CollateralName {
             return [string]$NameLookup[$key].Name
         }
     }
-    if ($Fallback) { return $Fallback }
-    return $UniqueId
+    if (Test-NpmNameIsReal -Name $Fallback -UniqueId $UniqueId) { return $Fallback }
+
+    # All three sources are empty: not in the baseline, not in the index, and
+    # named by no claim. Say that, rather than printing the id where a name goes.
+    return (Get-NpmUnknownProcessName)
 }
 
 function Remove-HoldingGroup {
@@ -3477,11 +3480,7 @@ function Save-DeleteResults {
             $rows = @($group.Group)
             $id = $rows[0].ObjectID
 
-            # Longest name wins where they disagree: the group listing truncates
-            # a variation name to its master's, so the fuller one is the real one.
-            $label = $id
-            $named = @($rows | Where-Object { $_.Name } | Sort-Object { ([string]$_.Name).Length } -Descending)
-            if ($named.Count -gt 0) { $label = $named[0].Name }
+            $label = Select-NpmDisplayName -Rows $rows -UniqueId ([string]$id)
 
             Write-Host "  $label  ($id)" -ForegroundColor Red
             foreach ($msg in @($rows | ForEach-Object { $_.Message } | Select-Object -Unique)) {
@@ -3492,7 +3491,7 @@ function Save-DeleteResults {
         if ($unreversed.Count -gt 0) {
             Write-Host "`n$($unreversed.Count) of these still need manual attention:" -ForegroundColor Red
             foreach ($u in $unreversed) {
-                $label = if ($u.Name) { $u.Name } else { $u.ObjectID }
+                $label = Format-NpmProcessName -Name ([string]$u.Name) -UniqueId ([string]$u.ObjectID)
                 Write-Host "  $label - $($u.Message)" -ForegroundColor Red
             }
         }
