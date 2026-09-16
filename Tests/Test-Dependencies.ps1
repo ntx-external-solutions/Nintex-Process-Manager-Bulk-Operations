@@ -571,6 +571,82 @@ Assert-Equal 0 @(Find-InputOutputReferenceSite -ProcessObject $null -TargetUniqu
     'a null process yields no sites rather than throwing'
 
 # ---------------------------------------------------------------------------
+Write-Host "`nProcesses whose group no longer exists" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# The listing reports groupExists per row. False means the group was deleted
+# while the process sat in the archive, and RestoreProcess answers HTTP 500 for
+# a destination group that is not there.
+
+Assert-Equal $true  (ConvertTo-NpmGroupExists -Value $null)    'an unreported flag is read as "the group is there"'
+Assert-Equal $true  (ConvertTo-NpmGroupExists -Value $true)    'true is true'
+Assert-Equal $false (ConvertTo-NpmGroupExists -Value $false)   'false is false'
+Assert-Equal $false (ConvertTo-NpmGroupExists -Value 'False')  'the string False counts, because JSON round-trips it'
+Assert-Equal $true  (ConvertTo-NpmGroupExists -Value 'true')   'the string true counts'
+Assert-Equal $true  (ConvertTo-NpmGroupExists -Value '')       'an empty string is not a claim that the group is gone'
+Assert-Equal $false (ConvertTo-NpmGroupExists -Value 0)        'numeric 0 counts as false'
+
+# The measured tenant: 175 of the orphaned rows report groupId 1 with the
+# tenant's own name, and two report a real numeric group that has since gone.
+# Keying on the id would miss those two, which is why it keys on the flag.
+$orphanIndex = @{
+    'aaaaaaaa-0000-0000-0000-000000000001' = [PSCustomObject]@{
+        UniqueId = 'AAAAAAAA-0000-0000-0000-000000000001'; NumericId = 11
+        Name = 'Placeholder group'; IsArchived = $true; GroupId = 1; GroupExists = $false }
+    'aaaaaaaa-0000-0000-0000-000000000002' = [PSCustomObject]@{
+        UniqueId = 'AAAAAAAA-0000-0000-0000-000000000002'; NumericId = 12
+        Name = 'Real group, since deleted'; IsArchived = $true; GroupId = 832; GroupExists = $false }
+    'aaaaaaaa-0000-0000-0000-000000000003' = [PSCustomObject]@{
+        UniqueId = 'AAAAAAAA-0000-0000-0000-000000000003'; NumericId = 13
+        Name = 'Group is fine'; IsArchived = $true; GroupId = 1; GroupExists = $true }
+    'aaaaaaaa-0000-0000-0000-000000000004' = [PSCustomObject]@{
+        UniqueId = 'AAAAAAAA-0000-0000-0000-000000000004'; NumericId = 14
+        Name = 'Flag not reported'; IsArchived = $false; GroupId = 493 }
+}
+$allIds = @($orphanIndex.Values | ForEach-Object { $_.UniqueId })
+
+$orphans = @(Find-OrphanedGroupProcess -Index $orphanIndex -UniqueIds $allIds)
+Assert-Equal 2 $orphans.Count 'both orphaned rows are found'
+Assert-Equal 1 @($orphans | Where-Object { $_.OriginalGroupId -eq 832 }).Count `
+    'an orphan in a real numeric group is found, so the test is not groupId -eq 1'
+Assert-Equal 0 @($orphans | Where-Object { $_.Name -eq 'Group is fine' }).Count `
+    'groupId 1 with the flag set true is not an orphan'
+Assert-Equal 0 @($orphans | Where-Object { $_.Name -eq 'Flag not reported' }).Count `
+    'a row that never reported the flag is not treated as an orphan'
+Assert-Equal 0 @(Find-OrphanedGroupProcess -Index $null -UniqueIds $allIds).Count `
+    'a null index yields nothing rather than throwing'
+
+# The snapshot is what the unwind reads, so the flag has to survive the trip.
+$orphanSnap = New-ProcessStateSnapshot -Index $orphanIndex -UniqueIds $allIds
+Assert-Equal $false $orphanSnap['aaaaaaaa-0000-0000-0000-000000000002'].OriginalGroupExists `
+    'the snapshot records that the home group is gone'
+Assert-Equal $true $orphanSnap['aaaaaaaa-0000-0000-0000-000000000003'].OriginalGroupExists `
+    'and records that a present group is present'
+Assert-Equal $true $orphanSnap['aaaaaaaa-0000-0000-0000-000000000004'].OriginalGroupExists `
+    'an unreported flag survives as "the group is there"'
+
+$planLedger = @(ConvertTo-PlanLedgerEntry -Snapshot $orphanSnap)
+Assert-Equal $false @($planLedger | Where-Object { $_.OriginalGroupId -eq 832 })[0].OriginalGroupExists `
+    'the plan ledger written before the first mutation carries it too'
+
+# And onto the tenant baseline, so a collateral unwind can see it as well.
+$orphanBaseline = New-TenantStateSnapshot -Index $orphanIndex
+Assert-Equal $false $orphanBaseline['aaaaaaaa-0000-0000-0000-000000000002'].GroupExists `
+    'the tenant baseline carries the flag'
+
+$afterIndex = @{}
+foreach ($k in $orphanIndex.Keys) {
+    $e = $orphanIndex[$k]
+    $afterIndex[$k] = [PSCustomObject]@{
+        UniqueId = $e.UniqueId; NumericId = $e.NumericId; Name = $e.Name
+        IsArchived = $(if ($e.NumericId -eq 12) { $false } else { $e.IsArchived })
+        GroupId = $e.GroupId; GroupExists = $e.GroupExists }
+}
+$orphanCollateral = @(Compare-TenantState -Baseline $orphanBaseline -Index $afterIndex -ExpectedUniqueIds @())
+Assert-Equal 1 $orphanCollateral.Count 'one process changed state'
+Assert-Equal $false $orphanCollateral[0].OriginalGroupExists `
+    'a collateral row knows whether the group it came from still exists'
+
+# ---------------------------------------------------------------------------
 Write-Host "`n======================================" -ForegroundColor Cyan
 Write-Host "  Passed: $script:Pass   Failed: $script:Fail" -ForegroundColor $(if ($script:Fail -eq 0) { 'Green' } else { 'Red' })
 Write-Host "======================================`n" -ForegroundColor Cyan

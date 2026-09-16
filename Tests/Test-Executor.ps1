@@ -758,6 +758,206 @@ $ghostResolved = @(Resolve-CollateralOutcome -SiteURL 'https://mock' -Token 't' 
     -Collateral $ghostRecord -Results $ghostRows)
 Assert-Equal 'Skipped' $ghostResolved[0].Status 'an unbaselined process is never cleared, having nothing to be compared to'
 
+# ---------------------------------------------------------------------------
+Write-Host "`nScenario: a process whose group was deleted while it was archived" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# RestoreProcess answers HTTP 500 for a destination group that does not exist,
+# and the listing has been saying which groups those are all along. Nothing here
+# should ever ask the question.
+
+$OrphanId = 'd394677d-0000-0000-0000-0000000000f1'   # archived, its group is gone
+$HolderId = 'd394677d-0000-0000-0000-0000000000f2'   # archived, its group is fine
+$LiveId   = 'd394677d-0000-0000-0000-0000000000f3'   # active target
+
+$script:OrphanCalls = @()
+$script:OrphanGroups = @{ $OrphanId = 1; $HolderId = 500; $LiveId = 500 }
+$script:OrphanArchived = @($OrphanId, $HolderId)
+$script:OrphanDeps = @{}
+$TempGroupId = 900
+
+function Invoke-NpmApi {
+    param([string]$Url,[string]$Token,[string]$Method='Get',$Body=$null,[int]$MaxRetries=0)
+
+    $script:OrphanCalls += [PSCustomObject]@{ Method=$Method; Url=$Url; Body=$Body; MaxRetries=$MaxRetries }
+    function Ok($r) { return [PSCustomObject]@{ Success=$true; StatusCode=200; Response=$r; Error=$null } }
+
+    if ($Url -match 'ListType=(\d+)') {
+        $listType = [int]$Matches[1]
+        $items = @()
+        foreach ($id in @($OrphanId, $HolderId, $LiveId)) {
+            $isArch = ($script:OrphanArchived -contains $id)
+            if (($listType -eq 7) -ne $isArch) { continue }
+            $items += [PSCustomObject]@{
+                processUniqueId = $id
+                id              = 700
+                processName     = "P-$($id.Substring(29))"
+                groupId         = $script:OrphanGroups[$id]
+                groupName       = 'Promapp Demo Ltd.'
+                # The one field this whole scenario turns on.
+                groupExists     = ($id -ne $OrphanId)
+            }
+        }
+        return Ok ([PSCustomObject]@{ items = $items; totalItemCount = $items.Count })
+    }
+
+    if ($Url -match 'CheckProcessDependencies') {
+        if ($Url -match '/Processes/([0-9a-fA-F\-]+)/CheckProcessDependencies') {
+            $id = $Matches[1]
+            if ($script:OrphanDeps.ContainsKey($id)) { return Ok ($script:OrphanDeps[$id] | ConvertFrom-Json) }
+        }
+        return Ok @()
+    }
+
+    $model = {
+        param($id)
+        [PSCustomObject]@{ UniqueId = $id; Id = 700; Name = "P-$($id.Substring(29))"
+                           GroupId = $script:OrphanGroups[$id]; GroupUniqueId = ''
+                           StateId = $(if ($script:OrphanArchived -contains $id) { 2 } else { 1 }) }
+    }
+
+    if ($Url -match 'mobile/api/v1/processes') {
+        $data = @()
+        foreach ($m in ($Url -split '&')) {
+            if ($m -match 'processUniqueIds=([0-9a-fA-F\-]+)') { $data += [PSCustomObject]@{ ProcessModel = (& $model $Matches[1]) } }
+        }
+        return Ok ([PSCustomObject]@{ data = $data })
+    }
+
+    if ($Method -eq 'Get' -and $Url -match '/Api/v1/Processes/([0-9a-fA-F\-]+)$') {
+        $id = $Matches[1]
+        if ($script:OrphanArchived -contains $id) {
+            return [PSCustomObject]@{ Success=$false; StatusCode=404; Response=$null; Error='Not found' }
+        }
+        return Ok ([PSCustomObject]@{ processJson = (& $model $id) })
+    }
+
+    if ($Url -match 'RestoreProcess') {
+        $id = [string]$Body.processUniqueId
+        # The tenant's real answer: a group that is not there is a 500, every time.
+        if ("$($Body.processGroupId)" -eq '1') {
+            return [PSCustomObject]@{ Success=$false; StatusCode=500; Response=$null; Error='Internal Server Error' }
+        }
+        $script:OrphanArchived = @($script:OrphanArchived | Where-Object { $_ -ne $id })
+        $script:OrphanGroups[$id] = $Body.processGroupId
+        return Ok ([PSCustomObject]@{ ok = $true })
+    }
+    if ($Url -match 'ArchiveProcess') {
+        $script:OrphanArchived += [string]$Body.processUniqueId
+        return Ok ([PSCustomObject]@{ ok = $true })
+    }
+
+    return Ok $null
+}
+
+Reset-NpmRelocationProbe
+$oIndex = Get-NpmProcessIndex -SiteURL 'https://mock' -Token 't'
+Assert-Equal $false (Get-NpmIndexEntry -Index $oIndex -UniqueId $OrphanId).GroupExists `
+    'the index carries groupExists through from the listing payload'
+Assert-Equal $true (Get-NpmIndexEntry -Index $oIndex -UniqueId $HolderId).GroupExists `
+    'and does not mark a process whose group is fine'
+
+# ---- The endpoint is not asked a question already answered ------------------
+$script:OrphanCalls = @()
+$refused = Restore-NpmProcess -SiteURL 'https://mock' -Token 't' `
+    -ProcessUniqueId $OrphanId -ProcessGroupId 1 -DestinationGroupExists $false
+Assert-Equal $false $refused 'a restore into a group that is gone fails'
+Assert-Equal 0 @($script:OrphanCalls | Where-Object { $_.Url -match 'RestoreProcess' }).Count `
+    'and fails WITHOUT calling the endpoint, so there is no retry ladder to climb'
+Assert-Equal 'MissingGroup' (Get-NpmLastRestoreFailure) `
+    'the failure is distinct from an endpoint failure, so a caller can pick somewhere real'
+
+$script:OrphanCalls = @()
+[void](Restore-NpmProcess -SiteURL 'https://mock' -Token 't' `
+    -ProcessUniqueId $HolderId -ProcessGroupId 500)
+Assert-Equal 1 @($script:OrphanCalls | Where-Object { $_.Url -match 'RestoreProcess' }).Count `
+    'a restore into a group that exists still goes through'
+$script:OrphanArchived = @($OrphanId, $HolderId)
+$script:OrphanGroups[$HolderId] = 500
+
+# ---- The unwind puts an orphan somewhere real and says where -----------------
+# Both were pulled into the holding group by the Hold phase. One can go home.
+$script:OrphanGroups[$OrphanId] = $TempGroupId
+$script:OrphanGroups[$HolderId] = $TempGroupId
+$script:OrphanArchived = @()
+$script:OrphanCalls = @()
+
+$unwindPlan = [PSCustomObject]@{ Ledger = @(
+    [PSCustomObject]@{ UniqueId = $OrphanId; Name = 'Orphan'; WasArchived = $true
+        RestoredByThisRun = $true; Denormalized = $false; Deleted = $false
+        OriginalGroupId = 1; OriginalGroupExists = $false; OriginalGroupUniqueId = '' }
+    [PSCustomObject]@{ UniqueId = $HolderId; Name = 'Has a home'; WasArchived = $true
+        RestoredByThisRun = $true; Denormalized = $false; Deleted = $false
+        OriginalGroupId = 500; OriginalGroupExists = $true; OriginalGroupUniqueId = '' }
+) }
+
+$unwound = @(Restore-ProcessPlanState -SiteURL 'https://mock' -Token 't' -Plan $unwindPlan -PlanPath '')
+
+$orphanRow = @($unwound | Where-Object { $_.ObjectID -eq $OrphanId })[0]
+Assert-Equal 'Skipped' $orphanRow.Status 'the orphan is archived but not returned home, and the row says so'
+Assert-True ($orphanRow.Message -match "group $TempGroupId") `
+    'the results row names the group the process is ACTUALLY in'
+Assert-True ($orphanRow.Message -match 'no longer exists') `
+    'and gives the reason it is not in its original group'
+Assert-Equal 0 @($script:OrphanCalls | Where-Object {
+    $_.Url -match 'RestoreProcess' -and "$($_.Body.processUniqueId)" -eq $OrphanId }).Count `
+    'no restore is attempted for the orphan, so no 500s and no archive-then-restore fallback'
+Assert-True ($script:OrphanArchived -contains $OrphanId) 'it does end up archived, which always works'
+
+# The narrow test: everything else behaves exactly as before.
+$homeRow = @($unwound | Where-Object { $_.ObjectID -eq $HolderId })[0]
+Assert-Equal 'Success' $homeRow.Status 'a process whose group still exists is unaffected'
+Assert-True ($homeRow.Message -match 'group 500') 'and is reported back in its own group'
+Assert-True ($script:OrphanArchived -contains $HolderId) 'and re-archived'
+
+# ---- A holder that cannot be restored blocks the run ------------------------
+# Its Input/Output edges stay hidden, so a target pointing at it cannot be
+# deleted on a complete reading of the tenant.
+$script:OrphanArchived = @($OrphanId)
+$script:OrphanGroups[$OrphanId] = 1
+$script:OrphanGroups[$LiveId] = 500
+$script:OrphanDeps = @{ $LiveId = @"
+[{"Type":"Linked Process","Dependencies":[{"Name":"Orphan","UniqueId":"$OrphanId"}]}]
+"@ }
+$script:OrphanCalls = @()
+
+$blockIndex = Get-NpmProcessIndex -SiteURL 'https://mock' -Token 't'
+$blockPlan = New-ProcessDeletePlan -SiteURL 'https://mock' -Token 't' `
+    -TargetUniqueIds @($LiveId) -Index $blockIndex -HoldingGroupId $TempGroupId -AllowRestore $true
+
+Assert-Equal 'Blocked' $blockPlan.Status 'a holder whose group is gone blocks the run'
+Assert-Equal 1 @($blockPlan.OrphanedHolders).Count 'and is named'
+Assert-Equal $OrphanId @($blockPlan.OrphanedHolders)[0].UniqueId 'by id'
+Assert-Equal 1 @($blockPlan.Log | Where-Object { $_ -match 'its group no longer exists' }).Count `
+    'with the cause given, rather than surfacing three floors down as a reconciliation mismatch'
+Assert-Equal 0 @($blockPlan.Reconciliation).Count 'the run stops before reconciliation, so there is no mismatch to misread'
+Assert-Equal 0 @($script:OrphanCalls | Where-Object {
+    $_.Url -match 'RestoreProcess' -and "$($_.Body.processUniqueId)" -eq $OrphanId }).Count `
+    'and the doomed restore is never attempted'
+
+# The narrow test again: the same shape with a holder whose group is fine plans normally.
+$script:OrphanArchived = @($HolderId)
+$script:OrphanGroups[$HolderId] = 500
+$script:OrphanDeps = @{ $LiveId = @"
+[{"Type":"Linked Process","Dependencies":[{"Name":"Has a home","UniqueId":"$HolderId"}]}]
+"@ }
+
+$okIndex = Get-NpmProcessIndex -SiteURL 'https://mock' -Token 't'
+$okPlan = New-ProcessDeletePlan -SiteURL 'https://mock' -Token 't' `
+    -TargetUniqueIds @($LiveId) -Index $okIndex -HoldingGroupId $TempGroupId -AllowRestore $true
+Assert-Equal 'Planned' $okPlan.Status 'an archived holder whose group still exists plans as it always did'
+Assert-Equal 0 @($okPlan.OrphanedHolders).Count 'and is not named as orphaned'
+
+# ---- A collateral archive with nowhere to go is reported, not retried -------
+$script:OrphanCalls = @()
+$collateralOrphan = @([PSCustomObject]@{ UniqueId = $OrphanId; Name = 'Orphan'; Change = 'Archived'
+    WasArchived = $false; IsArchivedNow = $true; OriginalGroupId = 1
+    OriginalGroupExists = $false; CurrentGroupId = 1 })
+$collateralRows = @(Restore-CollateralState -SiteURL 'https://mock' -Token 't' -Collateral $collateralOrphan)
+Assert-Equal 'Failed' $collateralRows[0].Status 'a collateral archive whose group is gone cannot be reversed'
+Assert-True ($collateralRows[0].Message -match 'no longer exists') 'and the row says why'
+Assert-Equal 0 @($script:OrphanCalls | Where-Object { $_.Url -match 'RestoreProcess' }).Count `
+    'without calling an endpoint that can only answer 500'
+
 Write-Host "`n======================================" -ForegroundColor Cyan
 Write-Host "  Passed: $script:Pass   Failed: $script:Fail" -ForegroundColor $(if ($script:Fail -eq 0) { 'Green' } else { 'Red' })
 Write-Host "======================================`n" -ForegroundColor Cyan

@@ -58,6 +58,8 @@ function Reset-MockTenant {
     $script:TempGroupDeleted = $false
     $script:TempGroupContents = @()
     $script:ArchiveCalls = @()
+    # groupExists per process; absent means the listing reported it as present.
+    $script:GroupExistsFor = @{}
 }
 Reset-MockTenant
 
@@ -73,11 +75,15 @@ function Invoke-NpmApi {
         $items = @()
         foreach ($id in @($T1,$T2,$T3)) {
             if ($script:Archived[$id] -ne $wantArchived) { continue }
+            $exists = $true
+            if ($script:GroupExistsFor.ContainsKey($id)) { $exists = $script:GroupExistsFor[$id] }
             $items += [PSCustomObject]@{
                 processUniqueId = $id
                 id              = 1000 + [int]($id.Substring(0,1))
                 processName     = $script:Names[$id]
                 groupId         = $script:GroupOf[$id]
+                groupName       = 'Promapp Demo Ltd.'
+                groupExists     = $exists
             }
         }
         return Ok ([PSCustomObject]@{ items = $items })
@@ -232,6 +238,59 @@ try {
     }
     Assert-Equal 0 @($script:LastResults | Where-Object { $_.Operation -eq 'ReArchive' }).Count `
         'no re-archive is attempted against a deleted process'
+}
+finally {
+    Pop-Location
+    Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# ---------------------------------------------------------------------------
+Write-Host "`nScenario: a target whose group is gone is named before the run starts" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# It is a warning, not a gate. These targets can be held and deleted normally;
+# what they cannot do is go home if the run stops short, and the operator wants
+# that before the first mutation rather than out of the results file afterwards.
+
+Reset-MockTenant
+$script:GroupOf[$T3] = 1
+$script:GroupExistsFor = @{ $T3 = $false }
+
+$work = Join-Path ([System.IO.Path]::GetTempPath()) "bulkdelete-$([guid]::NewGuid())"
+New-Item -ItemType Directory -Path $work -Force | Out-Null
+Push-Location $work
+try {
+    $out = (Invoke-BulkDeleteProcesses -SiteURL 'https://mock' -Token 't' -SourceType 'Archived' `
+        -TempGroupName 'Bulk Delete Temporary Group' -CurrentUsername 'u' -Force) 6>&1 | Out-String
+
+    Assert-True ($out -match 'TARGETS WHOSE GROUP NO LONGER EXISTS') 'the run says so up front'
+    Assert-True ($out -match '1 of 3 target\(s\) belong to a group that no longer exists') `
+        'and counts targets, not rows'
+    Assert-True ($out -match 'Charlie') 'and names the one it means'
+
+    $warnAt = $out.IndexOf('TARGETS WHOSE GROUP NO LONGER EXISTS')
+    $holdAt = $out.IndexOf('=== HOLDING GROUP ===')
+    Assert-True ($warnAt -ge 0 -and $holdAt -gt $warnAt) 'before the first mutation, not after it'
+
+    Assert-Equal 3 $script:Deleted.Count 'it is a warning: all three targets are still deleted'
+    Assert-Equal $true $script:TempGroupDeleted 'and the holding group is still cleaned up'
+}
+finally {
+    Pop-Location
+    Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# A run with no orphaned target says nothing about orphans at all.
+Reset-MockTenant
+$work = Join-Path ([System.IO.Path]::GetTempPath()) "bulkdelete-$([guid]::NewGuid())"
+New-Item -ItemType Directory -Path $work -Force | Out-Null
+Push-Location $work
+try {
+    $cleanOut = (Invoke-BulkDeleteProcesses -SiteURL 'https://mock' -Token 't' -SourceType 'Archived' `
+        -TempGroupName 'Bulk Delete Temporary Group' -CurrentUsername 'u' -Force) 6>&1 | Out-String
+
+    Assert-True ($cleanOut -notmatch 'TARGETS WHOSE GROUP NO LONGER EXISTS') `
+        'a tenant with no orphaned targets gets no orphan warning'
+    Assert-Equal 3 $script:Deleted.Count 'and the ordinary run is untouched'
 }
 finally {
     Pop-Location

@@ -97,7 +97,7 @@ param(
     [switch]$AllowUnheldTargets
 )
 
-$script:ScriptVersion = '4.5'
+$script:ScriptVersion = '4.6'
 
 # ----------------------------------------------------------------------------
 # Dependency engine. Mode 5 delegates all dependency discovery, reference
@@ -2982,6 +2982,20 @@ function Invoke-BulkDeleteProcesses {
                 Save-DeleteResults -Results $results -Timestamp $timestamp
             return
         }
+    }
+
+    # ---- Pre-flight: targets whose group is gone ---------------------------
+    # An operator wants this before the run, not in the results file after it.
+    # These targets can be held and deleted normally, but a run that stops short
+    # of deletion cannot put them back where they came from, because where they
+    # came from does not exist any more.
+    #
+    # This covers targets only. A dependency holder in the same state is not
+    # knowable until the dependency scan has run, and blocks the plan there.
+    $orphanTargets = @(Find-OrphanedGroupProcess -Index $index -UniqueIds $targetUniqueIds)
+    if ($orphanTargets.Count -gt 0) {
+        Show-OrphanedGroupWarning -Orphans $orphanTargets -TotalTargets $targetUniqueIds.Count `
+            -HoldingGroupName $TempGroupName
     }
 
     # ---- Holding group ----------------------------------------------------
