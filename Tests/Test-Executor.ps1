@@ -508,6 +508,111 @@ $real = New-ProcessDeletePlan -SiteURL 'https://mock' -Token 't' `
 $shownReal = (Show-ProcessDeletePlan -Plan $real -Index $realIndex 6>&1 | Out-String)
 Assert-True ($shownReal -match 'restored for the run') 'a real run does report the restores it made'
 
+# ---------------------------------------------------------------------------
+Write-Host "`nScenario: a cancelled run puts targets back in their OWN group" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# ArchiveProcess archives a process where it currently sits, and at unwind time
+# the targets sit in the temporary holding group. Archiving without moving them
+# first left three targets archived under the temp group instead of their homes,
+# while the results CSV asserted the home group anyway.
+
+$R1 = 'a1a1a1a1-0000-0000-0000-00000000000a'
+$R2 = 'b2b2b2b2-0000-0000-0000-00000000000b'
+$TempGrp = 834
+
+$script:Grp = @{ $R1 = $TempGrp; $R2 = $TempGrp }
+$script:Arch = @{ $R1 = $false;  $R2 = $false }
+$script:MoveCalls = @()
+
+function Invoke-NpmApi {
+    param([string]$Url,[string]$Token,[string]$Method='Get',$Body=$null,[int]$MaxRetries=0)
+    function Ok5($r) { return [PSCustomObject]@{ Success=$true; StatusCode=200; Response=$r; Error=$null } }
+
+    if ($Url -match 'RestoreProcess') {
+        $id = $Body.processUniqueId
+        $script:MoveCalls += "restore:$id->$($Body.processGroupId)"
+        $script:Grp[$id] = [int]$Body.processGroupId
+        $script:Arch[$id] = $false
+        return Ok5 @{}
+    }
+    if ($Url -match 'ArchiveProcess') {
+        $script:Arch[$Body.processUniqueId] = $true
+        return Ok5 @{}
+    }
+    if ($Method -eq 'Get' -and $Url -match '/Api/v1/Processes/([0-9a-fA-F\-]+)$') {
+        $id = $Matches[1]
+        return Ok5 ([PSCustomObject]@{ processJson = [PSCustomObject]@{
+            UniqueId = $id; Name = "Proc $id"; GroupId = $script:Grp[$id]; StateId = 1 } })
+    }
+    return Ok5 $null
+}
+
+$unwindPlan = New-DependencyPlan -SiteURL 'https://mock' -TargetUniqueIds @($R1, $R2)
+$unwindPlan.Ledger = @(
+    [PSCustomObject]@{ UniqueId=$R1; Name='Alpha'; NumericId=1; WasArchived=$true
+                       OriginalGroupUniqueId='g-134'; OriginalGroupId=134
+                       RestoredByThisRun=$true; Denormalized=$false; Deleted=$false },
+    [PSCustomObject]@{ UniqueId=$R2; Name='Beta'; NumericId=2; WasArchived=$true
+                       OriginalGroupUniqueId='g-649'; OriginalGroupId=649
+                       RestoredByThisRun=$true; Denormalized=$false; Deleted=$false }
+)
+
+$unwound = @(Restore-ProcessPlanState -SiteURL 'https://mock' -Token 't' -Plan $unwindPlan -PlanPath '')
+
+Assert-Equal 2 $unwound.Count 'both restored targets are unwound'
+Assert-Equal 134 $script:Grp[$R1] 'Alpha ends in its own group, not the holding group'
+Assert-Equal 649 $script:Grp[$R2] 'Beta ends in its own group, not the holding group'
+Assert-Equal $true $script:Arch[$R1] 'Alpha ends archived'
+Assert-Equal $true $script:Arch[$R2] 'Beta ends archived'
+Assert-Equal 0 @($script:Grp.Values | Where-Object { $_ -eq $TempGrp }).Count `
+    'nothing is left archived under the temporary group'
+
+Assert-Equal 'Success' $unwound[0].Status 'the unwind reports success'
+Assert-True ($unwound[0].Message -like '*group 134*') 'the results row names the group it actually reached'
+Assert-True (-not ($unwound[0].Message -like "*$TempGrp*")) 'and does not name the holding group'
+
+# The message must describe what happened, not what was hoped for.
+$script:Grp = @{ $R1 = $TempGrp }
+$script:Arch = @{ $R1 = $false }
+function Invoke-NpmApi {
+    param([string]$Url,[string]$Token,[string]$Method='Get',$Body=$null,[int]$MaxRetries=0)
+    function Ok6($r) { return [PSCustomObject]@{ Success=$true; StatusCode=200; Response=$r; Error=$null } }
+    # A tenant that refuses to move the process: every relocation silently fails.
+    if ($Url -match 'RestoreProcess') { return Ok6 @{} }
+    if ($Url -match 'ArchiveProcess') { $script:Arch[$Body.processUniqueId] = $true; return Ok6 @{} }
+    if ($Method -eq 'Get' -and $Url -match '/Api/v1/Processes/([0-9a-fA-F\-]+)$') {
+        $id = $Matches[1]
+        return Ok6 ([PSCustomObject]@{ processJson = [PSCustomObject]@{
+            UniqueId=$id; Name='Alpha'; GroupId=$script:Grp[$id]; StateId=1 } })
+    }
+    return Ok6 $null
+}
+
+$stuckPlan = New-DependencyPlan -SiteURL 'https://mock' -TargetUniqueIds @($R1)
+$stuckPlan.Ledger = @(
+    [PSCustomObject]@{ UniqueId=$R1; Name='Alpha'; NumericId=1; WasArchived=$true
+                       OriginalGroupUniqueId='g-134'; OriginalGroupId=134
+                       RestoredByThisRun=$true; Denormalized=$false; Deleted=$false }
+)
+$stuck = @(Restore-ProcessPlanState -SiteURL 'https://mock' -Token 't' -Plan $stuckPlan -PlanPath '')
+
+Assert-Equal 1 $stuck.Count 'the stuck process still produces a row'
+Assert-True ($stuck[0].Message -like "*group $TempGrp*") 'the row names where it REALLY is'
+Assert-True ($stuck[0].Message -like '*NOT the original group 134*') 'and says plainly that it is not home'
+Assert-Equal 'Skipped' $stuck[0].Status 'a failed relocation is not reported as a clean success'
+
+# No recorded home group: archive in place, and say that is what happened.
+$script:Grp = @{ $R1 = $TempGrp }; $script:Arch = @{ $R1 = $false }
+$noHome = New-DependencyPlan -SiteURL 'https://mock' -TargetUniqueIds @($R1)
+$noHome.Ledger = @(
+    [PSCustomObject]@{ UniqueId=$R1; Name='Alpha'; NumericId=1; WasArchived=$true
+                       OriginalGroupUniqueId=''; OriginalGroupId=$null
+                       RestoredByThisRun=$true; Denormalized=$false; Deleted=$false }
+)
+$noHomeRows = @(Restore-ProcessPlanState -SiteURL 'https://mock' -Token 't' -Plan $noHome -PlanPath '')
+Assert-True ($noHomeRows[0].Message -like '*no original group was recorded*') `
+    'with no recorded home group the row says so rather than inventing one'
+
 Write-Host "`n======================================" -ForegroundColor Cyan
 Write-Host "  Passed: $script:Pass   Failed: $script:Fail" -ForegroundColor $(if ($script:Fail -eq 0) { 'Green' } else { 'Red' })
 Write-Host "======================================`n" -ForegroundColor Cyan

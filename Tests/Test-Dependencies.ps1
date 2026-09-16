@@ -459,6 +459,54 @@ Assert-Equal 0 @(Find-VariationMaster -Index $pipeIndex -TargetUniqueIds @($VarA
     'and the default does not match a different convention'
 
 # ---------------------------------------------------------------------------
+Write-Host "`nVariation warning counts and ordering" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# The warning emits one row per (target, candidate master) pair, so the row
+# count is not the target count. Reporting 13 "targets" for 3 targets is how a
+# warning stops being read.
+
+$MultiA = 'aaaa1111-0000-0000-0000-00000000001a'
+$MultiB = 'bbbb1111-0000-0000-0000-00000000001b'
+$Cand1  = 'cccc1111-0000-0000-0000-00000000001c'   # active, same group as target
+$Cand2  = 'dddd1111-0000-0000-0000-00000000001d'   # archived
+$Cand3  = 'eeee1111-0000-0000-0000-00000000001e'   # active, different group
+
+$multiIndex = New-MockIndex @(
+    @{ UniqueId=$MultiA; NumericId=1; Name='Payments::AU'; IsArchived=$true;  GroupId=500 },
+    @{ UniqueId=$MultiB; NumericId=2; Name='Payments::NZ'; IsArchived=$true;  GroupId=500 },
+    @{ UniqueId=$Cand1;  NumericId=3; Name='Payments';     IsArchived=$false; GroupId=500 },
+    @{ UniqueId=$Cand2;  NumericId=4; Name='Payments';     IsArchived=$true;  GroupId=700 },
+    @{ UniqueId=$Cand3;  NumericId=5; Name='payments';     IsArchived=$false; GroupId=900 }
+)
+
+$multi = @(Find-VariationMaster -Index $multiIndex -TargetUniqueIds @($MultiA, $MultiB))
+
+# Two targets, three candidate masters each: six pairs, but only two targets.
+Assert-Equal 6 $multi.Count 'one row per target/master pair'
+Assert-Equal 2 @($multi | ForEach-Object { $_.TargetUniqueId } | Select-Object -Unique).Count `
+    'the number of TARGETS is two, whatever the row count says'
+Assert-Equal 3 @($multi | ForEach-Object { $_.MasterUniqueId } | Select-Object -Unique).Count `
+    'and the number of distinct masters is three'
+Assert-Equal 500 @($multi | Where-Object { $_.TargetUniqueId -eq $MultiA })[0].TargetGroupId `
+    'the target group is carried so masters can be ordered by proximity'
+
+# Case-insensitive name matching means 'payments' matches 'Payments::AU'.
+Assert-True (@($multi | Where-Object { $_.MasterUniqueId -eq $Cand3 }).Count -gt 0) `
+    'a master differing only by case is still found'
+
+# Only an ACTIVE master can be collaterally archived, so it must sort first.
+$shown = (Show-VariationWarning -Matches $multi 6>&1 | Out-String)
+Assert-True ($shown -match '2 target\(s\)') 'the warning counts targets, not pairs'
+Assert-True ($shown -match '3 candidate master\(s\)') 'and reports the master count separately'
+
+$firstMasterLine = @($shown -split "`n" | Where-Object { $_ -match 'master:' })[0]
+Assert-True ($firstMasterLine -match 'active') 'the first master listed is an active one, which is the one at risk'
+Assert-True ($firstMasterLine -match 'can be archived by this run') 'and it is marked as the row carrying the risk'
+
+$lastMasterLine = @($shown -split "`n" | Where-Object { $_ -match 'master:' })[-1]
+Assert-True ($lastMasterLine -match 'archived') 'an archived master, which cannot be archived again, sorts last'
+
+# ---------------------------------------------------------------------------
 Write-Host "`nProcesses the baseline never covered" -ForegroundColor Cyan
 # ---------------------------------------------------------------------------
 # The baseline is built from the two list sweeps and those sweeps are not
