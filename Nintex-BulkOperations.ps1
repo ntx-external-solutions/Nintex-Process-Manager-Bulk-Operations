@@ -97,7 +97,7 @@ param(
     [switch]$AllowUnheldTargets
 )
 
-$script:ScriptVersion = '4.6'
+$script:ScriptVersion = '4.7'
 
 # ----------------------------------------------------------------------------
 # Dependency engine. Mode 5 delegates all dependency discovery, reference
@@ -2803,6 +2803,10 @@ function Invoke-BulkDeleteProcesses {
     # can be re-checked against the tenant at the moment the run ends rather
     # than against a diff taken before the unwind.
     $runCollateral = @()
+    # Whichever plan ledger is current. The end-of-run re-check reads it to
+    # verify what the unwind REPORTED against what the tenant shows, so it has
+    # to be set wherever a ledger is.
+    $runLedger = @()
 
     # The Hold phase logs to a preliminary plan, and the real plan is later
     # written over the same path. Without carrying these forward the finished
@@ -2978,7 +2982,7 @@ function Invoke-BulkDeleteProcesses {
                     Message = "Master of target '$($m.TargetName)' and not itself a target; run stopped before any change"
                 }
             }
-            $results = @(Resolve-CollateralOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Results $results)
+            $results = @(Resolve-RunOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Ledger $runLedger -Results $results)
                 Save-DeleteResults -Results $results -Timestamp $timestamp
             return
         }
@@ -2997,6 +3001,10 @@ function Invoke-BulkDeleteProcesses {
         Show-OrphanedGroupWarning -Orphans $orphanTargets -TotalTargets $targetUniqueIds.Count `
             -HoldingGroupName $TempGroupName
     }
+
+    # Zero orphans means one of two different things, and the difference matters:
+    # none found, or none findable because this listing does not report the flag.
+    Show-GroupExistsCoverage -Coverage (Get-NpmGroupExistsCoverage -Index $index)
 
     # ---- Holding group ----------------------------------------------------
     # Only archived TARGETS go here. Dependency holders are restored in place to
@@ -3025,6 +3033,7 @@ function Invoke-BulkDeleteProcesses {
         $preliminary = New-DependencyPlan -SiteURL $SiteURL -TargetUniqueIds $targetUniqueIds
         $preliminary.Status = 'Holding'
         $preliminary.Ledger = @(ConvertTo-PlanLedgerEntry -Snapshot $snapshot)
+        $runLedger = @($preliminary.Ledger)
         $holdLog += "Holding group '$TempGroupName' created: id $($tempGroup.id), uniqueId $($tempGroup.uniqueId)"
         $holdLog += "About to restore $($archivedTargets.Count) archived target(s) into the holding group"
         $preliminary.Log = @($holdLog)
@@ -3052,6 +3061,7 @@ function Invoke-BulkDeleteProcesses {
                 }
             }
             $preliminary.Ledger = @(ConvertTo-PlanLedgerEntry -Snapshot $snapshot)
+            $runLedger = @($preliminary.Ledger)
             $preliminary.Log = @($holdLog)
             [void](Export-DependencyPlan -Plan $preliminary -Path $planPath)
         }
@@ -3114,7 +3124,7 @@ function Invoke-BulkDeleteProcesses {
                     [void](Export-DependencyPlan -Plan $preliminary -Path $planPath)
                     $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup `
                         -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds -NameLookup $tenantBaseline)
-                    $results = @(Resolve-CollateralOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Results $results)
+                    $results = @(Resolve-RunOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Ledger $runLedger -Results $results)
                 Save-DeleteResults -Results $results -Timestamp $timestamp
                     return
                 }
@@ -3148,6 +3158,7 @@ function Invoke-BulkDeleteProcesses {
                 $aborted = New-DependencyPlan -SiteURL $SiteURL -TargetUniqueIds $targetUniqueIds
                 $aborted.Status = 'AbortedCollateral'
                 $aborted.Ledger = @(ConvertTo-PlanLedgerEntry -Snapshot $snapshot)
+                $runLedger = @($aborted.Ledger)
                 $aborted.Collateral = @($holdCollateral)
                 foreach ($c in $holdCollateral) {
                     $aborted.Log += "COLLATERAL after hold phase: $($c.UniqueId) ($($c.Name)) - $($c.Change)"
@@ -3172,7 +3183,7 @@ function Invoke-BulkDeleteProcesses {
                     -ReportedUniqueIds @(@($aborted.Collateral) | ForEach-Object { $_.UniqueId }) `
                     -NameLookup $tenantBaseline)
 
-                $results = @(Resolve-CollateralOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Results $results)
+                $results = @(Resolve-RunOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Ledger $runLedger -Results $results)
                 Save-DeleteResults -Results $results -Timestamp $timestamp
                 return
             }
@@ -3213,6 +3224,7 @@ function Invoke-BulkDeleteProcesses {
     # Carry the Hold-phase history into the plan that gets written over the same
     # path, so the finished file is the whole story rather than the last chapter.
     if ($holdLog.Count -gt 0) { $plan.Log = @($holdLog) + @($plan.Log) }
+    $runLedger = @($plan.Ledger)
 
     if ($plan.Status -eq 'Blocked') {
         Write-Host "`nPlanning was blocked. Nothing has been deleted." -ForegroundColor Red
@@ -3222,13 +3234,14 @@ function Invoke-BulkDeleteProcesses {
         # the tenant is left with live copies of processes that were archived.
         if ($tempGroup) {
             $plan.Ledger = @(ConvertTo-PlanLedgerEntry -Snapshot $snapshot)
+            $runLedger = @($plan.Ledger)
             [void](Export-DependencyPlan -Plan $plan -Path $planPath)
             $results += @(Restore-ProcessPlanState -SiteURL $SiteURL -Token $Token -Plan $plan -PlanPath $planPath -ApprovalsEnabled $approvalsEnabled)
             $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup `
                 -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds `
                 -ReportedUniqueIds @(@($plan.Collateral) | ForEach-Object { $_.UniqueId }) `
                 -NameLookup $tenantBaseline)
-            $results = @(Resolve-CollateralOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Results $results)
+            $results = @(Resolve-RunOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Ledger $runLedger -Results $results)
                 Save-DeleteResults -Results $results -Timestamp $timestamp
         }
         return
@@ -3273,7 +3286,7 @@ function Invoke-BulkDeleteProcesses {
             if ($tempGroup) { $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds `
             -ReportedUniqueIds @(@($plan.Collateral) | ForEach-Object { $_.UniqueId }) `
             -NameLookup $tenantBaseline) }
-            $results = @(Resolve-CollateralOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Results $results)
+            $results = @(Resolve-RunOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Ledger $runLedger -Results $results)
                 Save-DeleteResults -Results $results -Timestamp $timestamp
             return
         }
@@ -3297,7 +3310,7 @@ function Invoke-BulkDeleteProcesses {
             if ($tempGroup) { $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds `
             -ReportedUniqueIds @(@($plan.Collateral) | ForEach-Object { $_.UniqueId }) `
             -NameLookup $tenantBaseline) }
-            $results = @(Resolve-CollateralOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Results $results)
+            $results = @(Resolve-RunOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Ledger $runLedger -Results $results)
                 Save-DeleteResults -Results $results -Timestamp $timestamp
             return
         }
@@ -3320,7 +3333,7 @@ function Invoke-BulkDeleteProcesses {
             if ($tempGroup) { $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds `
             -ReportedUniqueIds @(@($plan.Collateral) | ForEach-Object { $_.UniqueId }) `
             -NameLookup $tenantBaseline) }
-            $results = @(Resolve-CollateralOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Results $results)
+            $results = @(Resolve-RunOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Ledger $runLedger -Results $results)
                 Save-DeleteResults -Results $results -Timestamp $timestamp
             return
         }
@@ -3345,7 +3358,7 @@ function Invoke-BulkDeleteProcesses {
         if ($tempGroup) { $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds `
             -ReportedUniqueIds @(@($plan.Collateral) | ForEach-Object { $_.UniqueId }) `
             -NameLookup $tenantBaseline) }
-        $results = @(Resolve-CollateralOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Results $results)
+        $results = @(Resolve-RunOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Ledger $runLedger -Results $results)
                 Save-DeleteResults -Results $results -Timestamp $timestamp
         return
     }
@@ -3381,7 +3394,7 @@ function Invoke-BulkDeleteProcesses {
         if ($tempGroup) { $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds `
             -ReportedUniqueIds @(@($plan.Collateral) | ForEach-Object { $_.UniqueId }) `
             -NameLookup $tenantBaseline) }
-        $results = @(Resolve-CollateralOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Results $results)
+        $results = @(Resolve-RunOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Ledger $runLedger -Results $results)
                 Save-DeleteResults -Results $results -Timestamp $timestamp
         return
     }
@@ -3425,7 +3438,7 @@ function Invoke-BulkDeleteProcesses {
 
     $plan.Status = 'Completed'
     [void](Export-DependencyPlan -Plan $plan -Path $planPath)
-    $results = @(Resolve-CollateralOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Results $results)
+    $results = @(Resolve-RunOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Ledger $runLedger -Results $results)
                 Save-DeleteResults -Results $results -Timestamp $timestamp
 }
 

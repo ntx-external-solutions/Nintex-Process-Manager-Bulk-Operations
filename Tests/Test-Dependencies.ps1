@@ -647,6 +647,44 @@ Assert-Equal $false $orphanCollateral[0].OriginalGroupExists `
     'a collateral row knows whether the group it came from still exists'
 
 # ---------------------------------------------------------------------------
+Write-Host "`nWhether the tenant reports groupExists at all" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# Absent and false are not the same claim. Control flow reads absence as "the
+# group is there", which degrades gracefully, but the report has to be able to
+# say a zero is unmeasured rather than clean.
+
+$fullCoverage = @{
+    'a' = [PSCustomObject]@{ UniqueId='A'; GroupId=1;   GroupExists=$false; GroupExistsReported=$true }
+    'b' = [PSCustomObject]@{ UniqueId='B'; GroupId=493; GroupExists=$true;  GroupExistsReported=$true }
+}
+$cov = Get-NpmGroupExistsCoverage -Index $fullCoverage
+Assert-Equal 'Full' $cov.State 'a listing that reports the flag everywhere is fully covered'
+Assert-Equal 1 $cov.Orphans 'and the orphan count means what it says'
+Assert-Equal 0 $cov.Missing 'with nothing unreported'
+
+$noCoverage = @{
+    'a' = [PSCustomObject]@{ UniqueId='A'; GroupId=1;   GroupExists=$true; GroupExistsReported=$false }
+    'b' = [PSCustomObject]@{ UniqueId='B'; GroupId=493; GroupExists=$true; GroupExistsReported=$false }
+}
+$cov2 = Get-NpmGroupExistsCoverage -Index $noCoverage
+Assert-Equal 'None' $cov2.State 'a listing that never reports it offers no orphan detection'
+Assert-Equal 0 $cov2.Orphans 'and its zero is unmeasured, not clean'
+Assert-Equal 2 $cov2.Missing 'every row is unreported'
+
+$mixed = @{
+    'a' = [PSCustomObject]@{ UniqueId='A'; GroupId=1;   GroupExists=$false; GroupExistsReported=$true }
+    'b' = [PSCustomObject]@{ UniqueId='B'; GroupId=493; GroupExists=$true;  GroupExistsReported=$true }
+    'c' = [PSCustomObject]@{ UniqueId='C'; GroupId=832; GroupExists=$true;  GroupExistsReported=$false }
+}
+$cov3 = Get-NpmGroupExistsCoverage -Index $mixed
+Assert-Equal 'Mixed' $cov3.State 'some rows carrying the flag and some not is its own case'
+Assert-Equal 1 $cov3.Missing 'and the unreported rows are counted'
+Assert-Equal 2 $cov3.Reported 'alongside the reported ones'
+
+Assert-Equal 'None' (Get-NpmGroupExistsCoverage -Index $null).State 'a null index reports no coverage rather than throwing'
+Assert-Equal 'None' (Get-NpmGroupExistsCoverage -Index @{}).State 'and so does an empty one'
+
+# ---------------------------------------------------------------------------
 Write-Host "`n======================================" -ForegroundColor Cyan
 Write-Host "  Passed: $script:Pass   Failed: $script:Fail" -ForegroundColor $(if ($script:Fail -eq 0) { 'Green' } else { 'Red' })
 Write-Host "======================================`n" -ForegroundColor Cyan

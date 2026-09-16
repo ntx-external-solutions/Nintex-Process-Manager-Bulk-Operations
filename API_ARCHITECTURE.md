@@ -69,6 +69,14 @@ An orphaned process can still be **archived**, because `ArchiveProcess` takes no
 and archives a process where it currently sits. It simply cannot be **restored**
 anywhere until someone gives it a group that exists.
 
+**Absent is not false.** A listing that does not carry the field at all is a tenant
+where orphan detection is unavailable, not one with no orphans. Treat absence as "the
+group is there" for control flow, which degrades to the pre-existing behaviour of
+attempting the restore and falling back, but keep it distinguishable for reporting.
+Mixed presence within one listing is the case to look at hardest: where most rows
+carry the field, a missing one is more likely to mean the group is gone than that the
+payload omitted it.
+
 ---
 
 ### Get Individual Process Details
@@ -756,6 +764,13 @@ and it archives the process wherever it currently sits. That matters at unwind
 time, because by then the targets are sitting in the temporary holding group:
 archiving without relocating first leaves them archived under a group that
 cleanup is about to delete.
+
+**It can also report failure and take effect anyway.** A measured run reported two
+targets as still active after their archive calls failed; a read afterwards found
+all three archived. So a failed archive is not evidence the process is still
+active, and neither list of things needing manual attention should be printed
+from what the calls said. Both are re-derived from a fresh read of the tenant at
+the moment the run ends.
 
 `RestoreProcess` is the only endpoint here that takes a group id. Its documented
 job is un-archiving, and whether it also relocates a process that is already
