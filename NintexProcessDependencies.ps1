@@ -1534,6 +1534,103 @@ function Show-CollateralDamage {
     Write-Host "Another user editing the tenant during the run produces the same signal." -ForegroundColor Yellow
 }
 
+function Resolve-CollateralOutcome {
+    <#
+    .SYNOPSIS
+        Re-checks collateral after the unwind and clears anything already fine.
+
+    .DESCRIPTION
+        The manual-attention list is built from the checkpoint diff, which is
+        taken BEFORE the targets are returned to their groups. Returning a target
+        appears to bring its sibling variations with it, the same coupling
+        running in reverse, so by the time the run ends some of what the diff
+        recorded has undone itself.
+
+        On the measured run that meant six entries telling an operator to go and
+        move five processes that were already sitting in their original groups.
+        The sixth was real.
+
+        So the list is regenerated from a fresh read at the moment the run ends,
+        rather than from a snapshot taken before the last thing the run did.
+
+        Note this does NOT establish that returning a target always recovers its
+        siblings. It was observed once. What it establishes is that the report
+        must describe the tenant as it is, not as it was mid-run.
+    #>
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        $Collateral,
+        $Results
+    )
+
+    $rows = @($Results)
+    $items = @($Collateral)
+    if ($items.Count -eq 0) { return $rows }
+
+    $outstanding = @($rows | Where-Object {
+        $_.Operation -eq 'ReverseCollateral' -and $_.Status -ne 'Success'
+    })
+    if ($outstanding.Count -eq 0) { return $rows }
+
+    Write-Host "`n=== RE-CHECKING WHAT STILL NEEDS ATTENTION ===" -ForegroundColor Cyan
+    $freshIndex = Get-NpmProcessIndex -SiteURL $SiteURL -Token $Token
+
+    # Latest record per id, so a process reported at more than one checkpoint is
+    # checked against one expectation rather than several.
+    $expected = @{}
+    foreach ($item in $items) {
+        if (-not $item.UniqueId) { continue }
+        $expected[$item.UniqueId.ToLowerInvariant()] = $item
+    }
+
+    $cleared = 0
+    $updated = @()
+
+    foreach ($row in $rows) {
+        if ($row.Operation -ne 'ReverseCollateral' -or $row.Status -eq 'Success') {
+            $updated += $row
+            continue
+        }
+
+        $key = ([string]$row.ObjectID).ToLowerInvariant()
+        if (-not $expected.ContainsKey($key)) { $updated += $row; continue }
+
+        $want = $expected[$key]
+        $now = $null
+        if ($freshIndex.ContainsKey($key)) { $now = $freshIndex[$key] }
+
+        # No before-state recorded means nothing to compare against.
+        if ($null -eq $now -or $null -eq $want.OriginalGroupId -or $want.Change -eq 'NotInBaseline') {
+            $updated += $row
+            continue
+        }
+
+        $backInGroup = ("$($now.GroupId)" -eq "$($want.OriginalGroupId)")
+        $backInState = ([bool]$now.IsArchived -eq [bool]$want.WasArchived)
+
+        if ($backInGroup -and $backInState) {
+            $cleared++
+            Write-Host "  $($row.Name) is back in group $($want.OriginalGroupId); nothing to do." -ForegroundColor Green
+            $updated += [PSCustomObject]@{
+                ObjectType = $row.ObjectType; ObjectID = $row.ObjectID; Name = $row.Name
+                Operation = 'ReverseCollateral'; Status = 'Success'
+                Message = "Back in group $($want.OriginalGroupId) by the end of the run; no action needed"
+            }
+        } else {
+            $updated += $row
+        }
+    }
+
+    if ($cleared -gt 0) {
+        Write-Host "  $cleared item(s) resolved themselves and have been dropped from the manual list." -ForegroundColor Green
+    }
+    $stillOpen = @($updated | Where-Object { $_.Operation -eq 'ReverseCollateral' -and $_.Status -ne 'Success' })
+    Write-Host "  $($stillOpen.Count) item(s) genuinely outstanding." -ForegroundColor $(if ($stillOpen.Count -gt 0) { 'Yellow' } else { 'Green' })
+
+    return $updated
+}
+
 function Restore-CollateralState {
     <#
     .SYNOPSIS
@@ -1855,12 +1952,13 @@ function Restore-NpmProcess {
         [string]$SiteURL,
         [string]$Token,
         [string]$ProcessUniqueId,
-        $ProcessGroupId
+        $ProcessGroupId,
+        [int]$MaxRetries = $script:NpmMaxRetries
     )
 
     Clear-NpmCachedModel -UniqueId $ProcessUniqueId
     Start-NpmThrottle
-    $result = Invoke-NpmApi -Url "$SiteURL/Process/Edit/RestoreProcess" -Token $Token -Method Post -Body @{
+    $result = Invoke-NpmApi -Url "$SiteURL/Process/Edit/RestoreProcess" -Token $Token -Method Post -MaxRetries $MaxRetries -Body @{
         processUniqueId = $ProcessUniqueId
         processGroupId  = [string]$ProcessGroupId
     }
@@ -2974,6 +3072,13 @@ function Get-NpmProcessGroupId {
     return (Get-NodeValue -Node $model -Name 'GroupId')
 }
 
+# Whether RestoreProcess also relocates a process that is already ACTIVE.
+# 'Unknown' until tried, then 'Yes' or 'No' for the rest of the run.
+$script:NpmRestoreRelocatesActive = 'Unknown'
+
+function Reset-NpmRelocationProbe { $script:NpmRestoreRelocatesActive = 'Unknown' }
+function Get-NpmRelocationProbeState { return $script:NpmRestoreRelocatesActive }
+
 function Move-NpmProcessToGroup {
     <#
     .SYNOPSIS
@@ -3005,12 +3110,29 @@ function Move-NpmProcessToGroup {
         return [PSCustomObject]@{ Moved = $false; ActualGroupId = $null; Verified = $false }
     }
 
-    [void](Restore-NpmProcess -SiteURL $SiteURL -Token $Token `
-        -ProcessUniqueId $ProcessUniqueId -ProcessGroupId $TargetGroupId)
+    # The probe runs with NO retries. On the measured tenant RestoreProcess
+    # answers HTTP 500 for an already-active process every single time, and the
+    # standard ladder spent 2 + 4 + 8 seconds establishing that before falling
+    # back: 14 seconds per process, which on a 479-target run is close to two
+    # hours of pure backoff. A 500 here is not a transient fault, it is the
+    # endpoint declining to do something it never claimed to do.
+    #
+    # And the answer is the same for every process, so it is asked once per run.
+    if ($script:NpmRestoreRelocatesActive -ne 'No') {
+        [void](Restore-NpmProcess -SiteURL $SiteURL -Token $Token `
+            -ProcessUniqueId $ProcessUniqueId -ProcessGroupId $TargetGroupId -MaxRetries 0)
 
-    $actual = Get-NpmProcessGroupId -SiteURL $SiteURL -Token $Token -ProcessUniqueId $ProcessUniqueId -IsArchived $false
-    if ($null -ne $actual -and "$actual" -eq "$TargetGroupId") {
-        return [PSCustomObject]@{ Moved = $true; ActualGroupId = $actual; Verified = $true }
+        $actual = Get-NpmProcessGroupId -SiteURL $SiteURL -Token $Token -ProcessUniqueId $ProcessUniqueId -IsArchived $false
+        if ($null -ne $actual -and "$actual" -eq "$TargetGroupId") {
+            $script:NpmRestoreRelocatesActive = 'Yes'
+            return [PSCustomObject]@{ Moved = $true; ActualGroupId = $actual; Verified = $true }
+        }
+
+        if ($script:NpmRestoreRelocatesActive -eq 'Unknown') {
+            $script:NpmRestoreRelocatesActive = 'No'
+            Write-Host "    RestoreProcess does not relocate an active process on this tenant;" -ForegroundColor Gray
+            Write-Host "    using archive-then-restore for the rest of this run." -ForegroundColor Gray
+        }
     }
 
     # Fallback: archive, then restore into the group we want.

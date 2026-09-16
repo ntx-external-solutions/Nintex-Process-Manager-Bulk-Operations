@@ -1,6 +1,6 @@
 # Nintex Process Manager Bulk Operations
 
-**Version 4.4.** The version is defined once, in `$script:ScriptVersion` at the top of
+**Version 4.5.** The version is defined once, in `$script:ScriptVersion` at the top of
 `Nintex-BulkOperations.ps1`, and printed at startup.
 
 A PowerShell script for bulk operations on Nintex Process Manager (Promapp) processes
@@ -170,6 +170,7 @@ This is what makes the script scriptable and schedulable; the menu path is uncha
 | `-ApprovalsEnabled` | Declare that process approvals are on in this tenant |
 | `-ThoroughScan` | Mode 5: read every active process for Input/Output references |
 | `-IncludeSubgroups` | Include subgroups for `-Source Group` |
+| `-AllowUnheldTargets` | Mode 5, dangerous: delete a target that could not be restored out of the archive, and whose references were therefore never checked |
 
 `-Force` does **not** wave through a Mode 5 reconciliation mismatch, a failed
 verification, an unresolved participant, a collateral change, or a variation
@@ -597,6 +598,10 @@ Known broken or incomplete as of this revision:
   two list sweeps, and processes exist that neither returns. Those cannot be
   diffed at all; the run reports them as `NotInBaseline` when it encounters one and
   reverses nothing for them, because no prior state was recorded.
+- **A target that cannot be restored out of the archive is not deleted.** Its
+  references were never checked, so deleting it risks leaving a dangling reference
+  behind. Re-run it once the tenant will restore it, or pass `-AllowUnheldTargets`
+  to accept the risk explicitly.
 - **Group moves are not reversed automatically.** When a run changes a process it was
   not asked to change, an unwanted archive or un-archive is undone, but a process that
   merely moved group while staying active is named for manual correction instead. The
@@ -627,7 +632,30 @@ For issues or questions:
 
 ## Version History
 
-**Version 4.4** (Current)
+**Version 4.5** (Current)
+- Fixed: a target whose Hold restore failed was deleted anyway. The Hold phase
+  exists because archiving hides Input and Output rows, so a target that never
+  came out of the archive was never checked; the run logged exactly that and
+  deleted it regardless, which can leave a dangling reference on a process that
+  survives. Such a target is now excluded from the delete set and reported as
+  skipped, and the rest of the batch continues. `-AllowUnheldTargets` overrides
+  it; `-Force` does not.
+- Fixed: the relocation probe cost 14 seconds per process to learn the same
+  thing every time. `RestoreProcess` returns HTTP 500 for an already-active
+  process on this tenant, and the retry ladder spent 2 + 4 + 8 seconds
+  establishing it before each fallback, which on a 479-target run is close to
+  two hours of pure backoff. The probe now runs without retries and the answer
+  is remembered for the rest of the run.
+- Fixed: the manual-attention list named processes that were already fine. It
+  was generated from a checkpoint diff taken before the unwind, and returning
+  the targets to their groups brings their sibling variations back too, so one
+  run told an operator to go and move five processes that were already home.
+  The list is now re-checked against a fresh read at the moment the run ends.
+- Fixed: the pre-mutation plan's log was overwritten by the final plan, losing
+  the record of which targets could not be held and whether an unchecked delete
+  was authorised.
+
+**Version 4.4**
 - Fixed: a cancelled run left its targets archived in the temporary group. The
   unwind archived each process where it stood, and at that point they stood in
   the holding group, so three ended up under group 834 instead of 134, 649 and
