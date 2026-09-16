@@ -730,9 +730,55 @@ fallback uses only documented behaviour: archive, restore into the target group.
 That costs an extra archive event in the process's history and lands it in the
 right place.
 
+**Measured answer: it does not.** On the demo tenant `RestoreProcess` returns
+HTTP 500 for a process that is already active, every time, across three targets
+in one run. That is the endpoint declining to do something it never claimed to
+do, not a transient fault, so it must not go through the retry ladder: at 2 + 4
++ 8 seconds it cost 14 seconds per process, and a 479-target run would spend
+close to two hours in pure backoff.
+
+The probe therefore runs with retries disabled, and the answer is remembered for
+the life of the run (`$script:NpmRestoreRelocatesActive`). One process pays for
+the discovery and every process after it goes straight to the fallback. The
+verify-rather-than-assume design stays, because another tenant may answer
+differently; it just does not ask the same question 479 times.
+
 Whatever happens, the reported group is the one read back afterwards, not the
 one intended. A results file that asserts a placement which never happened is
 worse than one that admits it does not know.
+
+### A target that cannot be held must not be deleted
+
+The Hold phase exists for one reason, recorded above: archiving hides Input and
+Output rows, so a reference held against an archived target is invisible until
+the target is active. It follows that a target whose restore FAILS was never
+checked at all.
+
+A run did exactly that. `RestoreProcess` returned HTTP 500 three times for one
+target, the run logged "its Input/Output edges stay hidden", and then deleted it.
+Deleting a process whose references were never examined can leave a dangling
+Input on a process that survives, which is the single failure this engine exists
+to prevent.
+
+Such a target is now removed from the delete set, reported as skipped with the
+reason, and the rest of the batch proceeds. `-AllowUnheldTargets` overrides it;
+nothing else does, `-Force` included, and the plan records that an unchecked
+delete was authorised.
+
+### Returning a target appears to return its siblings
+
+Observed once, and worth confirming before relying on. After a cancelled run put
+its three targets back in their home groups, five sibling variations that the
+checkpoint had recorded as moved into the temporary group were back in their own
+groups too, and the temporary group deleted cleanly, which it could not have done
+otherwise. The variation coupling appears to run in reverse.
+
+The consequence for reporting is not conditional on that being a rule. The
+manual-attention list is built from a checkpoint diff taken BEFORE the unwind,
+and it named five processes that needed nothing done. `Resolve-CollateralOutcome`
+now re-reads the affected ids after the unwind and clears anything already back
+in its recorded group, so the list describes the tenant at the moment the run
+ends rather than mid-run.
 
 ### Warning before the fact: the name heuristic
 

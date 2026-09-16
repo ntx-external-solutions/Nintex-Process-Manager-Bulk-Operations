@@ -41,7 +41,19 @@
     Answer the confirmation prompts affirmatively and run unattended. It does NOT
     wave through a reconciliation mismatch or a failed verification in Mode 5:
     those still stop the run, because they mean the plan does not match the
-    tenant.
+    tenant. It does not imply -AllowUnheldTargets either.
+
+.PARAMETER AllowUnheldTargets
+    Mode 5 only, and dangerous. Delete a target even though it could not be
+    restored out of the archive.
+
+    The Hold phase exists because archiving hides Input and Output rows: a
+    reference held against an archived target is invisible until the target is
+    active. A target that never came out of the archive was never checked, so
+    deleting it can leave a dangling reference on a process that survives.
+
+    Without this switch such a target is excluded from the run and reported as
+    skipped, and the rest of the batch proceeds. -Force does not imply it.
 
 .EXAMPLE
     .\Nintex-BulkOperations.ps1
@@ -81,10 +93,11 @@ param(
     [switch]$Force,
     [switch]$ApprovalsEnabled,
     [switch]$ThoroughScan,
-    [switch]$IncludeSubgroups
+    [switch]$IncludeSubgroups,
+    [switch]$AllowUnheldTargets
 )
 
-$script:ScriptVersion = '4.4'
+$script:ScriptVersion = '4.5'
 
 # ----------------------------------------------------------------------------
 # Dependency engine. Mode 5 delegates all dependency discovery, reference
@@ -2746,7 +2759,8 @@ function Invoke-BulkDeleteProcesses {
         [switch]$Force,
         [switch]$ApprovalsEnabled,
         [switch]$ThoroughScan,
-        [switch]$IncludeSubgroups
+        [switch]$IncludeSubgroups,
+        [switch]$AllowUnheldTargets
     )
 
     Write-Host "`n========================================" -ForegroundColor Cyan
@@ -2784,6 +2798,17 @@ function Invoke-BulkDeleteProcesses {
     }
 
     $results = @()
+
+    # Everything any checkpoint flagged, gathered so the manual-attention list
+    # can be re-checked against the tenant at the moment the run ends rather
+    # than against a diff taken before the unwind.
+    $runCollateral = @()
+
+    # The Hold phase logs to a preliminary plan, and the real plan is later
+    # written over the same path. Without carrying these forward the finished
+    # plan file loses exactly the lines worth keeping: which targets could not be
+    # held, and whether an unchecked delete was authorised.
+    $holdLog = @()
 
     # What to do when a target's dependency check still fails after a retry.
     # A single transient 500 on a 497-item batch should not discard twenty
@@ -2953,7 +2978,8 @@ function Invoke-BulkDeleteProcesses {
                     Message = "Master of target '$($m.TargetName)' and not itself a target; run stopped before any change"
                 }
             }
-            Save-DeleteResults -Results $results -Timestamp $timestamp
+            $results = @(Resolve-CollateralOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Results $results)
+                Save-DeleteResults -Results $results -Timestamp $timestamp
             return
         }
     }
@@ -2985,12 +3011,15 @@ function Invoke-BulkDeleteProcesses {
         $preliminary = New-DependencyPlan -SiteURL $SiteURL -TargetUniqueIds $targetUniqueIds
         $preliminary.Status = 'Holding'
         $preliminary.Ledger = @(ConvertTo-PlanLedgerEntry -Snapshot $snapshot)
-        $preliminary.Log += "Holding group '$TempGroupName' created: id $($tempGroup.id), uniqueId $($tempGroup.uniqueId)"
-        $preliminary.Log += "About to restore $($archivedTargets.Count) archived target(s) into the holding group"
+        $holdLog += "Holding group '$TempGroupName' created: id $($tempGroup.id), uniqueId $($tempGroup.uniqueId)"
+        $holdLog += "About to restore $($archivedTargets.Count) archived target(s) into the holding group"
+        $preliminary.Log = @($holdLog)
         [void](Export-DependencyPlan -Plan $preliminary -Path $planPath)
         Write-Host "Pre-mutation plan written to: $planPath" -ForegroundColor Green
 
         $held = 0
+        $failedHolds = @()
+
         foreach ($target in $archivedTargets) {
             $held++
             Write-NpmProgress -Activity 'Holding group' -Status 'Restoring archived targets' `
@@ -3001,16 +3030,82 @@ function Invoke-BulkDeleteProcesses {
                 # leaves a plan that names exactly what was moved.
                 Set-ProcessSnapshotRestored -Snapshot $snapshot -UniqueId $target -HoldingGroupId $tempGroup.id
             } else {
-                $preliminary.Log += "FAILED to restore target $target into the holding group"
+                $failedHolds += $target
+                $holdLog += "FAILED to restore target $target into the holding group"
                 $results += [PSCustomObject]@{
                     ObjectType = 'Process'; ObjectID = $target; Name = ''
                     Operation = 'Hold'; Status = 'Failed'; Message = 'Could not restore into the holding group'
                 }
             }
             $preliminary.Ledger = @(ConvertTo-PlanLedgerEntry -Snapshot $snapshot)
+            $preliminary.Log = @($holdLog)
             [void](Export-DependencyPlan -Plan $preliminary -Path $planPath)
         }
         Complete-NpmProgress -Activity 'Holding group' -Id 3
+
+        # ---- A target that never came out of the archive was never checked ---
+        # The Hold phase exists for one reason: archiving hides Input and Output
+        # rows, so a reference held against an archived target is invisible until
+        # the target is active. A target whose restore failed stayed archived, so
+        # its Input/Output edges were never visible to the dependency check. The
+        # run already logged exactly that, and then deleted it anyway.
+        #
+        # Deleting it can leave a dangling Input on a surviving process, which is
+        # the one failure this whole engine exists to prevent. So it comes out of
+        # the delete set and the rest of the batch carries on.
+        if ($failedHolds.Count -gt 0) {
+            Write-Host "`n=== TARGETS THAT COULD NOT BE HELD ===" -ForegroundColor Red
+            Write-Host "$($failedHolds.Count) target(s) could not be restored out of the archive." -ForegroundColor Red
+            Write-Host "Their Input and Output references were never visible to the dependency check." -ForegroundColor Red
+
+            foreach ($failed in $failedHolds) {
+                $fentry = Get-NpmIndexEntry -Index $index -UniqueId $failed
+                $fname = if ($fentry -and $fentry.Name) { $fentry.Name } else { $failed }
+                Write-Host "  $fname  ($failed)" -ForegroundColor Red
+            }
+
+            if ($AllowUnheldTargets) {
+                Write-Host "`n-AllowUnheldTargets was supplied. These stay in the delete set and will be" -ForegroundColor Red
+                Write-Host "deleted WITHOUT their references ever having been checked." -ForegroundColor Red
+                foreach ($failed in $failedHolds) {
+                    $holdLog += "UNCHECKED DELETE allowed by -AllowUnheldTargets: $failed"
+                }
+            }
+            else {
+                Write-Host "`nExcluding them from this run. Everything else continues." -ForegroundColor Yellow
+                Write-Host "Re-run them once the tenant will restore them, or pass -AllowUnheldTargets to" -ForegroundColor Yellow
+                Write-Host "delete them unchecked, which risks leaving dangling references behind." -ForegroundColor Yellow
+
+                $excludedHold = @{}
+                foreach ($failed in $failedHolds) { $excludedHold[$failed.ToLowerInvariant()] = $true }
+
+                foreach ($failed in $failedHolds) {
+                    $fentry = Get-NpmIndexEntry -Index $index -UniqueId $failed
+                    $fname = if ($fentry -and $fentry.Name) { $fentry.Name } else { '' }
+                    $results += [PSCustomObject]@{
+                        ObjectType = 'Process'; ObjectID = $failed; Name = $fname
+                        Operation = 'Delete'; Status = 'Skipped'
+                        Message = 'NOT deleted: could not be restored out of the archive, so its Input/Output references were never checked'
+                    }
+                    $holdLog += "Excluded $failed from the delete set: Hold failed, references unchecked"
+                }
+
+                $targetUniqueIds = @($targetUniqueIds | Where-Object { -not $excludedHold.ContainsKey($_.ToLowerInvariant()) })
+                $archivedTargets = @($archivedTargets | Where-Object { -not $excludedHold.ContainsKey($_.ToLowerInvariant()) })
+
+                if ($targetUniqueIds.Count -eq 0) {
+                    Write-Host "`nNo targets remain. Nothing will be deleted." -ForegroundColor Yellow
+                    $preliminary.Status = 'AbortedNoHeldTargets'
+                    $preliminary.Log = @($holdLog)
+                    [void](Export-DependencyPlan -Plan $preliminary -Path $planPath)
+                    $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup `
+                        -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds -NameLookup $tenantBaseline)
+                    $results = @(Resolve-CollateralOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Results $results)
+                Save-DeleteResults -Results $results -Timestamp $timestamp
+                    return
+                }
+            }
+        }
         Write-Host "  Held $($archivedTargets.Count) target(s) in '$TempGroupName'" -ForegroundColor Gray
 
         $index = Get-NpmProcessIndex -SiteURL $SiteURL -Token $Token
@@ -3026,6 +3121,8 @@ function Invoke-BulkDeleteProcesses {
 
         $holdCollateral = @(Compare-TenantState -Baseline $tenantBaseline -Index $index `
             -ExpectedUniqueIds $targetUniqueIds -ObservedUniqueIds $heldNow)
+
+        $runCollateral += @($holdCollateral)
 
         if ($holdCollateral.Count -gt 0) {
             Show-CollateralDamage -Collateral $holdCollateral -Phase 'after holding archived targets'
@@ -3061,6 +3158,7 @@ function Invoke-BulkDeleteProcesses {
                     -ReportedUniqueIds @(@($aborted.Collateral) | ForEach-Object { $_.UniqueId }) `
                     -NameLookup $tenantBaseline)
 
+                $results = @(Resolve-CollateralOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Results $results)
                 Save-DeleteResults -Results $results -Timestamp $timestamp
                 return
             }
@@ -3098,6 +3196,10 @@ function Invoke-BulkDeleteProcesses {
         Disable-NpmModelCache
     }
 
+    # Carry the Hold-phase history into the plan that gets written over the same
+    # path, so the finished file is the whole story rather than the last chapter.
+    if ($holdLog.Count -gt 0) { $plan.Log = @($holdLog) + @($plan.Log) }
+
     if ($plan.Status -eq 'Blocked') {
         Write-Host "`nPlanning was blocked. Nothing has been deleted." -ForegroundColor Red
         foreach ($line in @($plan.Log)) { Write-Host "  $line" -ForegroundColor Red }
@@ -3112,7 +3214,8 @@ function Invoke-BulkDeleteProcesses {
                 -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds `
                 -ReportedUniqueIds @(@($plan.Collateral) | ForEach-Object { $_.UniqueId }) `
                 -NameLookup $tenantBaseline)
-            Save-DeleteResults -Results $results -Timestamp $timestamp
+            $results = @(Resolve-CollateralOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Results $results)
+                Save-DeleteResults -Results $results -Timestamp $timestamp
         }
         return
     }
@@ -3156,7 +3259,8 @@ function Invoke-BulkDeleteProcesses {
             if ($tempGroup) { $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds `
             -ReportedUniqueIds @(@($plan.Collateral) | ForEach-Object { $_.UniqueId }) `
             -NameLookup $tenantBaseline) }
-            Save-DeleteResults -Results $results -Timestamp $timestamp
+            $results = @(Resolve-CollateralOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Results $results)
+                Save-DeleteResults -Results $results -Timestamp $timestamp
             return
         }
     }
@@ -3179,7 +3283,8 @@ function Invoke-BulkDeleteProcesses {
             if ($tempGroup) { $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds `
             -ReportedUniqueIds @(@($plan.Collateral) | ForEach-Object { $_.UniqueId }) `
             -NameLookup $tenantBaseline) }
-            Save-DeleteResults -Results $results -Timestamp $timestamp
+            $results = @(Resolve-CollateralOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Results $results)
+                Save-DeleteResults -Results $results -Timestamp $timestamp
             return
         }
     }
@@ -3201,7 +3306,8 @@ function Invoke-BulkDeleteProcesses {
             if ($tempGroup) { $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds `
             -ReportedUniqueIds @(@($plan.Collateral) | ForEach-Object { $_.UniqueId }) `
             -NameLookup $tenantBaseline) }
-            Save-DeleteResults -Results $results -Timestamp $timestamp
+            $results = @(Resolve-CollateralOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Results $results)
+                Save-DeleteResults -Results $results -Timestamp $timestamp
             return
         }
     }
@@ -3225,7 +3331,8 @@ function Invoke-BulkDeleteProcesses {
         if ($tempGroup) { $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds `
             -ReportedUniqueIds @(@($plan.Collateral) | ForEach-Object { $_.UniqueId }) `
             -NameLookup $tenantBaseline) }
-        Save-DeleteResults -Results $results -Timestamp $timestamp
+        $results = @(Resolve-CollateralOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Results $results)
+                Save-DeleteResults -Results $results -Timestamp $timestamp
         return
     }
 
@@ -3249,6 +3356,7 @@ function Invoke-BulkDeleteProcesses {
         -ApprovalsEnabled $approvalsEnabled -TenantBaseline $tenantBaseline -OnCollateral $collateralDecision `
         -GetObservedUniqueIds $holdingGroupReader)
     $results += $deletionResults
+    $runCollateral += @($plan.Collateral)
 
     # The deletion step stops before deleting anything if the archive pass moved
     # something that was not a target. Unwind rather than carrying on.
@@ -3259,7 +3367,8 @@ function Invoke-BulkDeleteProcesses {
         if ($tempGroup) { $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds `
             -ReportedUniqueIds @(@($plan.Collateral) | ForEach-Object { $_.UniqueId }) `
             -NameLookup $tenantBaseline) }
-        Save-DeleteResults -Results $results -Timestamp $timestamp
+        $results = @(Resolve-CollateralOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Results $results)
+                Save-DeleteResults -Results $results -Timestamp $timestamp
         return
     }
 
@@ -3302,7 +3411,8 @@ function Invoke-BulkDeleteProcesses {
 
     $plan.Status = 'Completed'
     [void](Export-DependencyPlan -Plan $plan -Path $planPath)
-    Save-DeleteResults -Results $results -Timestamp $timestamp
+    $results = @(Resolve-CollateralOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Results $results)
+                Save-DeleteResults -Results $results -Timestamp $timestamp
 }
 
 function Save-DeleteResults {
@@ -3649,6 +3759,7 @@ function Invoke-BulkOperationMode {
             if ($script:CliOptions.ApprovalsEnabled) { $deleteSwitches.ApprovalsEnabled = $true }
             if ($script:CliOptions.ThoroughScan)     { $deleteSwitches.ThoroughScan = $true }
             if ($script:CliOptions.IncludeSubgroups) { $deleteSwitches.IncludeSubgroups = $true }
+            if ($script:CliOptions.AllowUnheldTargets) { $deleteSwitches.AllowUnheldTargets = $true }
 
             if ($sourceType -eq "CSV") {
                 $csvPath = Resolve-CsvPath
@@ -3762,7 +3873,8 @@ function Start-BulkOperations {
         [switch]$Force,
         [switch]$ApprovalsEnabled,
         [switch]$ThoroughScan,
-        [switch]$IncludeSubgroups
+        [switch]$IncludeSubgroups,
+        [switch]$AllowUnheldTargets
     )
 
     $nonInteractive = [bool]$Mode
@@ -3779,6 +3891,7 @@ function Start-BulkOperations {
         ApprovalsEnabled = [bool]$ApprovalsEnabled
         ThoroughScan     = [bool]$ThoroughScan
         IncludeSubgroups = [bool]$IncludeSubgroups
+        AllowUnheldTargets = [bool]$AllowUnheldTargets
     }
 
     # Clearing the screen throws away whatever the caller was looking at, which
@@ -3881,7 +3994,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         -GroupId $GroupId -ObjectType $ObjectType -RestoreGroupId $RestoreGroupId `
         -ConfigPath $ConfigPath -WhatIf:$WhatIf -Force:$Force `
         -ApprovalsEnabled:$ApprovalsEnabled -ThoroughScan:$ThoroughScan `
-        -IncludeSubgroups:$IncludeSubgroups
+        -IncludeSubgroups:$IncludeSubgroups -AllowUnheldTargets:$AllowUnheldTargets
 
     exit $exitCode
 }

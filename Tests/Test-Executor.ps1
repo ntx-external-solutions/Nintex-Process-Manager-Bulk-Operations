@@ -613,6 +613,151 @@ $noHomeRows = @(Restore-ProcessPlanState -SiteURL 'https://mock' -Token 't' -Pla
 Assert-True ($noHomeRows[0].Message -like '*no original group was recorded*') `
     'with no recorded home group the row says so rather than inventing one'
 
+# ---------------------------------------------------------------------------
+Write-Host "`nScenario: the relocation probe is asked once, not once per process" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# RestoreProcess answers HTTP 500 for an already-active process on this tenant,
+# every time. Run through the normal retry ladder that is 2 + 4 + 8 seconds per
+# process before the fallback: 14 seconds each, and close to two hours of pure
+# backoff on a 479-target run. The answer is the same for every process, so it
+# is asked once and remembered.
+
+$P1 = 'aa11bb22-0000-0000-0000-0000000000f1'
+$P2 = 'aa11bb22-0000-0000-0000-0000000000f2'
+
+$script:RestoreAttempts = @()
+$script:ArchiveCount = 0
+$script:Group = @{ $P1 = 834; $P2 = 834 }
+
+function Invoke-NpmApi {
+    param([string]$Url,[string]$Token,[string]$Method='Get',$Body=$null,[int]$MaxRetries=$script:NpmMaxRetries)
+    function Ok7($r) { return [PSCustomObject]@{ Success=$true; StatusCode=200; Response=$r; Error=$null } }
+
+    if ($Url -match 'RestoreProcess') {
+        $script:RestoreAttempts += [PSCustomObject]@{
+            Id = $Body.processUniqueId; Group = $Body.processGroupId; MaxRetries = $MaxRetries }
+
+        # Only relocates a process that is currently ARCHIVED.
+        if ($script:Archived[$Body.processUniqueId]) {
+            $script:Archived[$Body.processUniqueId] = $false
+            $script:Group[$Body.processUniqueId] = [int]$Body.processGroupId
+            return Ok7 @{}
+        }
+        return [PSCustomObject]@{ Success=$false; StatusCode=500; Response=$null; Error='server error' }
+    }
+    if ($Url -match 'ArchiveProcess') {
+        $script:ArchiveCount++
+        $script:Archived[$Body.processUniqueId] = $true
+        return Ok7 @{}
+    }
+    if ($Method -eq 'Get' -and $Url -match '/Api/v1/Processes/([0-9a-fA-F\-]+)$') {
+        $id = $Matches[1]
+        return Ok7 ([PSCustomObject]@{ processJson = [PSCustomObject]@{
+            UniqueId=$id; Name='P'; GroupId=$script:Group[$id]; StateId=1 } })
+    }
+    return Ok7 $null
+}
+
+Reset-NpmRelocationProbe
+$script:Archived = @{ $P1 = $false; $P2 = $false }
+
+$m1 = Move-NpmProcessToGroup -SiteURL 'https://mock' -Token 't' -ProcessUniqueId $P1 -TargetGroupId 493
+Assert-Equal $true $m1.Moved 'the fallback lands the first process in its group'
+Assert-Equal 493 $m1.ActualGroupId 'and says where it actually is'
+Assert-Equal 'No' (Get-NpmRelocationProbeState) 'the run has learned that RestoreProcess does not relocate an active process'
+
+$probe1 = @($script:RestoreAttempts | Where-Object { $_.Id -eq $P1 })[0]
+Assert-Equal 0 $probe1.MaxRetries 'the probe runs with NO retry ladder, so a 500 costs nothing'
+
+$attemptsAfterFirst = $script:RestoreAttempts.Count
+$m2 = Move-NpmProcessToGroup -SiteURL 'https://mock' -Token 't' -ProcessUniqueId $P2 -TargetGroupId 493
+Assert-Equal $true $m2.Moved 'the second process still lands correctly'
+
+$secondCalls = @($script:RestoreAttempts | Where-Object { $_.Id -eq $P2 })
+Assert-Equal 1 $secondCalls.Count 'the second process skips the probe entirely and restores once'
+Assert-Equal ($attemptsAfterFirst + 1) $script:RestoreAttempts.Count 'no wasted call is made for it'
+
+# A tenant where the probe DOES work must not be pushed down the fallback.
+Reset-NpmRelocationProbe
+$script:RestoreAttempts = @()
+$script:ArchiveCount = 0
+$script:Archived = @{ $P1 = $true }
+$script:Group = @{ $P1 = 834 }
+
+$m3 = Move-NpmProcessToGroup -SiteURL 'https://mock' -Token 't' -ProcessUniqueId $P1 -TargetGroupId 493
+Assert-Equal $true $m3.Moved 'a tenant whose probe succeeds relocates on the first call'
+Assert-Equal 'Yes' (Get-NpmRelocationProbeState) 'and that is remembered too'
+Assert-Equal 0 $script:ArchiveCount 'with no archive/restore round trip forced on it'
+
+# ---------------------------------------------------------------------------
+Write-Host "`nScenario: the manual list reflects the tenant when the run ENDS" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# The list is built from the checkpoint diff, taken before the targets are
+# returned to their groups. Returning a target appears to bring its sibling
+# variations back with it, so by the end some entries have undone themselves.
+# One run told an operator to go and move five processes that were already home.
+
+$Sib1 = 'cc00dd00-0000-0000-0000-0000000000c1'
+$Sib2 = 'cc00dd00-0000-0000-0000-0000000000c2'
+
+$collateralRecords = @(
+    [PSCustomObject]@{ UniqueId=$Sib1; Name='Procure :: $5000 - $50000'; Change='Moved'
+                       WasArchived=$false; IsArchivedNow=$false; OriginalGroupId=8; CurrentGroupId=836 },
+    [PSCustomObject]@{ UniqueId=$Sib2; Name='Create sales order :: EMEA'; Change='Moved'
+                       WasArchived=$false; IsArchivedNow=$false; OriginalGroupId=20; CurrentGroupId=836 }
+)
+
+$manualRows = @(
+    [PSCustomObject]@{ ObjectType='Process'; ObjectID=$Sib1; Name='Procure :: $5000 - $50000'
+                       Operation='ReverseCollateral'; Status='Skipped'; Message='Moved from group 8 to 836. Move it back manually' },
+    [PSCustomObject]@{ ObjectType='Process'; ObjectID=$Sib2; Name='Create sales order :: EMEA'
+                       Operation='ReverseCollateral'; Status='Skipped'; Message='Moved from group 20 to 836. Move it back manually' },
+    [PSCustomObject]@{ ObjectType='Process'; ObjectID='zz'; Name='Unrelated'
+                       Operation='Delete'; Status='Success'; Message='Deleted' }
+)
+
+# By the end of the run Sib1 is home again; Sib2 genuinely is not.
+function Invoke-NpmApi {
+    param([string]$Url,[string]$Token,[string]$Method='Get',$Body=$null,[int]$MaxRetries=0)
+    function Ok8($r) { return [PSCustomObject]@{ Success=$true; StatusCode=200; Response=$r; Error=$null } }
+    if ($Url -match 'ListType=(\d+)') {
+        $items = @()
+        if ([int]$Matches[1] -eq 0) {
+            $items = @(
+                [PSCustomObject]@{ processUniqueId=$Sib1; id=1; processName='Procure :: $5000 - $50000'; groupId=8 },
+                [PSCustomObject]@{ processUniqueId=$Sib2; id=2; processName='Create sales order :: EMEA'; groupId=836 }
+            )
+        }
+        return Ok8 ([PSCustomObject]@{ items = $items })
+    }
+    return Ok8 $null
+}
+
+$resolved = @(Resolve-CollateralOutcome -SiteURL 'https://mock' -Token 't' `
+    -Collateral $collateralRecords -Results $manualRows)
+
+Assert-Equal 3 $resolved.Count 'every row survives; none is silently dropped'
+
+$row1 = @($resolved | Where-Object { $_.ObjectID -eq $Sib1 })[0]
+Assert-Equal 'Success' $row1.Status 'a process already back in its group is cleared from the manual list'
+Assert-True ($row1.Message -like '*no action needed*') 'and says plainly that nothing needs doing'
+
+$row2 = @($resolved | Where-Object { $_.ObjectID -eq $Sib2 })[0]
+Assert-Equal 'Skipped' $row2.Status 'a process that is genuinely still misplaced stays on the list'
+
+Assert-Equal 1 @($resolved | Where-Object {
+    $_.Operation -eq 'ReverseCollateral' -and $_.Status -ne 'Success' }).Count `
+    'the outstanding count is what is really outstanding, not what was outstanding mid-run'
+
+# A process the baseline never covered has no home group to compare against.
+$ghostRecord = @([PSCustomObject]@{ UniqueId=$Sib2; Name='Ghost'; Change='NotInBaseline'
+                                    WasArchived=$null; IsArchivedNow=$false; OriginalGroupId=$null; CurrentGroupId=836 })
+$ghostRows = @([PSCustomObject]@{ ObjectType='Process'; ObjectID=$Sib2; Name='Ghost'
+                                  Operation='ReverseCollateral'; Status='Skipped'; Message='No before-state' })
+$ghostResolved = @(Resolve-CollateralOutcome -SiteURL 'https://mock' -Token 't' `
+    -Collateral $ghostRecord -Results $ghostRows)
+Assert-Equal 'Skipped' $ghostResolved[0].Status 'an unbaselined process is never cleared, having nothing to be compared to'
+
 Write-Host "`n======================================" -ForegroundColor Cyan
 Write-Host "  Passed: $script:Pass   Failed: $script:Fail" -ForegroundColor $(if ($script:Fail -eq 0) { 'Green' } else { 'Red' })
 Write-Host "======================================`n" -ForegroundColor Cyan

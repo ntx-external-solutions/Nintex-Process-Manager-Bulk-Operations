@@ -759,6 +759,164 @@ finally {
 }
 
 # ---------------------------------------------------------------------------
+Write-Host "`nScenario: a target whose Hold fails is NOT deleted" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# The Hold phase exists because archiving hides Input and Output rows. A target
+# that never came out of the archive was never checked, and the run says so in
+# its own log. Deleting it anyway can leave a dangling reference on a process
+# that survives, which is the one failure the dependency engine exists to stop.
+
+$Good1 = 'aa000000-0000-0000-0000-00000000aa01'
+$Good2 = 'aa000000-0000-0000-0000-00000000aa02'
+$Stuck = 'd394677d-0000-0000-0000-00000000aa03'
+
+function Reset-HoldFailTenant {
+    $script:Archived = @{ $Good1 = $true; $Good2 = $true; $Stuck = $true }
+    $script:GroupOf  = @{ $Good1 = 100;   $Good2 = 100;   $Stuck = 100 }
+    $script:Names    = @{ $Good1 = 'Alpha'; $Good2 = 'Beta'; $Stuck = 'Prototype packaging structure' }
+    $script:Deleted  = @()
+    $script:RestoreCalls = @(); $script:ArchiveCalls = @()
+    $script:TempGroupDeleted = $false
+    $script:TempGroupContents = @()
+    $script:LastResults = @()
+}
+Reset-HoldFailTenant
+
+function Invoke-ApiGet {
+    param([string]$Url,[string]$Token)
+    if ($Url -match 'ListType=7') {
+        $page = 1
+        if ($Url -match 'Page=(\d+)') { $page = [int]$Matches[1] }
+        if ($page -gt 1) { return [PSCustomObject]@{ items = @() } }
+        $items = @()
+        foreach ($id in @($Good1,$Good2,$Stuck)) {
+            if (-not $script:Archived[$id]) { continue }
+            $items += [PSCustomObject]@{ processUniqueId=$id; processName=$script:Names[$id]; groupId=$script:GroupOf[$id] }
+        }
+        return [PSCustomObject]@{ items = $items }
+    }
+    return [PSCustomObject]@{ items = @() }
+}
+function Get-ProcessesFromGroup {
+    param([string]$SiteURL,[string]$Token,$GroupID,[string]$GroupUniqueId,$IncludeSubgroups)
+    return @($script:TempGroupContents)
+}
+
+function Invoke-NpmApi {
+    param([string]$Url,[string]$Token,[string]$Method='Get',$Body=$null,[int]$MaxRetries=0)
+    function Ok($r) { return [PSCustomObject]@{ Success=$true; StatusCode=200; Response=$r; Error=$null } }
+
+    if ($Url -match 'ListType=(\d+)') {
+        $wantArchived = ([int]$Matches[1] -eq 7)
+        $items = @()
+        foreach ($id in @($Good1,$Good2,$Stuck)) {
+            if ($null -eq $script:Archived[$id]) { continue }
+            if ($script:Archived[$id] -ne $wantArchived) { continue }
+            $items += [PSCustomObject]@{
+                processUniqueId=$id; id=1; processName=$script:Names[$id]; groupId=$script:GroupOf[$id] }
+        }
+        return Ok ([PSCustomObject]@{ items = $items })
+    }
+    if ($Url -match 'CheckProcessDependencies') { return Ok $null }
+
+    if ($Url -match 'RestoreProcess') {
+        $id = $Body.processUniqueId
+        # This one target refuses to come out of the archive, as the tenant did.
+        if ($id -eq $Stuck) {
+            return [PSCustomObject]@{ Success=$false; StatusCode=500; Response=$null; Error='server error' }
+        }
+        $script:RestoreCalls += $id
+        $script:Archived[$id] = $false
+        $script:GroupOf[$id] = [int]$Body.processGroupId
+        return Ok @{}
+    }
+    if ($Url -match 'ArchiveProcess') {
+        $script:ArchiveCalls += $Body.processUniqueId
+        $script:Archived[$Body.processUniqueId] = $true
+        return Ok @{}
+    }
+    if ($Url -match 'DeleteProcess') {
+        $id = $Body.processUniqueId
+        $script:Deleted += $id
+        $script:Archived.Remove($id)
+        return Ok @{}
+    }
+    if ($Url -match 'mobile/api/v1/processes') {
+        $data = @()
+        foreach ($m in ($Url -split '&')) {
+            if ($m -match 'processUniqueIds=([0-9a-fA-F\-]+)') {
+                $id = $Matches[1]
+                if ($null -ne $script:Archived[$id]) {
+                    $data += [PSCustomObject]@{ ProcessModel = [PSCustomObject]@{
+                        UniqueId=$id; Name=$script:Names[$id]; GroupId=$script:GroupOf[$id]; StateId=2 } }
+                }
+            }
+        }
+        return Ok ([PSCustomObject]@{ data = $data })
+    }
+    if ($Method -eq 'Get' -and $Url -match '/Api/v1/Processes/([0-9a-fA-F\-]+)$') {
+        $id = $Matches[1]
+        return Ok ([PSCustomObject]@{ processJson = [PSCustomObject]@{
+            UniqueId=$id; Name=$script:Names[$id]; GroupId=$script:GroupOf[$id]; StateId=1 } })
+    }
+    return Ok $null
+}
+
+$work6 = Join-Path ([System.IO.Path]::GetTempPath()) "holdfail-$([guid]::NewGuid())"
+New-Item -ItemType Directory -Path $work6 -Force | Out-Null
+Push-Location $work6
+try {
+    Invoke-BulkDeleteProcesses -SiteURL 'https://mock' -Token 't' -SourceType 'Archived' `
+        -TempGroupName 'Bulk Delete Temporary Group' -CurrentUsername 'u' -Force
+
+    Assert-Equal $false ($script:Deleted -contains $Stuck) `
+        'the target that never came out of the archive is NOT deleted'
+    Assert-True ($script:Deleted -contains $Good1) 'the rest of the batch is still deleted'
+    Assert-True ($script:Deleted -contains $Good2) 'both of them'
+    Assert-Equal 2 $script:Deleted.Count 'exactly the two that were held'
+
+    $rows = @($script:LastResults)
+    $stuckDelete = @($rows | Where-Object { $_.ObjectID -eq $Stuck -and $_.Operation -eq 'Delete' })
+    Assert-Equal 1 $stuckDelete.Count 'the excluded target still appears in the results'
+    Assert-Equal 'Skipped' $stuckDelete[0].Status 'as skipped, not deleted'
+    Assert-True ($stuckDelete[0].Message -like '*never checked*') 'and the reason says its references were never checked'
+
+    Assert-Equal 0 @($rows | Where-Object {
+        $_.ObjectID -eq $Stuck -and $_.Operation -eq 'Delete' -and $_.Status -eq 'Success' }).Count `
+        'there is no Delete/Success row for it anywhere'
+}
+finally {
+    Pop-Location
+    Remove-Item $work6 -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# ---------------------------------------------------------------------------
+Write-Host "`nScenario: -AllowUnheldTargets is the only way to delete it unchecked" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+
+Reset-HoldFailTenant
+$work7 = Join-Path ([System.IO.Path]::GetTempPath()) "holdallow-$([guid]::NewGuid())"
+New-Item -ItemType Directory -Path $work7 -Force | Out-Null
+Push-Location $work7
+try {
+    Invoke-BulkDeleteProcesses -SiteURL 'https://mock' -Token 't' -SourceType 'Archived' `
+        -TempGroupName 'Bulk Delete Temporary Group' -CurrentUsername 'u' -Force -AllowUnheldTargets
+
+    Assert-True ($script:Deleted -contains $Stuck) `
+        'with the explicit switch the unchecked target IS deleted'
+    Assert-Equal 3 $script:Deleted.Count 'all three go'
+
+    $planFile = @(Get-ChildItem -Path . -Filter 'Delete_Plan_*.json')[0]
+    $plan = Get-Content $planFile.FullName -Raw | ConvertFrom-Json
+    Assert-True ((@($plan.Log) -join ' ') -like '*UNCHECKED DELETE allowed*') `
+        'and the plan records that it was an unchecked delete'
+}
+finally {
+    Pop-Location
+    Remove-Item $work7 -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# ---------------------------------------------------------------------------
 Write-Host "`nScenario: both archived-list readers page identically" -ForegroundColor Cyan
 # ---------------------------------------------------------------------------
 $script:PageSizesSeen = @()
