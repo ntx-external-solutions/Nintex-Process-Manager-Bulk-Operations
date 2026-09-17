@@ -993,6 +993,38 @@ finally {
 }
 
 # ---------------------------------------------------------------------------
+Write-Host "`nScenario: every results row carries a name, never its own id" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# Format-NpmProcessName used to be applied where rows are printed, so the console
+# said "(name unavailable)" while Delete_Results_*.csv, written from the same
+# rows, carried a bare GUID. Naming at construction is what makes the two agree,
+# and this is the invariant that holds it.
+
+Reset-MockTenant
+$work8 = Join-Path ([System.IO.Path]::GetTempPath()) "namerows-$([guid]::NewGuid())"
+New-Item -ItemType Directory -Path $work8 -Force | Out-Null
+Push-Location $work8
+try {
+    Invoke-BulkDeleteProcesses -SiteURL 'https://mock' -Token 't' -SourceType 'Archived' `
+        -TempGroupName 'Bulk Delete Temporary Group' -CurrentUsername 'u' -Force
+
+    $rows = @($script:LastResults)
+    Assert-True ($rows.Count -gt 0) 'the run produced results rows'
+    Assert-Equal 0 @($rows | Where-Object { $_.ObjectType -eq 'Process' -and $_.Name -eq $_.ObjectID }).Count `
+        'no process row has its id in the Name column'
+    Assert-Equal 0 @($rows | Where-Object { $_.ObjectType -eq 'Process' -and -not $_.Name }).Count `
+        'and none has an empty one'
+}
+finally { Pop-Location; Remove-Item $work8 -Recurse -Force -ErrorAction SilentlyContinue }
+
+# A row for a process that genuinely cannot be named says so, in the file as
+# well as on the console.
+$ghostRow = New-ProcessResultRow -UniqueId 'b3aacf24-4d4a-4888-9aa1-1f4e9696247b' `
+    -Operation 'Collateral' -Status 'Failed' -Message 'x'
+Assert-Equal (Get-NpmUnknownProcessName) $ghostRow.Name `
+    'a row built for an unnameable process carries the marker, not the id'
+
+# ---------------------------------------------------------------------------
 Write-Host "`nScenario: both archived-list readers page identically" -ForegroundColor Cyan
 # ---------------------------------------------------------------------------
 $script:PageSizesSeen = @()

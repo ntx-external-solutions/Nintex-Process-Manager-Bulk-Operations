@@ -97,7 +97,7 @@ param(
     [switch]$AllowUnheldTargets
 )
 
-$script:ScriptVersion = '4.8'
+$script:ScriptVersion = '4.9'
 
 # ----------------------------------------------------------------------------
 # Dependency engine. Mode 5 delegates all dependency discovery, reference
@@ -1520,7 +1520,286 @@ function Select-User {
 # MODE 1: BULK ARCHIVE
 # ============================================================================
 
-function Invoke-BulkArchive {
+function Invoke-BulkArchiveProcesses {
+    <#
+    .SYNOPSIS
+        Archives every process in a group, or a CSV's worth of processes, with
+        the same collateral protection the delete path has.
+
+    .DESCRIPTION
+        Thin over the dependency engine, the way Invoke-BulkDeleteProcesses is.
+        Everything here except the ordering already existed and is tested.
+
+        WHY ARCHIVE NEEDS PROTECTION AT ALL, given that it is reversible:
+
+        Archiving a variation also archives its master, established over rounds
+        2 to 4 and invisible in every field the API returns. The master may live
+        in a group nobody named. Once archived it is an ordinary member of the
+        archive list, and Mode 5 takes its targets from the archive list. So an
+        unprotected archive of one group can put a master from another group in
+        front of a delete run, with every step looking correct in isolation and
+        nobody having named the master at any point.
+
+        Mode 5's protection cannot catch this, because by then the master is a
+        legitimate archive entry. The guard has to be here.
+
+        It reports and reverses rather than gating, which is the one difference
+        from the delete path. Archiving is undoable and the reversal is well
+        defined: a process that was active and is now archived gets restored to
+        the group the baseline recorded. Refusing to continue would leave a
+        half-archived group, which is worse than finishing and putting back what
+        was not asked for.
+    #>
+    param(
+        [string]$SiteURL,
+        [string]$Token,
+        [string]$SourceType = 'Group',
+        [string]$CsvPath = '',
+        [int]$GroupID = -1,
+        [string]$GroupUniqueId = '',
+        [string]$ChangeDescription = 'Bulk archive operation',
+        [switch]$IncludeSubgroups,
+        [switch]$WhatIf,
+        [switch]$Force,
+        [switch]$ApprovalsEnabled
+    )
+
+    Write-Host "`n========================================" -ForegroundColor Cyan
+    Write-Host "BULK ARCHIVE PROCESSES$(if ($WhatIf) { ' (PREVIEW)' })" -ForegroundColor Cyan
+    Write-Host "========================================" -ForegroundColor Cyan
+    if ($WhatIf) { Write-Host "*** PREVIEW MODE: nothing will be changed ***" -ForegroundColor Yellow }
+    Write-Host "  Change description: $ChangeDescription" -ForegroundColor Gray
+    Write-Host "  Approvals enabled : $([bool]$ApprovalsEnabled)" -ForegroundColor Gray
+
+    $results = @()
+    $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+
+    # ---- One index sweep is the enumeration, the name source and the baseline --
+    Write-Host "`n=== GATHERING TARGETS ===" -ForegroundColor Cyan
+    Write-Host "Indexing tenant processes..." -ForegroundColor Cyan
+    $index = Get-NpmProcessIndex -SiteURL $SiteURL -Token $Token
+
+    $targets = @()
+
+    if ($SourceType -eq 'CSV') {
+        $csv = Read-CsvWithFlexibleHeaders -Path $CsvPath
+        if (-not $csv) { return }
+
+        $numericLookup = Get-ProcessUniqueIdMap -SiteURL $SiteURL -Token $Token
+        foreach ($row in $csv) {
+            $id = Get-IdFromCsvRow -Row $row
+            if (-not $id) { continue }
+
+            $uniqueId = $id
+            if (-not (Test-IsProcessGuid -Value $id)) {
+                if ($numericLookup.ContainsKey($id)) { $uniqueId = $numericLookup[$id] }
+            }
+
+            $entry = Get-NpmIndexEntry -Index $index -UniqueId $uniqueId
+            if ($null -eq $entry) {
+                $results += New-ProcessResultRow -UniqueId $id -NameLookup $index `
+                    -Operation 'Resolve' -Status 'Failed' `
+                    -Message 'Process not found in the active or archived lists'
+                continue
+            }
+            if ($entry.IsArchived) {
+                $results += New-ProcessResultRow -UniqueId $entry.UniqueId -NameLookup $index `
+                    -Operation 'Archive' -Status 'Skipped' -Message 'Already archived'
+                continue
+            }
+            $targets += $entry
+        }
+    }
+    else {
+        # The group tree is fetched once and walked, rather than one API call per
+        # level of nesting.
+        $groups = @(Get-ProcessGroups -SiteURL $SiteURL -Token $Token)
+        $groupIds = @(Get-NpmGroupDescendantId -Groups $groups -RootGroupId $GroupID `
+            -IncludeSubgroups ([bool]$IncludeSubgroups))
+
+        if ($groupIds.Count -eq 0) {
+            Write-Host "Could not resolve group $GroupID in the group tree." -ForegroundColor Red
+            return
+        }
+
+        $groupName = "$GroupID"
+        $named = @($groups | Where-Object { "$($_.id)" -eq "$GroupID" })
+        if ($named.Count -gt 0 -and $named[0].name) { $groupName = "$($named[0].name) ($GroupID)" }
+
+        $targets = @(Select-NpmProcessInGroup -Index $index -GroupIds $groupIds)
+
+        $subCount = $groupIds.Count - 1
+        Write-Host "  $($targets.Count) active process(es) in $groupName and its $subCount subgroup(s)" -ForegroundColor Green
+        if (-not $IncludeSubgroups -and $subCount -eq 0) {
+            Write-Host "  Subgroups are NOT included; pass -IncludeSubgroups to cover them." -ForegroundColor Gray
+        }
+        Write-Host "  Check that against the group in the UI before continuing." -ForegroundColor Gray
+    }
+
+    if ($targets.Count -eq 0) {
+        Write-Host "`nNothing to archive." -ForegroundColor Yellow
+        if ($results.Count -gt 0) { Save-ArchiveResults -Results $results -Timestamp $timestamp -WhatIf:$WhatIf }
+        return
+    }
+
+    $targetUniqueIds = @($targets | ForEach-Object { $_.UniqueId })
+
+    # ---- Pre-flight: variations whose master is not in the target set ---------
+    # This is the guard the composition risk turns on. Same heuristic and same
+    # measured blind spot as the delete path; see Find-VariationMaster.
+    $variationMatches = @(Find-VariationMaster -Index $index -TargetUniqueIds $targetUniqueIds)
+    if ($variationMatches.Count -gt 0) {
+        Show-VariationWarning -Matches $variationMatches
+        Write-Host "`nArchiving these targets is expected to archive those masters too," -ForegroundColor Red
+        Write-Host "which puts them in the archive list, where a later delete run takes" -ForegroundColor Red
+        Write-Host "its targets from." -ForegroundColor Red
+
+        $proceed = $false
+        if ($Force) {
+            Write-Host "`n-Force will not proceed past a variation warning. Stopping." -ForegroundColor Red
+            Write-Host "Add the masters to the target set if they should be archived too, or" -ForegroundColor Yellow
+            Write-Host "re-run interactively to decide case by case." -ForegroundColor Yellow
+        } elseif ($WhatIf) {
+            Write-Host "`nPreview only; continuing so the list can be inspected." -ForegroundColor Yellow
+            $proceed = $true
+        } else {
+            $proceed = ((Read-Host "`nContinue anyway? Type 'YES' to accept the risk to these masters") -eq 'YES')
+        }
+
+        if (-not $proceed) {
+            Write-Host "Operation cancelled. Nothing has been changed." -ForegroundColor Yellow
+            foreach ($m in $variationMatches) {
+                $results += New-ProcessResultRow -UniqueId $m.MasterUniqueId -NameLookup $index `
+                    -Name ([string]$m.MasterName) -Operation 'VariationWarning' -Status 'Failed' `
+                    -Message "Master of target '$($m.TargetName)' and not itself a target; run stopped before any change"
+            }
+            Save-ArchiveResults -Results $results -Timestamp $timestamp -WhatIf:$WhatIf
+            return
+        }
+    }
+
+    # ---- Baseline before the first change -------------------------------------
+    $tenantBaseline = New-TenantStateSnapshot -Index $index
+    Write-Host "`n=== SNAPSHOT ===" -ForegroundColor Cyan
+    Write-Host "Baseline covers the $($tenantBaseline.Count) process(es) the two list sweeps return." -ForegroundColor Gray
+    Write-Host "Those sweeps are NOT complete; a process neither returns cannot be diffed." -ForegroundColor Gray
+
+    if ($WhatIf) {
+        Write-Host "`n=== PREVIEW: $($targets.Count) PROCESS(ES) WOULD BE ARCHIVED ===" -ForegroundColor Yellow
+        foreach ($t in $targets) {
+            Write-Host "  $($t.Name)  ($($t.UniqueId)), group $($t.GroupId)" -ForegroundColor Gray
+            $results += New-ProcessResultRow -UniqueId $t.UniqueId -NameLookup $index `
+                -Operation 'Archive' -Status 'Preview' -Message "Would archive from group $($t.GroupId)"
+        }
+        Write-Host "`n*** PREVIEW ONLY - nothing was changed ***" -ForegroundColor Yellow
+        Save-ArchiveResults -Results $results -Timestamp $timestamp -WhatIf
+        return
+    }
+
+    # ---- Archive --------------------------------------------------------------
+    Write-Host "`n=== ARCHIVING $($targets.Count) PROCESS(ES) ===" -ForegroundColor Cyan
+    $done = 0
+    $touched = @()
+
+    foreach ($target in $targets) {
+        $done++
+        Write-NpmProgress -Activity 'Bulk archive' -Status 'Archiving' -Done $done -Total $targets.Count -Id 1
+
+        $touched += $target.UniqueId
+        $ok = Set-NpmProcessArchived -SiteURL $SiteURL -Token $Token `
+            -ProcessUniqueId $target.UniqueId -Comment $ChangeDescription `
+            -ApprovalsEnabled ([bool]$ApprovalsEnabled)
+
+        $results += New-ProcessResultRow -UniqueId $target.UniqueId -NameLookup $index `
+            -Operation 'Archive' -Status $(if ($ok) { 'Success' } else { 'Failed' }) `
+            -Message $(if ($ok) { "Archive requested from group $($target.GroupId)" }
+                       else { 'Archive call failed' })
+    }
+    Complete-NpmProgress -Activity 'Bulk archive' -Id 1
+    Write-Host "`r    Archived $done of $($targets.Count).                    " -ForegroundColor Gray
+
+    # ---- Verify from one re-read, not one call per process ---------------------
+    Write-Host "`n=== VERIFYING ===" -ForegroundColor Cyan
+    $after = Get-NpmProcessIndex -SiteURL $SiteURL -Token $Token
+
+    $verified = @()
+    foreach ($row in $results) {
+        if ($row.Operation -ne 'Archive' -or $row.Status -ne 'Success') { $verified += $row; continue }
+
+        $now = Get-NpmIndexEntry -Index $after -UniqueId $row.ObjectID
+        if ($null -ne $now -and $now.IsArchived) { $verified += $row; continue }
+
+        # The call said yes and the tenant disagrees. The tenant wins.
+        $verified += New-ProcessResultRow -UniqueId $row.ObjectID -NameLookup $index `
+            -Name $row.Name -Operation 'Archive' -Status 'Failed' `
+            -Message $(if ($null -eq $now) { 'Archive reported success but the process is in neither list afterwards' }
+                       else { 'Archive reported success but the process is still active' })
+    }
+    $results = $verified
+
+    $stillActive = @($results | Where-Object { $_.Operation -eq 'Archive' -and $_.Status -eq 'Failed' })
+    Write-Host "  $(@($results | Where-Object { $_.Operation -eq 'Archive' -and $_.Status -eq 'Success' }).Count) confirmed archived, $($stillActive.Count) not." -ForegroundColor $(if ($stillActive.Count -gt 0) { 'Yellow' } else { 'Green' })
+
+    # ---- Collateral: what else moved ------------------------------------------
+    Write-Host "`n=== CHECKING FOR COLLATERAL CHANGES ===" -ForegroundColor Cyan
+    $collateral = @(Compare-TenantState -Baseline $tenantBaseline -Index $after `
+        -ExpectedUniqueIds $targetUniqueIds -ObservedUniqueIds $touched)
+
+    if ($collateral.Count -eq 0) {
+        Write-Host "  No collateral changes. Only the targets moved." -ForegroundColor Green
+    }
+    else {
+        Show-CollateralDamage -Collateral $collateral -Phase 'Archive'
+        Write-Host "A master archived this way becomes an ordinary member of the archive" -ForegroundColor Red
+        Write-Host "list, which is where a delete run takes its targets from. Putting it" -ForegroundColor Red
+        Write-Host "back now is what stops that." -ForegroundColor Red
+
+        $results += @(Restore-CollateralState -SiteURL $SiteURL -Token $Token `
+            -Collateral $collateral -ApprovalsEnabled ([bool]$ApprovalsEnabled))
+        $results = @(Resolve-CollateralOutcome -SiteURL $SiteURL -Token $Token `
+            -Collateral $collateral -Results $results)
+    }
+
+    Save-ArchiveResults -Results $results -Timestamp $timestamp
+}
+
+function Save-ArchiveResults {
+    param($Results, [string]$Timestamp, [switch]$WhatIf)
+
+    $rows = @($Results)
+    $path = if ($WhatIf) { "Archive_Preview_$Timestamp.csv" } else { "Archive_Results_$Timestamp.csv" }
+    $rows | Export-Csv -Path $path -NoTypeInformation
+    $script:LastArchiveResults = $rows
+
+    Write-Host ""
+    Write-Host "Results saved to: $path" -ForegroundColor Green
+    Write-Host "  Total rows : $($rows.Count)" -ForegroundColor Cyan
+    foreach ($status in @('Success', 'Preview', 'Skipped', 'Failed')) {
+        $n = @($rows | Where-Object { $_.Status -eq $status }).Count
+        if ($n -gt 0) {
+            Write-Host "  $status".PadRight(13) -NoNewline -ForegroundColor Gray
+            Write-Host ": $n" -ForegroundColor $(if ($status -eq 'Failed') { 'Red' } else { 'Gray' })
+        }
+    }
+
+    $unreversed = @($rows | Where-Object { $_.Operation -eq 'ReverseCollateral' -and $_.Status -ne 'Success' })
+    if ($unreversed.Count -gt 0) {
+        Write-Host "`n$($unreversed.Count) process(es) this run changed without being asked to" -ForegroundColor Red
+        Write-Host "could not be put back and need manual attention:" -ForegroundColor Red
+        foreach ($u in $unreversed) {
+            Write-Host "  $($u.Name)  ($($u.ObjectID))" -ForegroundColor Red
+            Write-Host "      $($u.Message)" -ForegroundColor DarkGray
+        }
+    }
+}
+
+# ----------------------------------------------------------------------------
+# PARKED: the original Mode 1, including its document branch
+# ----------------------------------------------------------------------------
+# Superseded by Invoke-BulkArchiveProcesses. Kept because the document branch is
+# the only document-archiving code there is, and it comes back with the rest of
+# the document work rather than being rewritten from the commit history.
+function Invoke-ParkedBulkArchive {
     param(
         [string]$SiteURL,
         [string]$Token,
@@ -2624,6 +2903,41 @@ function Resolve-CollateralName {
     return (Get-NpmUnknownProcessName)
 }
 
+function New-ProcessResultRow {
+    <#
+    .SYNOPSIS
+        One results row for a process, named at construction rather than at print.
+
+    .DESCRIPTION
+        Format-NpmProcessName was applied where rows are printed, so the console
+        said "(name unavailable)" while the results CSV, written from the same
+        rows, still carried a bare GUID in the Name column. The two disagreed
+        about the same run.
+
+        Naming here instead means every consumer of a row sees the same label,
+        and gives one place to hold the invariant: a row's Name is never its
+        ObjectID. Where nothing can name the process, the row says so.
+    #>
+    param(
+        [string]$UniqueId,
+        [string]$Operation,
+        [string]$Status,
+        [string]$Message,
+        $NameLookup = $null,
+        [string]$Name = '',
+        [string]$ObjectType = 'Process'
+    )
+
+    return [PSCustomObject]@{
+        ObjectType = $ObjectType
+        ObjectID   = $UniqueId
+        Name       = (Resolve-CollateralName -NameLookup $NameLookup -UniqueId $UniqueId -Fallback $Name)
+        Operation  = $Operation
+        Status     = $Status
+        Message    = $Message
+    }
+}
+
 function Remove-HoldingGroup {
     <#
     .SYNOPSIS
@@ -2713,11 +3027,9 @@ function Remove-HoldingGroup {
             $name = Resolve-CollateralName -NameLookup $NameLookup -UniqueId $procId `
                 -Fallback ([string]$proc.processName)
 
-            $results += [PSCustomObject]@{
-                ObjectType = 'Process'; ObjectID = $procId; Name = $name
-                Operation = 'Collateral'; Status = 'Failed'
-                Message = "Left stranded in the holding group '$GroupName' and was not a target; move it back manually"
-            }
+            $results += New-ProcessResultRow -UniqueId $procId -NameLookup $NameLookup `
+                -Name $name -Operation 'Collateral' -Status 'Failed' `
+                -Message "Left stranded in the holding group '$GroupName' and was not a target; move it back manually"
         }
 
         return $results
@@ -2885,10 +3197,9 @@ function Invoke-BulkDeleteProcesses {
             $targetUniqueIds += $numericLookup[$id]
         } else {
             $unresolved += $id
-            $results += [PSCustomObject]@{
-                ObjectType = 'Process'; ObjectID = $id; Name = ''
-                Operation = 'Resolve'; Status = 'Failed'; Message = 'Process not found in active or archived lists'
-            }
+            $results += New-ProcessResultRow -UniqueId $id -NameLookup $index `
+                -Operation 'Resolve' -Status 'Failed' `
+                -Message 'Process not found in active or archived lists'
         }
     }
     $targetUniqueIds = @($targetUniqueIds | Select-Object -Unique)
@@ -3058,10 +3369,9 @@ function Invoke-BulkDeleteProcesses {
             } else {
                 $failedHolds += $target
                 $holdLog += "FAILED to restore target $target into the holding group"
-                $results += [PSCustomObject]@{
-                    ObjectType = 'Process'; ObjectID = $target; Name = ''
-                    Operation = 'Hold'; Status = 'Failed'; Message = 'Could not restore into the holding group'
-                }
+                $results += New-ProcessResultRow -UniqueId $target -NameLookup $index `
+                    -Operation 'Hold' -Status 'Failed' `
+                    -Message 'Could not restore into the holding group'
             }
             $preliminary.Ledger = @(ConvertTo-PlanLedgerEntry -Snapshot $snapshot)
             $runLedger = @($preliminary.Ledger)
@@ -3107,13 +3417,9 @@ function Invoke-BulkDeleteProcesses {
                 foreach ($failed in $failedHolds) { $excludedHold[$failed.ToLowerInvariant()] = $true }
 
                 foreach ($failed in $failedHolds) {
-                    $fentry = Get-NpmIndexEntry -Index $index -UniqueId $failed
-                    $fname = if ($fentry -and $fentry.Name) { $fentry.Name } else { '' }
-                    $results += [PSCustomObject]@{
-                        ObjectType = 'Process'; ObjectID = $failed; Name = $fname
-                        Operation = 'Delete'; Status = 'Skipped'
-                        Message = 'NOT deleted: could not be restored out of the archive, so its Input/Output references were never checked'
-                    }
+                    $results += New-ProcessResultRow -UniqueId $failed -NameLookup $index `
+                        -Operation 'Delete' -Status 'Skipped' `
+                        -Message 'NOT deleted: could not be restored out of the archive, so its Input/Output references were never checked'
                     $holdLog += "Excluded $failed from the delete set: Hold failed, references unchecked"
                 }
 
@@ -3169,12 +3475,9 @@ function Invoke-BulkDeleteProcesses {
                 [void](Export-DependencyPlan -Plan $aborted -Path $planPath)
 
                 foreach ($c in $holdCollateral) {
-                    $results += [PSCustomObject]@{
-                        ObjectType = 'Process'; ObjectID = $c.UniqueId
-                        Name = $(if ($c.Name) { $c.Name } else { $c.UniqueId })
-                        Operation = 'Collateral'; Status = 'Failed'
-                        Message = "Changed without being a target ($($c.Change)); run stopped"
-                    }
+                    $results += New-ProcessResultRow -UniqueId $c.UniqueId -NameLookup $tenantBaseline `
+                        -Name ([string]$c.Name) -Operation 'Collateral' -Status 'Failed' `
+                        -Message "Changed without being a target ($($c.Change)); run stopped"
                 }
 
                 # Put back what the run moved, its own targets first and then the
@@ -3253,11 +3556,9 @@ function Invoke-BulkDeleteProcesses {
     # Targets excluded by a failed dependency check are named in the results CSV
     # rather than disappearing quietly.
     foreach ($failed in @($plan.FailedTargets)) {
-        $results += [PSCustomObject]@{
-            ObjectType = 'Process'; ObjectID = $failed.UniqueId; Name = ''
-            Operation = 'DependencyCheck'; Status = 'Failed'
-            Message = "Excluded from the run: HTTP $($failed.Status) $($failed.Error)"
-        }
+        $results += New-ProcessResultRow -UniqueId $failed.UniqueId -NameLookup $index `
+            -Operation 'DependencyCheck' -Status 'Failed' `
+            -Message "Excluded from the run: HTTP $($failed.Status) $($failed.Error)"
     }
     $targetUniqueIds = @($plan.TargetUniqueIds)
 
@@ -3503,18 +3804,61 @@ function Save-DeleteResults {
 # MAIN MENU AND FLOW
 # ============================================================================
 
+# ----------------------------------------------------------------------------
+# What this build offers
+# ----------------------------------------------------------------------------
+# Archive a group, then delete from the archive with dependencies handled. That
+# is the whole capability, and the modes outside it are PARKED, not deleted:
+# their functions stay where they are so that Mode 4's eventual rewrite still
+# has Update-ProcessOwnership.ps1's pattern to follow, and so that reviving one
+# is a menu change rather than an archaeology exercise.
+#
+# Documents are parked with them, including the document branches inside the two
+# modes that remain. Mode 1's document path announced at runtime that it "may
+# not be supported in all Nintex PM versions", which is not a thing to offer.
+$script:EnabledModes = @('1', '5')
+
+$script:ParkedModes = @{
+    '2' = 'Bulk Restore'
+    '3' = 'Bulk Update Location'
+    '4' = 'Bulk Update Ownership'
+}
+
+function Test-ModeEnabled {
+    param([string]$Mode)
+    return ($script:EnabledModes -contains $Mode)
+}
+
+function Show-ParkedModeMessage {
+    param([string]$Mode)
+
+    $name = $script:ParkedModes[$Mode]
+    if (-not $name) {
+        Write-Host "`nMode $Mode is not a mode this build offers." -ForegroundColor Red
+    } else {
+        Write-Host "`n$name (mode $Mode) is parked in this build." -ForegroundColor Yellow
+        Write-Host "This build covers bulk archive (mode 1) and bulk delete (mode 5) only." -ForegroundColor Yellow
+    }
+
+    if ($Mode -eq '4') {
+        Write-Host "For ownership changes use Update-ProcessOwnership.ps1, which implements" -ForegroundColor Yellow
+        Write-Host "the correct update pattern." -ForegroundColor Yellow
+    }
+    Write-Host "See the README section 'Parked functionality' for why." -ForegroundColor Gray
+}
+
 function Show-MainMenu {
     Write-Host "`n============================================" -ForegroundColor Cyan
     Write-Host "  NINTEX PROCESS MANAGER BULK OPERATIONS" -ForegroundColor Cyan
     Write-Host "============================================" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "Select Operation Mode:" -ForegroundColor Yellow
-    Write-Host "  [1] Bulk Archive" -ForegroundColor White
-    Write-Host "  [2] Bulk Restore" -ForegroundColor White
-    Write-Host "  [3] Bulk Update Location" -ForegroundColor White
-    Write-Host "  [4] Bulk Update Ownership" -ForegroundColor White
-    Write-Host "  [5] Bulk Delete Content" -ForegroundColor White
+    Write-Host "  [1] Bulk Archive Processes" -ForegroundColor White
+    Write-Host "  [5] Bulk Delete Processes (from the archive)" -ForegroundColor White
     Write-Host "  [Q] Quit" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  Restore, Update Location, Update Ownership and all document" -ForegroundColor DarkGray
+    Write-Host "  operations are parked in this build." -ForegroundColor DarkGray
     Write-Host ""
 }
 
@@ -3545,13 +3889,11 @@ function Get-SourceType {
         Write-Host "  [1] CSV File" -ForegroundColor White
         Write-Host "  [2] Process/Document Group" -ForegroundColor White
         Write-Host "  [3] All Archived Processes" -ForegroundColor White
-        Write-Host "  [4] All Archived Documents" -ForegroundColor White
         $choice = Read-Host "Choice"
 
         switch ($choice) {
             '2' { return "Group" }
             '3' { return "Archived" }
-            '4' { return "ArchivedDocuments" }
             default { return "CSV" }
         }
     }
@@ -3571,15 +3913,9 @@ function Get-SourceType {
 function Get-ObjectType {
     param([int]$Mode)
 
-    # Mode 4 (Update Ownership) only supports Processes
-    if ($Mode -eq 4) {
-        return "Processes"
-    }
-
-    # Mode 5 (Delete) only supports Processes
-    if ($Mode -eq 5) {
-        return "Processes"
-    }
+    # Every mode this build offers is processes-only. Document operations are
+    # parked, so there is nothing left to choose between.
+    return "Processes"
 
     Write-Host "`nSelect Object Type:" -ForegroundColor Yellow
     Write-Host "  [1] Processes" -ForegroundColor White
@@ -3672,6 +4008,71 @@ function Resolve-RestoreGroupId {
 # MODE DISPATCH
 # ============================================================================
 
+# ----------------------------------------------------------------------------
+# PARKED: archived document deletion
+# ----------------------------------------------------------------------------
+# Kept whole and callable, and reachable from nothing. Document work is out of
+# scope for this build; when it comes back this is the code that comes back with
+# it, rather than being rewritten from the commit history.
+function Invoke-ParkedBulkDeleteArchivedDocuments {
+    param($config, [string]$token, [bool]$isDryRun)
+
+    # Handle bulk delete of all archived documents
+    Write-Host "`n=== BULK DELETE ALL ARCHIVED DOCUMENTS ===" -ForegroundColor Cyan
+
+    # Fetch all archived documents
+    Write-Host "`nFetching archived documents..." -ForegroundColor Cyan
+    $archivedDocs = Get-AllArchivedDocuments -SiteURL $config.SiteURL -Token $token
+
+    if ($archivedDocs.Count -eq 0) {
+        Write-Host "No archived documents found." -ForegroundColor Yellow
+    } else {
+        # Display summary
+        Write-Host "`nFound $($archivedDocs.Count) archived document(s):" -ForegroundColor Yellow
+        Write-Host ""
+
+        # Show first 20 documents as preview
+        $previewCount = [Math]::Min(20, $archivedDocs.Count)
+        for ($i = 0; $i -lt $previewCount; $i++) {
+            $doc = $archivedDocs[$i]
+            Write-Host "  - $($doc.DocumentName) (Group: $($doc.PrimaryGroupName))" -ForegroundColor White
+        }
+        if ($archivedDocs.Count -gt 20) {
+            Write-Host "  ... and $($archivedDocs.Count - 20) more documents" -ForegroundColor Gray
+        }
+
+        if ($isDryRun) {
+            Write-Host "`n[DRY RUN] Would delete $($archivedDocs.Count) archived documents" -ForegroundColor Yellow
+        } else {
+            # Multiple confirmations for safety
+            Write-Host "`n========================================" -ForegroundColor Red
+            Write-Host "  WARNING: DESTRUCTIVE OPERATION" -ForegroundColor Red
+            Write-Host "========================================" -ForegroundColor Red
+            Write-Host "This will PERMANENTLY DELETE all $($archivedDocs.Count) archived documents." -ForegroundColor Red
+            Write-Host "This action CANNOT be undone." -ForegroundColor Red
+            Write-Host ""
+
+            $confirm1 = if ($script:CliOptions.Force) { 'DELETE ALL DOCUMENTS' } else { Read-Host "Type 'DELETE ALL DOCUMENTS' to confirm" }
+            if ($confirm1 -eq 'DELETE ALL DOCUMENTS') {
+                Write-Host "`nDeleting archived documents..." -ForegroundColor Cyan
+
+                # Extract document IDs for deletion
+                $documentIds = $archivedDocs | ForEach-Object { $_.DocumentId }
+
+                $result = Delete-ArchivedDocuments -SiteURL $config.SiteURL -Token $token -DocumentIds $documentIds
+
+                Write-Host "`n=== Deletion Summary ===" -ForegroundColor Cyan
+                Write-Host "Documents deleted: $($result.Deleted)" -ForegroundColor Green
+                if ($result.Failed -gt 0) {
+                    Write-Host "Documents failed: $($result.Failed)" -ForegroundColor Red
+                }
+            } else {
+                Write-Host "Operation cancelled." -ForegroundColor Yellow
+            }
+        }
+    }
+}
+
 function Invoke-BulkOperationMode {
     <#
     .SYNOPSIS
@@ -3684,27 +4085,48 @@ function Invoke-BulkOperationMode {
     )
 
     $running = $true   # 'Q' clears this; the menu loop reads it back
+
+    # One gate for both entry points. A parked mode is named and declined here
+    # rather than reaching a code path this build no longer tests.
+    if ($mode -ne 'Q' -and -not (Test-ModeEnabled -Mode $mode)) {
+        if ($script:ParkedModes.ContainsKey($mode)) {
+            Show-ParkedModeMessage -Mode $mode
+        } else {
+            Write-Host "Invalid selection. Please try again." -ForegroundColor Red
+        }
+        return $running
+    }
+
     switch ($mode) {
-        '1' {  # Bulk Archive
+        '1' {  # Bulk Archive Processes
             $sourceType = Resolve-SourceType -Mode 1
-            $objectType = Resolve-ObjectType -Mode 1
             $isDryRun = Resolve-DryRunChoice
+
+            # The audit trail wants one change description across a cleanup, so
+            # it is set once in config.txt rather than typed per run.
+            $changeDescription = $config.ArchiveChangeDescription
+            if (-not $changeDescription) { $changeDescription = 'Bulk archive operation' }
+
+            $archiveSwitches = @{}
+            if ($script:CliOptions.Force)            { $archiveSwitches.Force = $true }
+            if ($script:CliOptions.ApprovalsEnabled) { $archiveSwitches.ApprovalsEnabled = $true }
+            if ($isDryRun)                           { $archiveSwitches.WhatIf = $true }
 
             if ($sourceType -eq "CSV") {
                 $csvPath = Resolve-CsvPath
-                if ($isDryRun) {
-                    Invoke-BulkArchive -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -CsvPath $csvPath -WhatIf
-                } else {
-                    Invoke-BulkArchive -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -CsvPath $csvPath
-                }
+                Invoke-BulkArchiveProcesses -SiteURL $config.SiteURL -Token $token `
+                    -SourceType $sourceType -CsvPath $csvPath `
+                    -ChangeDescription $changeDescription @archiveSwitches
             } else {
                 $group = Resolve-ProcessGroup -SiteURL $config.SiteURL -Token $token -Prompt "Select Group to Archive"
                 if ($group) {
-                    if ($isDryRun) {
-                        Invoke-BulkArchive -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -GroupID $group.id -GroupUniqueId $group.uniqueId -WhatIf
-                    } else {
-                        Invoke-BulkArchive -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -ObjectType $objectType -GroupID $group.id -GroupUniqueId $group.uniqueId
-                    }
+                    $includeSubgroups = if ($script:CliOptions.NonInteractive) { [bool]$script:CliOptions.IncludeSubgroups }
+                                        else { (Read-Host "Include subgroups? (Y/N)") -eq 'Y' }
+                    if ($includeSubgroups) { $archiveSwitches.IncludeSubgroups = $true }
+
+                    Invoke-BulkArchiveProcesses -SiteURL $config.SiteURL -Token $token `
+                        -SourceType $sourceType -GroupID $group.id -GroupUniqueId $group.uniqueId `
+                        -ChangeDescription $changeDescription @archiveSwitches
                 }
             }
         }
@@ -3802,60 +4224,8 @@ function Invoke-BulkOperationMode {
                     Invoke-BulkDeleteProcesses -SiteURL $config.SiteURL -Token $token -SourceType $sourceType -TempGroupName $tempGroupName -CurrentUsername $config.Username @deleteSwitches
                 }
             } elseif ($sourceType -eq "ArchivedDocuments") {
-                # Handle bulk delete of all archived documents
-                Write-Host "`n=== BULK DELETE ALL ARCHIVED DOCUMENTS ===" -ForegroundColor Cyan
-
-                # Fetch all archived documents
-                Write-Host "`nFetching archived documents..." -ForegroundColor Cyan
-                $archivedDocs = Get-AllArchivedDocuments -SiteURL $config.SiteURL -Token $token
-
-                if ($archivedDocs.Count -eq 0) {
-                    Write-Host "No archived documents found." -ForegroundColor Yellow
-                } else {
-                    # Display summary
-                    Write-Host "`nFound $($archivedDocs.Count) archived document(s):" -ForegroundColor Yellow
-                    Write-Host ""
-
-                    # Show first 20 documents as preview
-                    $previewCount = [Math]::Min(20, $archivedDocs.Count)
-                    for ($i = 0; $i -lt $previewCount; $i++) {
-                        $doc = $archivedDocs[$i]
-                        Write-Host "  - $($doc.DocumentName) (Group: $($doc.PrimaryGroupName))" -ForegroundColor White
-                    }
-                    if ($archivedDocs.Count -gt 20) {
-                        Write-Host "  ... and $($archivedDocs.Count - 20) more documents" -ForegroundColor Gray
-                    }
-
-                    if ($isDryRun) {
-                        Write-Host "`n[DRY RUN] Would delete $($archivedDocs.Count) archived documents" -ForegroundColor Yellow
-                    } else {
-                        # Multiple confirmations for safety
-                        Write-Host "`n========================================" -ForegroundColor Red
-                        Write-Host "  WARNING: DESTRUCTIVE OPERATION" -ForegroundColor Red
-                        Write-Host "========================================" -ForegroundColor Red
-                        Write-Host "This will PERMANENTLY DELETE all $($archivedDocs.Count) archived documents." -ForegroundColor Red
-                        Write-Host "This action CANNOT be undone." -ForegroundColor Red
-                        Write-Host ""
-
-                        $confirm1 = if ($script:CliOptions.Force) { 'DELETE ALL DOCUMENTS' } else { Read-Host "Type 'DELETE ALL DOCUMENTS' to confirm" }
-                        if ($confirm1 -eq 'DELETE ALL DOCUMENTS') {
-                            Write-Host "`nDeleting archived documents..." -ForegroundColor Cyan
-
-                            # Extract document IDs for deletion
-                            $documentIds = $archivedDocs | ForEach-Object { $_.DocumentId }
-
-                            $result = Delete-ArchivedDocuments -SiteURL $config.SiteURL -Token $token -DocumentIds $documentIds
-
-                            Write-Host "`n=== Deletion Summary ===" -ForegroundColor Cyan
-                            Write-Host "Documents deleted: $($result.Deleted)" -ForegroundColor Green
-                            if ($result.Failed -gt 0) {
-                                Write-Host "Documents failed: $($result.Failed)" -ForegroundColor Red
-                            }
-                        } else {
-                            Write-Host "Operation cancelled." -ForegroundColor Yellow
-                        }
-                    }
-                }
+                Write-Host "`nArchived document deletion is parked in this build." -ForegroundColor Yellow
+                Write-Host "This build covers processes only. See the README." -ForegroundColor Yellow
             } else {
                 $group = Resolve-ProcessGroup -SiteURL $config.SiteURL -Token $token -Prompt "Select Group to Delete (WARNING: Destructive!)"
                 if ($group) {
@@ -3969,7 +4339,7 @@ function Start-BulkOperations {
         Show-MainMenu
         $selection = Read-Host "Select Mode"
 
-        if ($selection -notmatch '^[1-5Qq]$') {
+        if ($selection -notmatch '^[15Qq]$') {
             $invalidSelections++
             Write-Host "Invalid selection. Please try again. ($invalidSelections of $maxInvalidSelections)" -ForegroundColor Red
 
