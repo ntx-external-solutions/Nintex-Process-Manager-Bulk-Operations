@@ -163,7 +163,7 @@ This is what makes the script scriptable and schedulable; the menu path is uncha
 | `-CsvPath` | CSV file, for `-Source CSV` |
 | `-GroupId` | Numeric group id, for `-Source Group` |
 | `-ObjectType` | `Process`, `Document` or `Both`; defaults to `Process` |
-| `-RestoreGroupId` | Target group for Mode 2 |
+| `-RestoreGroupId` | Target group for Mode 2 (parked) |
 | `-ConfigPath` | Alternative config file; defaults to `config.txt` |
 | `-WhatIf` | Preview. Nothing is changed. |
 | `-Force` | Answer the confirmation prompts and run unattended |
@@ -247,94 +247,68 @@ Found group: Accounts Payable
 
 ### Operation Modes
 
-#### Mode 1: Bulk Archive
+#### Mode 1: Bulk Archive Processes
 
-Archives processes or documents based on a CSV file or group selection.
+Archives every active process in a group, or a CSV's worth of processes, with the
+same collateral protection the delete path has.
+
+**Options:**
+- Source: CSV file or Process Group
+- Include Subgroups: Yes/No (for group-based operations)
 
 **CSV Format:**
 - Required column: `ProcessID` (or `ProcessId`, `Process ID`, `Id`)
 
-**Options:**
-- Source: CSV file or Process/Document Group
-- Object Type: Processes, Documents, or Both
-- Include Subgroups: Yes/No (for group-based operations)
+**What it does, in order:**
 
-**Example:**
-```
-Select Mode: 1
-Select Source: 1 (CSV)
-Select Object Type: 1 (Processes)
-Enter CSV file path: archive-list.csv
-```
+1. **Enumerates from the index**, which pages at 200, rather than from the
+   navigation breadcrumb endpoint, which was fetched once with no paging. It
+   reports the count as "N active process(es) in `<group>` and its M subgroup(s)"
+   so you can check it against the UI before anything happens.
+2. **Warns about variations whose master is not in the target set**, and refuses
+   to proceed under `-Force`. See below for why this matters more here than
+   anywhere else.
+3. **Archives** through the engine's hardened path: one call per process with
+   retry and backoff, using the change description from `config.txt`.
+4. **Verifies against one re-read of the tenant**, not against what each API call
+   said. A process the archive call claimed and the tenant disagrees about is
+   reported failed.
+5. **Checks for collateral** and reverses what it finds, restoring anything it
+   archived without being asked to back into the group the baseline recorded.
 
-#### Mode 2: Bulk Restore
+**Why archive needs protection even though it is reversible**
 
-Restores archived processes or documents to a specified target group.
+Mode 5 takes its targets from the archive list. Mode 1 fills the archive list.
+Archiving a variation also archives its master, which may live in a group nobody
+named, and once archived that master is an ordinary member of the archive list.
+So an unprotected archive of one group can put a master from another group in
+front of a delete run, with every step looking correct in isolation.
 
-**CSV Format:**
-- Required column: `ProcessID` (or similar)
+Mode 5's own protection cannot catch this, because by then the master is a
+legitimate archive entry. The guard has to be in Mode 1, which is why it is.
 
-**Options:**
-- Source: CSV file or All Archived Items
-- Object Type: Processes, Documents, or Both
-- Target Group: Specify the group ID to restore items to
+Mode 1 reports and reverses rather than stopping the way Mode 5 does. Archiving
+is undoable and the reversal is well defined, and refusing halfway would leave a
+partly archived group, which is worse than finishing and putting back what was
+not asked for.
 
-**Example:**
-```
-Select Mode: 2
-Select Source: 2 (All Archived)
-Select Object Type: 1 (Processes)
-Select Target Group for Restore: 456
-```
+#### Parked functionality
 
-#### Mode 3: Bulk Update Location
+This build covers **bulk archive (Mode 1)** and **bulk delete (Mode 5)** only.
+The following are parked: removed from the menu and refused by `-Mode`, with
+their code left in place.
 
-Moves processes or documents to new groups based on a CSV mapping.
+| Parked | Why |
+|---|---|
+| Mode 2, Bulk Restore | Reads `isArchived` / `name` off the unwrapped response, so its preview and verification cannot be trusted |
+| Mode 3, Bulk Update Location | Sends the process wrapper instead of the required `ProcessJson` string, and never publishes |
+| Mode 4, Bulk Update Ownership | Same defect as Mode 3. Use `Update-ProcessOwnership.ps1`, which implements the correct pattern |
+| All document operations | Partially implemented, including the document branches inside Modes 1 and 5. Mode 1's document path announced at runtime that it "may not be supported in all Nintex PM versions" |
 
-**CSV Format:**
-- Required columns:
-  - `ProcessID` (or similar) - The ID of the item to move
-  - `NewGroupID` (or `TargetGroupID`) - The destination group ID
-
-**Example CSV:**
-```csv
-ProcessID,NewGroupID
-1234,456
-1235,457
-1236,456
-```
-
-**Example:**
-```
-Select Mode: 3
-Select Object Type: 1 (Processes)
-Enter CSV file path: update-locations.csv
-```
-
-#### Mode 4: Bulk Update Ownership
-
-Updates process owners and experts based on a CSV file.
-
-**Note:** Currently supports Processes only.
-
-**CSV Format:**
-- Required columns:
-  - `ProcessID` - The process to update
-  - `NewOwner` - Username of the new owner (optional)
-  - `NewExpert` - Username of the new expert (optional)
-
-**Example CSV:**
-```csv
-ProcessID,NewOwner,NewExpert
-1234,john.doe@company.com,jane.smith@company.com
-1235,jane.smith@company.com,john.doe@company.com
-```
-
-**Example:**
-```
-Select Mode: 4
-Enter CSV file path: update-ownership.csv
-```
+Parked rather than deleted, deliberately. Mode 4 is meant to adopt the
+`Update-ProcessOwnership.ps1` pattern when it returns, and the document branches
+are the only document code there is. Passing a parked mode to `-Mode` prints what
+it is and why, rather than crashing or silently doing nothing.
 
 #### Mode 5: Bulk Delete Processes
 
@@ -590,13 +564,9 @@ cannot.
 
 Known broken or incomplete as of this revision:
 
-- **Mode 3 (Update Location)** and **Mode 4 (Update Ownership)** send the process wrapper
-  object to the update endpoint instead of the required `ProcessJson` string, and never
-  publish. Neither reliably applies changes. Use `Update-ProcessOwnership.ps1` for
-  ownership; it implements the correct pattern.
-- **Mode 2 (Restore)** reads `isArchived` / `name` off the unwrapped response, so its
-  preview and verification output is unreliable even when the restore itself succeeds.
-- **Document operations** are deferred and partially implemented. Do not rely on them.
+- **Modes 2, 3 and 4 and all document operations are parked.** See "Parked
+  functionality" above for what each one's defect is. They are unreachable from the
+  menu and refused by `-Mode` rather than being available and unreliable.
 - **Mode 5 Input/Output completeness** depends on the open question in
   API_ARCHITECTURE.md. Until it is settled, only the thorough scan guarantees no
   Input or Output reference is missed.
@@ -657,13 +627,14 @@ Known broken or incomplete as of this revision:
 pwsh -NoProfile -File Tests/Run-AllTests.ps1
 ```
 
-Three suites run against mocked tenants, no network and no credentials:
+Four suites run against mocked tenants, no network and no credentials:
 
 | Suite | Covers |
 |---|---|
 | `Test-Dependencies.ps1` | The pure functions: site location, removal, inversion, reconciliation, plan persistence |
 | `Test-Executor.ps1` | Plan construction and execution end to end, including a clean dependency result and the both-sides-deleted case |
 | `Test-BulkDelete.ps1` | Mode 5 orchestration: the Hold phase, the pre-mutation plan, ledger truthfulness, holding group cleanup, pagination, collateral detection at both checkpoints, and the pre-flight warnings |
+| `Test-BulkArchive.ps1` | Mode 1 orchestration: paginated and subgroup-aware enumeration, the variation pre-flight, the collateral checkpoint and its reversal, verification against the tenant, and the mode surface |
 
 ## Support
 
@@ -676,7 +647,46 @@ For issues or questions:
 
 ## Version History
 
-**Version 4.8** (Current)
+**Version 4.9** (Current)
+- Scope: this build covers bulk archive (Mode 1) and bulk delete (Mode 5) only.
+  Modes 2, 3 and 4 and all document operations are parked, meaning removed from
+  the menu and refused by `-Mode` with their code left in place. Mode 4 is meant
+  to adopt the `Update-ProcessOwnership.ps1` pattern when it returns, and the
+  document branches are the only document code there is, so deleting them would
+  mean rewriting from the commit history later.
+- Fixed, and the reason the scope decision came with work attached: **Mode 1 and
+  Mode 5 composed into a data-loss path.** Mode 5 takes its targets from the
+  archive list, Mode 1 fills it, and Mode 1 had no collateral protection at all.
+  Archiving a variation also archives its master, so archiving one group could
+  put a master from another group into the archive list, where a later delete run
+  would treat it as an ordinary candidate. Nobody names the master at any point
+  and every step looks correct in isolation. Mode 5 cannot catch this, because by
+  then the master is a legitimate archive entry, so Mode 1 now runs the variation
+  pre-flight, takes a tenant baseline, checks for collateral after archiving, and
+  reverses what it finds.
+- Fixed: **Mode 1 could not enumerate a group.** It made one unpaginated call to
+  the navigation breadcrumb endpoint, so a group larger than one response was
+  silently partially archived and the run reported success for the part it had
+  seen. Enumeration now filters the paged index and walks the group tree for
+  subgroups, and the count is reported before anything happens so it can be
+  checked against the UI.
+- Fixed: Mode 1 made three un-retried calls per process, resolving, archiving and
+  verifying one at a time. It now takes the unique id from the enumeration it
+  already has, archives through `Set-NpmProcessArchived` with retry and backoff,
+  and verifies from a single re-read. A 200-process group is 200 hardened calls
+  rather than 600 unhardened ones.
+- Fixed: verification read `isArchived` off an unwrapped response, the pattern
+  already called out as unreliable for Mode 2. It reads the tenant instead, so a
+  process the archive call claimed and the tenant disagrees about is reported
+  failed rather than successful.
+- Added: `ArchiveChangeDescription` in `config.txt`, so one change description
+  covers a cleanup instead of being hardcoded per call.
+- Fixed: `Format-NpmProcessName` was applied at print time, so `Delete_Results_*.csv`
+  still carried bare GUIDs where the console said `(name unavailable)`. Rows are
+  named where they are built, in both producers, with the invariant that a results
+  row's `Name` is never its `ObjectID`.
+
+**Version 4.8**
 - Fixed: a collateral process that no source could name printed as a bare GUID
   where the name goes, and again as the id, which reads as a broken tool. Such a
   process is real: absent from the before-state, absent from both process lists,

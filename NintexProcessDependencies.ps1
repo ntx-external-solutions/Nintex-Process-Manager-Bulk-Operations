@@ -1311,6 +1311,103 @@ function Find-VariationMaster {
     return $found
 }
 
+function Get-NpmGroupDescendantId {
+    <#
+    .SYNOPSIS
+        A group's numeric id, plus every group beneath it when asked.
+
+    .DESCRIPTION
+        Takes the group tree the run has already fetched. Walking parentId is
+        the whole of it, and doing it here rather than by re-querying each level
+        means enumerating a group costs no API calls beyond the tree itself.
+
+        Cycles cannot happen in a well-formed tree and are guarded anyway: a
+        malformed parentId would otherwise hang the run before it archived
+        anything, which is a confusing way to fail.
+
+    .OUTPUTS
+        Numeric group ids as strings, the root first. Strings because the index
+        stores groupId as whatever the payload gave, and "493" and 493 must
+        compare equal.
+    #>
+    param(
+        $Groups,
+        $RootGroupId,
+        [bool]$IncludeSubgroups = $true
+    )
+
+    if ($null -eq $RootGroupId) { return @() }
+
+    $rootKey = "$RootGroupId"
+    if (-not $IncludeSubgroups) { return @($rootKey) }
+
+    # parent id -> child ids
+    $childrenOf = @{}
+    foreach ($group in @($Groups)) {
+        if ($null -eq $group) { continue }
+        $parent = "$($group.parentId)"
+        if (-not $parent) { continue }
+        if (-not $childrenOf.ContainsKey($parent)) { $childrenOf[$parent] = @() }
+        $childrenOf[$parent] += "$($group.id)"
+    }
+
+    $found = [ordered]@{}
+    $found[$rootKey] = $true
+    $queue = New-Object System.Collections.Queue
+    $queue.Enqueue($rootKey)
+
+    while ($queue.Count -gt 0) {
+        $current = [string]$queue.Dequeue()
+        if (-not $childrenOf.ContainsKey($current)) { continue }
+        foreach ($child in $childrenOf[$current]) {
+            if ($found.Contains($child)) { continue }
+            $found[$child] = $true
+            $queue.Enqueue($child)
+        }
+    }
+
+    return @($found.Keys)
+}
+
+function Select-NpmProcessInGroup {
+    <#
+    .SYNOPSIS
+        Every process the index holds that lives in one of these groups.
+
+    .DESCRIPTION
+        The index is the enumeration. It pages at 200 and carries the group, the
+        archive state and groupExists for every process in both list sweeps, so
+        filtering it answers "what is in this group" completely.
+
+        The endpoint Mode 1 used before was the navigation breadcrumb, fetched
+        once with no Page and no PageSize. A group larger than whatever that
+        returns was silently partially archived, and the run then reported
+        success for the part it had seen.
+    #>
+    param(
+        $Index,
+        $GroupIds,
+        [bool]$IncludeArchived = $false
+    )
+
+    $wanted = @{}
+    foreach ($id in @($GroupIds)) {
+        if ($null -eq $id) { continue }
+        $wanted["$id"] = $true
+    }
+    if ($wanted.Count -eq 0 -or $null -eq $Index) { return @() }
+
+    $matches = @()
+    foreach ($entry in $Index.Values) {
+        if ($null -eq $entry.GroupId) { continue }
+        if (-not $wanted.ContainsKey("$($entry.GroupId)")) { continue }
+        if ($entry.IsArchived -and -not $IncludeArchived) { continue }
+        $matches += $entry
+    }
+
+    return @($matches | Sort-Object Name)
+}
+
 function Find-OrphanedGroupProcess {
     <#
     .SYNOPSIS
@@ -2053,7 +2150,7 @@ function Restore-CollateralState {
     Write-Host "`n=== REVERSING COLLATERAL CHANGES ===" -ForegroundColor Cyan
 
     foreach ($item in $items) {
-        $name = if ($item.Name) { $item.Name } else { $item.UniqueId }
+        $name = Format-NpmProcessName -Name ([string]$item.Name) -UniqueId ([string]$item.UniqueId)
 
         if ($item.Change -eq 'NotInBaseline') {
             Write-Host "  $name has no recorded before-state; not guessing at one." -ForegroundColor Yellow
@@ -3455,7 +3552,7 @@ function Invoke-ProcessTargetDeletion {
             if (-not $proceed) {
                 Write-Host "`nStopping before deletion. Nothing has been deleted." -ForegroundColor Red
                 foreach ($c in $collateral) {
-                    $name = if ($c.Name) { $c.Name } else { $c.UniqueId }
+                    $name = Format-NpmProcessName -Name ([string]$c.Name) -UniqueId ([string]$c.UniqueId)
                     $results += [PSCustomObject]@{
                         ObjectType = 'Process'; ObjectID = $c.UniqueId; Name = $name
                         Operation = 'Collateral'; Status = 'Failed'
@@ -3551,7 +3648,7 @@ function Invoke-ProcessTargetDeletion {
             Write-Host "back the changes that are still reversible." -ForegroundColor Yellow
 
             foreach ($c in $newCollateral) {
-                $cname = if ($c.Name) { $c.Name } else { $c.UniqueId }
+                $cname = Format-NpmProcessName -Name ([string]$c.Name) -UniqueId ([string]$c.UniqueId)
                 $results += [PSCustomObject]@{
                     ObjectType = 'Process'; ObjectID = $c.UniqueId; Name = $cname
                     Operation = 'Collateral'; Status = 'Failed'

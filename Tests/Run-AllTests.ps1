@@ -16,6 +16,7 @@ $suites = @(
     'Test-Dependencies.ps1'
     'Test-Executor.ps1'
     'Test-BulkDelete.ps1'
+    'Test-BulkArchive.ps1'
 )
 
 $failed = @()

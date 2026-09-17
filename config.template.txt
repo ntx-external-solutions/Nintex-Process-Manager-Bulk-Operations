@@ -27,3 +27,7 @@ DefaultRestoreGroupID=
 # Optional: Temporary group name for bulk delete operations
 # If not specified, will use "Bulk Delete Temporary Group"
 TempGroupName=Bulk Delete Temporary Group
+
+# Change description written against every process Mode 1 archives. Set it once
+# so the audit trail reads consistently across a cleanup.
+ArchiveChangeDescription=Bulk Cleanup.
