@@ -167,10 +167,23 @@ This is what makes the script scriptable and schedulable; the menu path is uncha
 | `-ConfigPath` | Alternative config file; defaults to `config.txt` |
 | `-WhatIf` | Preview. Nothing is changed. |
 | `-Force` | Answer the confirmation prompts and run unattended |
-| `-ApprovalsEnabled` | Declare that process approvals are on in this tenant |
+| `-ApprovalsEnabled` | **On by default.** Permission to bypass a pending archive approval. Withhold it with `-ApprovalsEnabled:$false` |
 | `-ThoroughScan` | Mode 5: read every active process for Input/Output references |
 | `-IncludeSubgroups` | Include subgroups for `-Source Group` |
 | `-AllowUnheldTargets` | Mode 5, dangerous: delete a target that could not be restored out of the archive, and whose references were therefore never checked |
+
+`-ApprovalsEnabled` changed meaning in R10. It used to be a claim about the tenant,
+and the script fired the approval bypass wherever the operator said approvals were on.
+It is now **permission** to bypass one, and whether a bypass is needed is read back off
+the process after the archive rather than predicted. That is why it defaults on: an
+operator asking for a bulk archive is asking for the processes to end up archived, and
+the UI offers the same override under the cog as "Archive now". A tenant with no
+approvals pays nothing for it, because nothing is ever pending to override.
+
+Pass `-ApprovalsEnabled:$false` to withhold it. Anything the tenant leaves awaiting
+approval is then reported as `Pending` rather than silently bypassed. Mode 5 reads the
+same switch for the publish it uses after removing a reference, so withholding it
+affects that path too.
 
 `-Force` does **not** wave through a Mode 5 reconciliation mismatch, a failed
 verification, an unresolved participant, a collateral change, or a variation
@@ -279,8 +292,11 @@ same collateral protection the delete path has.
 **Why archive needs protection even though it is reversible**
 
 Mode 5 takes its targets from the archive list. Mode 1 fills the archive list.
-Archiving a variation also archives its master, which may live in a group nobody
-named, and once archived that master is an ordinary member of the archive list.
+Archiving a variation **can** also archive its master, which may live in a group
+nobody named, and once archived that master is an ordinary member of the archive
+list. The coupling was observed over rounds 2 to 4 and round 9 then measured a
+master staying active, so it fires sometimes rather than always. The guard is
+unchanged: under-claiming a risk that sometimes fires is worse than the wording.
 So an unprotected archive of one group can put a master from another group in
 front of a delete run, with every step looking correct in isolation.
 
@@ -376,6 +392,8 @@ the code did.
 All operations generate timestamped CSV files with results:
 
 - `Archive_Results_YYYYMMDD_HHMMSS.csv`
+- `Archive_Preview_YYYYMMDD_HHMMSS.csv` (from a `-WhatIf` run)
+- `Archive_ManualReview_YYYYMMDD_HHMMSS.csv` (only when the tenant refused something)
 - `Restore_Results_YYYYMMDD_HHMMSS.csv`
 - `UpdateLocation_Results_YYYYMMDD_HHMMSS.csv`
 - `UpdateOwnership_Results_YYYYMMDD_HHMMSS.csv`
@@ -384,10 +402,48 @@ All operations generate timestamped CSV files with results:
 Each results file contains:
 - Object Type (Process/Document)
 - Object ID
+- Name, which is never the id: where nothing can name the process the row says so
 - Operation performed
-- Status (Success/Failed/Skipped)
+- Status, see below
 - Message with details
-- Action URL (where applicable)
+- Group id and HTTP status code, where they apply
+
+### Archive statuses
+
+| Status | Meaning | What to do |
+|---|---|---|
+| `Success` | Archived, confirmed by re-reading the tenant | nothing |
+| `Overridden` | Archived after the pending-approval bypass ran | nothing; counted separately so the bypass is never invisible |
+| `Preview` | `-WhatIf` only; nothing was changed | nothing |
+| `Skipped` | Already archived, or nothing to do | nothing |
+| `Pending` | The archive was accepted and is awaiting approval. The bypass did not run or was not permitted | approve it, or re-run without `-ApprovalsEnabled:$false` |
+| `Unverified` | The archive was accepted and neither listing returns the process, so its state could not be confirmed. Neither sweep is complete on this tenant | check it in the UI if it matters; it is usually archived |
+| `Blocked` | The tenant refused with a 4xx | manual review; the reason the tenant gave is in the row |
+| `Failed` | Anything else: 5xx, transport failures, or a re-read that says the process is still active | investigate |
+
+`Blocked` is deliberately not `Failed`. It means the script worked and the process
+itself needs fixing.
+
+### When the tenant refuses an archive
+
+Archiving bumps a process's version, the version bump revalidates the process, and
+anything the process references that is no longer valid comes back as an HTTP 400.
+Two causes are confirmed on the demo tenant and the list is not closed:
+
+- a linked document that has already been deleted
+- an owner or expert who is a disabled user
+
+The UI refuses the same processes the same way, so this is not a script defect. The run
+**does not stop**: every other process in the batch is still archived. At the end it
+prints a manual review block naming each refused process with the reason the server
+gave, and writes those rows to `Archive_ManualReview_<timestamp>.csv` with the columns
+`ObjectID, Name, GroupId, StatusCode, Reason`, which is the file to hand to a tenant
+administrator. Fix the processes and re-run the archive for those.
+
+The script does not retry a refusal, does not try to work out which cause applies, and
+does not try to repair the process. `processActions.CanArchive` is not used as a
+pre-flight: it read `False` for every process sampled, including ones that archived
+without complaint.
 
 ## CSV Column Name Flexibility
 
@@ -647,7 +703,56 @@ For issues or questions:
 
 ## Version History
 
-**Version 4.9** (Current)
+**Version 4.10** (Current)
+- Fixed: **Mode 1 could not tell the operator what happened.** Three different
+  outcomes all collapsed into `Failed`: the process archived, the archive landed
+  in Pending Archive Approval, and the tenant refused the archive outright for a
+  reason that has nothing to do with the script. The row said
+  `Archive call failed`, which is true and useless.
+- Fixed: **the reason the tenant gave was thrown away.** `Invoke-NpmApi` returned
+  `$_.Exception.Message`, which on a 400 is the generic
+  `Response status code does not indicate success: 400 (Bad Request).` The real
+  reason, including the words "disabled user", is in the response body. Every API
+  result now carries a `Detail` field holding the server's own words, pulled out
+  of a JSON error body where there is one and capped so an HTML error page cannot
+  flood the console or a CSV cell.
+- Fixed: `Set-NpmProcessArchived` returned `$true`/`$false`, destroying the status
+  code and the reason one frame below the code that needed them. It now returns a
+  result object carrying `Success`, `Outcome`, `StatusCode`, `Detail`,
+  `Overridden` and `Message`. All five call sites were updated in the same change,
+  because a `PSCustomObject` is always truthy and an `if ($ok)` left behind would
+  have read every refusal as a success. The two call sites that discarded the
+  result with `[void]` now report it; both are unwind paths, which is where a
+  silent failure does the most damage.
+- Added: **HTTP 4xx refusals are caught and reported as `Blocked`, and the batch
+  continues.** A refusal names the process and the reason the tenant gave, the run
+  finishes every other target, and the end of the run prints a manual review block
+  and writes `Archive_ManualReview_<timestamp>.csv` for handing to a tenant
+  administrator. Nothing is retried, classified or repaired: two causes are
+  confirmed on the demo tenant and the list is not closed.
+- Changed: **the pending-approval state is detected, not declared.**
+  `-ApprovalsEnabled` was a prediction about the tenant, so an operator who forgot
+  it left every process sitting pending and an operator who passed it on a tenant
+  that archives outright paid for a needless publish at every process. It is now
+  permission to override, it defaults on, and whether an override is needed is read
+  from `isArchived` on the model the function already fetches for the revision id.
+  The override's result is no longer discarded: an override that fails is reported
+  as `Pending`.
+- Changed: a process the archive accepted that neither listing returns afterwards is
+  now `Unverified` rather than `Failed`. Neither list sweep is complete on this
+  tenant, so that mismatch is usually the listing, not the archive. Still active
+  remains `Failed`.
+- Changed: the variation warning said acting on a variation *acts* on its master.
+  Round 9 measured a master staying active, so the coupling is real and observed but
+  not deterministic, and the wording is now *can*. The guard is unchanged, including
+  its refusal to proceed under `-Force`.
+- Fixed: `Archive_Preview_*.csv` was written by every `-WhatIf` run and was not
+  gitignored. It and the new manual review file now are.
+- Tests: the Mode 1 suite went from 57 assertions to 143, covering the error-detail
+  parser, the new outcomes, the loop continuing past a refusal, the results summary
+  and the manual review companion. Total across all suites: 580.
+
+**Version 4.9**
 - Scope: this build covers bulk archive (Mode 1) and bulk delete (Mode 5) only.
   Modes 2, 3 and 4 and all document operations are parked, meaning removed from
   the menu and refused by `-Mode` with their code left in place. Mode 4 is meant
@@ -657,7 +762,7 @@ For issues or questions:
 - Fixed, and the reason the scope decision came with work attached: **Mode 1 and
   Mode 5 composed into a data-loss path.** Mode 5 takes its targets from the
   archive list, Mode 1 fills it, and Mode 1 had no collateral protection at all.
-  Archiving a variation also archives its master, so archiving one group could
+  Archiving a variation can also archive its master, so archiving one group could
   put a master from another group into the archive list, where a later delete run
   would treat it as an ordinary candidate. Nobody names the master at any point
   and every step looks correct in isolation. Mode 5 cannot catch this, because by

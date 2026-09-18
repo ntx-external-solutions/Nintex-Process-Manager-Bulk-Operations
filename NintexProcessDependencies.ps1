@@ -782,6 +782,89 @@ function Test-NpmTransient {
     return ($StatusCode -eq 0 -or ($StatusCode -ge 500 -and $StatusCode -le 599))
 }
 
+$script:NpmErrorDetailMaxLength = 500
+
+function Get-NpmErrorDetail {
+    <#
+    .SYNOPSIS
+        The server's own words for a failed request, not the generic status line.
+
+    .DESCRIPTION
+        $_.Exception.Message on a 400 from Invoke-RestMethod is
+        "Response status code does not indicate success: 400 (Bad Request)."
+        That says nothing an operator can act on. The reason the tenant refused,
+        including the words "disabled user", lives in the response body.
+
+        PowerShell 7 puts that body in $_.ErrorDetails.Message, so that is read
+        first. Where the body is JSON the human-readable field is pulled out of
+        it rather than printing the envelope, because the envelope is what ends
+        up in a CSV cell an administrator has to read. Where ErrorDetails is
+        empty the response stream is tried instead.
+
+        The result is capped, so one HTML error page cannot flood the console
+        or the results file.
+    #>
+    param($ErrorRecord)
+
+    if ($null -eq $ErrorRecord) { return $null }
+
+    $raw = ''
+
+    if ($ErrorRecord.PSObject.Properties['ErrorDetails'] -and $ErrorRecord.ErrorDetails) {
+        $raw = [string]$ErrorRecord.ErrorDetails.Message
+    }
+
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        # Windows PowerShell and some transports leave the body on the response
+        # instead. Reading it can throw if it has already been consumed, and a
+        # failure to read the reason must never become a failure of the run.
+        try {
+            $response = $null
+            if ($ErrorRecord.Exception -and $ErrorRecord.Exception.PSObject.Properties['Response']) {
+                $response = $ErrorRecord.Exception.Response
+            }
+            if ($null -ne $response -and $response.PSObject.Methods['GetResponseStream']) {
+                $stream = $response.GetResponseStream()
+                if ($null -ne $stream) {
+                    $reader = New-Object System.IO.StreamReader($stream)
+                    $raw = $reader.ReadToEnd()
+                    $reader.Dispose()
+                }
+            }
+        }
+        catch { $raw = '' }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($raw)) { return $null }
+    $raw = $raw.Trim()
+
+    $text = $raw
+    if ($raw.StartsWith('{') -or $raw.StartsWith('[')) {
+        try {
+            $parsed = $raw | ConvertFrom-Json -ErrorAction Stop
+            # ASP.NET problem-details and the Promapp handlers each pick a
+            # different field, so take the first one that carries text.
+            foreach ($field in @('message', 'Message', 'error', 'errorMessage', 'title', 'detail')) {
+                $value = Get-NodeValue -Node $parsed -Name $field
+                if ($value -is [string] -and -not [string]::IsNullOrWhiteSpace($value)) {
+                    $text = $value.Trim()
+                    break
+                }
+            }
+        }
+        catch {
+            # Not valid JSON after all. The raw string is still better than nothing.
+            $text = $raw
+        }
+    }
+
+    if ($text.Length -gt $script:NpmErrorDetailMaxLength) {
+        $text = $text.Substring(0, $script:NpmErrorDetailMaxLength).TrimEnd() + '...'
+    }
+
+    return $text
+}
+
 function Invoke-NpmApi {
     param(
         [string]$Url,
@@ -808,11 +891,12 @@ function Invoke-NpmApi {
             } else {
                 $response = Invoke-RestMethod -Uri $Url -Method $Method -Headers $headers -ErrorAction Stop
             }
-            return [PSCustomObject]@{ Success = $true; StatusCode = 200; Response = $response; Error = $null }
+            return [PSCustomObject]@{ Success = $true; StatusCode = 200; Response = $response; Error = $null; Detail = $null }
         }
         catch {
             $status = Get-NpmErrorStatus -ErrorRecord $_
             $message = $_.Exception.Message
+            $detail = Get-NpmErrorDetail -ErrorRecord $_
 
             if ($attempt -lt $MaxRetries -and (Test-NpmTransient -StatusCode $status)) {
                 $wait = [Math]::Pow(2, $attempt + 1)
@@ -821,11 +905,13 @@ function Invoke-NpmApi {
                 continue
             }
 
-            return [PSCustomObject]@{ Success = $false; StatusCode = $status; Response = $null; Error = $message }
+            # Detail is set on every branch, success included, so a caller can
+            # read it unconditionally instead of testing for the property.
+            return [PSCustomObject]@{ Success = $false; StatusCode = $status; Response = $null; Error = $message; Detail = $detail }
         }
     }
 
-    return [PSCustomObject]@{ Success = $false; StatusCode = 0; Response = $null; Error = 'Retries exhausted' }
+    return [PSCustomObject]@{ Success = $false; StatusCode = 0; Response = $null; Error = 'Retries exhausted'; Detail = $null }
 }
 
 function Get-ProcessDependencyClaim {
@@ -1579,7 +1665,7 @@ function Show-VariationWarning {
     Write-Host "  VARIATION TARGETS DETECTED" -ForegroundColor Yellow
     Write-Host "========================================" -ForegroundColor Yellow
     Write-Host "$($byTarget.Count) target(s) are named like variations, with $masterCount candidate master(s)" -ForegroundColor Yellow
-    Write-Host "not in the target set. Acting on a variation acts on its master too." -ForegroundColor Yellow
+    Write-Host "not in the target set. Acting on a variation CAN act on its master too." -ForegroundColor Yellow
     Write-Host ""
 
     foreach ($group in $byTarget) {
@@ -1847,7 +1933,7 @@ function Show-CollateralDamage {
 
     Write-Host ""
     Write-Host "The usual cause is a process VARIATION. Nintex PM stores a variation as its" -ForegroundColor Yellow
-    Write-Host "own record in its own group, and acting on one acts on its master too. The" -ForegroundColor Yellow
+    Write-Host "own record in its own group, and acting on one can act on its master too. The" -ForegroundColor Yellow
     Write-Host "coupling is not visible in the process model or the process lists, so it can" -ForegroundColor Yellow
     Write-Host "only be caught by comparing tenant state before and after, which is what this" -ForegroundColor Yellow
     Write-Host "check does." -ForegroundColor Yellow
@@ -2140,7 +2226,7 @@ function Restore-CollateralState {
         [string]$SiteURL,
         [string]$Token,
         $Collateral,
-        [bool]$ApprovalsEnabled = $false
+        [bool]$ApprovalsEnabled = $true
     )
 
     $results = @()
@@ -2208,17 +2294,22 @@ function Restore-CollateralState {
         # Archived before, active now: put it back in the archive.
         if ($item.WasArchived -and -not $item.IsArchivedNow) {
             Write-Host "  Re-archiving $name..." -ForegroundColor Yellow
-            $ok = Set-NpmProcessArchived -SiteURL $SiteURL -Token $Token `
+            $outcome = Set-NpmProcessArchived -SiteURL $SiteURL -Token $Token `
                 -ProcessUniqueId $item.UniqueId -Comment 'Reversing collateral change from bulk operation' `
                 -ApprovalsEnabled $ApprovalsEnabled
+            $ok = [bool]$outcome.Success
 
             $results += [PSCustomObject]@{
                 ObjectType = 'Process'; ObjectID = $item.UniqueId; Name = $name
                 Operation = 'ReverseCollateral'
                 Status = $(if ($ok) { 'Success' } else { 'Failed' })
-                Message = $(if ($ok) { 'Re-archived' } else { 'Re-archive FAILED; this process is still ACTIVE' })
+                Message = $(if ($ok) { 'Re-archived' }
+                            else { "Re-archive FAILED; this process is still ACTIVE. $($outcome.Message)" })
             }
-            if (-not $ok) { Write-Host "    Failed. $name is still active and must be archived manually." -ForegroundColor Red }
+            if (-not $ok) {
+                Write-Host "    Failed. $name is still active and must be archived manually." -ForegroundColor Red
+                Write-Host "    $($outcome.Message)" -ForegroundColor DarkGray
+            }
             continue
         }
 
@@ -2529,13 +2620,64 @@ function Restore-NpmProcess {
     return $result.Success
 }
 
+function New-NpmArchiveOutcome {
+    param(
+        [bool]$Success,
+        [string]$Outcome,
+        [int]$StatusCode = 0,
+        [string]$Detail = $null,
+        [bool]$Overridden = $false,
+        [string]$Message = ''
+    )
+
+    return [PSCustomObject]@{
+        Success    = $Success
+        Outcome    = $Outcome
+        StatusCode = $StatusCode
+        Detail     = $Detail
+        Overridden = $Overridden
+        Message    = $Message
+    }
+}
+
 function Set-NpmProcessArchived {
+    <#
+    .SYNOPSIS
+        Archives one process and reports what the tenant actually did.
+
+    .DESCRIPTION
+        This returned $true/$false until R10, which destroyed the status code and
+        the server's reason one frame below the code that needed them. Mode 1
+        could then only write 'Archive call failed', which is true and useless
+        when the tenant is refusing for a reason an administrator has to fix.
+
+        Success is carried in a field for the same reason as
+        Get-ProcessDependencyClaim: a caller reads .Success, not the return
+        value. A PSCustomObject is always truthy, so any call site still written
+        as `if ($ok)` reads every refusal as a success.
+
+    .PARAMETER ApprovalsEnabled
+        Permission to override a pending archive, not a prediction that one is
+        needed. Whether the override runs is decided from isArchived on the
+        model read back after the archive, so an approvals-free tenant costs no
+        extra publish and an approvals-enabled one needs no switch to work.
+        Pass $false to withhold the override: the process is then left Pending
+        Archive Approval and reported as such.
+
+    .OUTPUTS
+        Success    - the process is archived, confirmed or believed
+        Outcome    - Archived | PendingApproval | Overridden | Refused | Failed
+        StatusCode - from the failing call, 0 when no HTTP call failed
+        Detail     - the server's own words, $null when there are none
+        Overridden - the approval override ran
+        Message    - one line fit for a results row
+    #>
     param(
         [string]$SiteURL,
         [string]$Token,
         [string]$ProcessUniqueId,
         [string]$Comment = 'Bulk operation',
-        [bool]$ApprovalsEnabled = $false
+        [bool]$ApprovalsEnabled = $true
     )
 
     Clear-NpmCachedModel -UniqueId $ProcessUniqueId
@@ -2544,22 +2686,135 @@ function Set-NpmProcessArchived {
         processUniqueId = $ProcessUniqueId
         comment         = $Comment
     }
-    if (-not $result.Success) { return $false }
 
-    # With approvals on, archiving lands in a pending state and needs an explicit
-    # publish to take effect.
-    if ($ApprovalsEnabled) {
-        $model = Get-NpmProcessModel -SiteURL $SiteURL -Token $Token -ProcessUniqueId $ProcessUniqueId
-        $revisionId = Get-NodeValue -Node $model -Name 'ProcessRevisionEditId'
-        if ($revisionId) {
-            [void](Invoke-NpmApi -Url "$SiteURL/Api/v1/Processes/$ProcessUniqueId/Publish" -Token $Token -Method Post -Body @{
-                ProcessRevisionEditId = [string]$revisionId
-                IsPublishNow          = $true
-            })
-        }
+    if (-not $result.Success) {
+        # A 4xx here is the tenant refusing on the process's own data: a linked
+        # document that no longer exists, an owner or expert who is a disabled
+        # user. Archiving bumps the version, the version bump revalidates the
+        # process, and anything it references that is no longer valid surfaces
+        # here. The UI fails identically. Reporting it is this function's whole
+        # job; repairing it is not, and neither is logging it, which belongs to
+        # the caller that owns the results file.
+        $refused = ($result.StatusCode -ge 400 -and $result.StatusCode -le 499)
+        $reason = if ($result.Detail) { $result.Detail } else { $result.Error }
+        return New-NpmArchiveOutcome -Success $false `
+            -Outcome $(if ($refused) { 'Refused' } else { 'Failed' }) `
+            -StatusCode $result.StatusCode -Detail $result.Detail `
+            -Message $(if ($refused) { "HTTP $($result.StatusCode) refused by the tenant: $reason" }
+                       else { "Archive call failed (HTTP $($result.StatusCode)): $reason" })
     }
 
-    return $true
+    # One fresh read, taken after the version bump because the cache was cleared
+    # above. It carries both the revision id the override needs and the answer to
+    # whether an override is needed at all, so the decision costs no extra call.
+    # The read is made here rather than through Get-NpmProcessModel because that
+    # helper unwraps to processJson, and isArchived may sit on the envelope.
+    $read = Invoke-NpmApi -Url "$SiteURL/Api/v1/Processes/$ProcessUniqueId" -Token $Token -Method Get
+
+    if (-not $read.Success -and $read.StatusCode -eq 404) {
+        # This endpoint serves active processes; archived ones are fetched in
+        # batch elsewhere. A 404 immediately after the archive call succeeded is
+        # therefore the process having left the active side, which is the
+        # archive having taken effect. Nothing is pending, so nothing is
+        # overridden. The measured trace on the demo tenant has the endpoint
+        # answering in both states, so this branch is the other tenant's case.
+        return New-NpmArchiveOutcome -Success $true -Outcome 'Archived' `
+            -Message 'Archived; the active-process read no longer returns it'
+    }
+
+    $wrapper = $null
+    $model = $null
+    if ($read.Success) {
+        $wrapper = $read.Response
+        $model = Get-NodeValue -Node $wrapper -Name 'processJson'
+        if ($null -eq $model) { $model = $wrapper }
+    }
+
+    if ($null -eq $model) {
+        # State unknown. Guessing here either fires a needless publish or leaves
+        # a process pending in silence, so say so and let the results file carry it.
+        return New-NpmArchiveOutcome -Success $false -Outcome 'PendingApproval' `
+            -Message 'Archive accepted but the process could not be re-read, so its state is unknown'
+    }
+
+    # PSMemberInfoCollection indexes case-insensitively, so one lookup covers
+    # both spellings; the envelope is tried when the model does not carry it.
+    # Absence is not the same as false, so the two are told apart: a payload
+    # that never reports the field cannot be read as "pending".
+    $reportsState = (Test-NodeHasProperty -Node $model -Name 'isArchived') -or
+                    (Test-NodeHasProperty -Node $wrapper -Name 'isArchived')
+
+    # Pending DETECTED is not the same as pending assumed. Only the first is
+    # evidence, and only the first turns a missing revision id or a failed
+    # publish into a reported PendingApproval.
+    $pendingDetected = $false
+
+    if ($reportsState) {
+        $isArchived = Get-NodeValue -Node $model -Name 'isArchived'
+        if ($null -eq $isArchived) { $isArchived = Get-NodeValue -Node $wrapper -Name 'isArchived' }
+
+        if ($isArchived -eq $true) {
+            # Archived outright. There is nothing pending, so there is nothing
+            # to override, whatever the operator said about the tenant.
+            return New-NpmArchiveOutcome -Success $true -Outcome 'Archived' -Message 'Archived'
+        }
+
+        # Reported and false: the archive is sitting in Pending Archive Approval.
+        $pendingDetected = $true
+        if (-not $ApprovalsEnabled) {
+            return New-NpmArchiveOutcome -Success $false -Outcome 'PendingApproval' `
+                -Message 'Archive is pending approval; the override was not permitted on this run'
+        }
+    }
+    elseif (-not $ApprovalsEnabled) {
+        # Nothing reported the state and the override is not permitted, so the
+        # only thing known is that the call was accepted. Say that.
+        return New-NpmArchiveOutcome -Success $true -Outcome 'Archived' `
+            -Message 'Archive accepted; the tenant did not report isArchived, so no override was sent'
+    }
+    # Field absent and the override is permitted: send it speculatively. That is
+    # what this code did before the state was detected at all, so a payload that
+    # does not report isArchived degrades to the old behaviour rather than to
+    # leaving every process pending in silence.
+
+    $revisionId = Get-NodeValue -Node $model -Name 'ProcessRevisionEditId'
+    if (-not $revisionId) { $revisionId = Get-NodeValue -Node $wrapper -Name 'ProcessRevisionEditId' }
+    if (-not $revisionId) {
+        if ($pendingDetected) {
+            return New-NpmArchiveOutcome -Success $false -Outcome 'PendingApproval' `
+                -Message 'Archive is pending approval and no revision id came back, so the override could not be sent'
+        }
+        # Nothing said it was pending and there is nothing to publish. The
+        # archive call was accepted, so that is the outcome.
+        return New-NpmArchiveOutcome -Success $true -Outcome 'Archived' `
+            -Message 'Archive accepted; no revision id came back, so no override was sent'
+    }
+
+    # The archive created a new revision, so this id is the post-archive one.
+    # It is sent as a string; see API_ARCHITECTURE.md.
+    $publish = Invoke-NpmApi -Url "$SiteURL/Api/v1/Processes/$ProcessUniqueId/Publish" -Token $Token -Method Post -Body @{
+        ProcessRevisionEditId = [string]$revisionId
+        IsPublishNow          = $true
+    }
+
+    if (-not $publish.Success) {
+        $reason = if ($publish.Detail) { $publish.Detail } else { $publish.Error }
+        if ($pendingDetected) {
+            return New-NpmArchiveOutcome -Success $false -Outcome 'PendingApproval' `
+                -StatusCode $publish.StatusCode -Detail $publish.Detail `
+                -Message "Archive is pending approval and the override failed (HTTP $($publish.StatusCode)): $reason"
+        }
+        # A speculative override on a tenant that never said anything was
+        # pending. Its failure is not evidence the archive did not take, so the
+        # archive stands and the failed publish is reported rather than counted
+        # against it.
+        return New-NpmArchiveOutcome -Success $true -Outcome 'Archived' `
+            -StatusCode $publish.StatusCode -Detail $publish.Detail `
+            -Message "Archive accepted; a speculative approval override failed (HTTP $($publish.StatusCode)): $reason"
+    }
+
+    return New-NpmArchiveOutcome -Success $true -Outcome 'Overridden' -Overridden $true `
+        -Message 'Archived after the pending-approval override'
 }
 
 function Remove-NpmProcess {
@@ -3363,7 +3618,7 @@ function Invoke-ProcessDeletePlan {
         [string]$Token,
         $Plan,
         [string]$PlanPath,
-        [bool]$ApprovalsEnabled = $false,
+        [bool]$ApprovalsEnabled = $true,
         [bool]$SkipVerification = $false
     )
 
@@ -3469,7 +3724,9 @@ function Invoke-ProcessTargetDeletion {
         and the irreversible step.
 
         The archive pass is itself a mutation, and archiving a process variation
-        archives its master too. So the tenant is re-read between archiving and
+        can archive its master too. Round 9 measured a master staying active, so
+        the coupling is real and observed but not deterministic. The tenant is
+        therefore re-read between archiving and
         deleting, and anything that moved which was not a target stops the run
         right there. That gap is the last point where stopping still costs
         nothing: an unwanted archive can be undone, an unwanted delete cannot.
@@ -3494,7 +3751,7 @@ function Invoke-ProcessTargetDeletion {
         [string]$SiteURL,
         [string]$Token,
         $Plan,
-        [bool]$ApprovalsEnabled = $false,
+        [bool]$ApprovalsEnabled = $true,
         $TenantBaseline = $null,
         [scriptblock]$OnCollateral = $null,
         [string[]]$ObservedUniqueIds = @(),
@@ -3513,8 +3770,17 @@ function Invoke-ProcessTargetDeletion {
         Write-Host "`r  Archiving $i of $($targets.Count)..." -NoNewline -ForegroundColor Gray
 
         if ($record.Count -gt 0 -and $record[0].WasArchived -and -not $record[0].RestoredByThisRun) { continue }
-        [void](Set-NpmProcessArchived -SiteURL $SiteURL -Token $Token -ProcessUniqueId $target `
-            -Comment 'Pre-delete archive' -ApprovalsEnabled $ApprovalsEnabled)
+        $archive = Set-NpmProcessArchived -SiteURL $SiteURL -Token $Token -ProcessUniqueId $target `
+            -Comment 'Pre-delete archive' -ApprovalsEnabled $ApprovalsEnabled
+
+        # This is an unwind path, which is where a silent failure does the most
+        # damage, so the reason is printed rather than discarded. The delete pass
+        # still reads the tenant rather than this call, because ArchiveProcess can
+        # report failure and take effect anyway.
+        if (-not $archive.Success) {
+            Write-Host ""
+            Write-Host "    $name could not be archived: $($archive.Message)" -ForegroundColor Yellow
+        }
     }
     Write-Host ""
 
@@ -3707,7 +3973,7 @@ function Move-NpmProcessToGroup {
         [string]$Token,
         [string]$ProcessUniqueId,
         $TargetGroupId,
-        [bool]$ApprovalsEnabled = $false,
+        [bool]$ApprovalsEnabled = $true,
         [bool]$TargetGroupExists = $true
     )
 
@@ -3747,8 +4013,14 @@ function Move-NpmProcessToGroup {
     }
 
     # Fallback: archive, then restore into the group we want.
-    [void](Set-NpmProcessArchived -SiteURL $SiteURL -Token $Token -ProcessUniqueId $ProcessUniqueId `
-        -Comment 'Relocating to original group' -ApprovalsEnabled $ApprovalsEnabled)
+    $archive = Set-NpmProcessArchived -SiteURL $SiteURL -Token $Token -ProcessUniqueId $ProcessUniqueId `
+        -Comment 'Relocating to original group' -ApprovalsEnabled $ApprovalsEnabled
+    if (-not $archive.Success) {
+        # The restore below is still attempted: ArchiveProcess can report failure
+        # and take effect anyway, and the placement is verified from a read either
+        # way. Saying why the first half failed is what stops this being silent.
+        Write-Host "    Archive step of the relocation failed: $($archive.Message)" -ForegroundColor Yellow
+    }
     [void](Restore-NpmProcess -SiteURL $SiteURL -Token $Token `
         -ProcessUniqueId $ProcessUniqueId -ProcessGroupId $TargetGroupId)
 
@@ -3788,7 +4060,7 @@ function Restore-ProcessPlanState {
         [string]$Token,
         $Plan,
         [string]$PlanPath,
-        [bool]$ApprovalsEnabled = $false
+        [bool]$ApprovalsEnabled = $true
     )
 
     $results = @()
@@ -3855,8 +4127,9 @@ function Restore-ProcessPlanState {
         }
 
         Write-Host "  Re-archiving $($entry.Name)..." -ForegroundColor Gray
-        $ok = Set-NpmProcessArchived -SiteURL $SiteURL -Token $Token -ProcessUniqueId $entry.UniqueId `
+        $outcome = Set-NpmProcessArchived -SiteURL $SiteURL -Token $Token -ProcessUniqueId $entry.UniqueId `
             -Comment 'Re-archiving after dependency cleanup' -ApprovalsEnabled $ApprovalsEnabled
+        $ok = [bool]$outcome.Success
 
         $entry.Denormalized = $ok
 
@@ -3869,11 +4142,12 @@ function Restore-ProcessPlanState {
             Operation = 'ReArchive'
             Status = $status
             Message = $(if ($ok) { "Re-archived in $placement" }
-                        else { "Re-archive failed; this process is still ACTIVE in $placement" })
+                        else { "Re-archive failed; this process is still ACTIVE in $placement. $($outcome.Message)" })
         }
 
         if (-not $ok) {
             Write-Host "    Failed. $($entry.Name) is still active and must be archived manually." -ForegroundColor Red
+            Write-Host "    $($outcome.Message)" -ForegroundColor DarkGray
         }
 
         if ($PlanPath) { [void](Export-DependencyPlan -Plan $Plan -Path $PlanPath) }
