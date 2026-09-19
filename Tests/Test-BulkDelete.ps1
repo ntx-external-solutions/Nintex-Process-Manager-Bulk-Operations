@@ -1025,6 +1025,374 @@ Assert-Equal (Get-NpmUnknownProcessName) $ghostRow.Name `
     'a row built for an unnameable process carries the marker, not the id'
 
 # ---------------------------------------------------------------------------
+Write-Host "`nScenario: -AcceptCollateral is the third answer to the collateral gate" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# -Force means "answer the prompts affirmatively", and it deliberately cannot
+# answer this one: a run that has just proved it affects processes nobody listed
+# has no business continuing to an irreversible delete on an assumption. But on
+# a tenant whose targets belong to variation families that leaves no way to run
+# Mode 5 unattended at all, which is an availability floor of zero rather than a
+# safety property.
+#
+# -AcceptCollateral says something -Force does not: the operator reviewed this
+# list out of band and accepts it. It approves this gate and the variation
+# pre-flight, and nothing else.
+
+$MA = '99999999-9999-9999-9999-99999999aa01'
+
+function Reset-AcceptTenant {
+    $script:Archived = @{ $T1 = $true;  $MA = $false }
+    $script:GroupOf  = @{ $T1 = 100;    $MA = 100 }
+    $script:Names    = @{ $T1 = 'Order Handling (AU)'; $MA = 'Order Handling' }
+    $script:Deleted  = @()
+    $script:RestoreCalls = @(); $script:ArchiveCalls = @()
+    $script:TempGroupDeleted = $false
+    $script:TempGroupContents = @()
+    $script:LastResults = @()
+}
+
+function Invoke-ApiGet {
+    param([string]$Url,[string]$Token)
+    if ($Url -match 'ListType=7') {
+        $page = 1
+        if ($Url -match 'Page=(\d+)') { $page = [int]$Matches[1] }
+        if ($page -gt 1) { return [PSCustomObject]@{ items = @() } }
+        $items = @()
+        foreach ($id in @($T1,$MA)) {
+            if ($null -eq $script:Archived[$id]) { continue }
+            if (-not $script:Archived[$id]) { continue }
+            $items += [PSCustomObject]@{ processUniqueId=$id; processName=$script:Names[$id]; groupId=$script:GroupOf[$id] }
+        }
+        return [PSCustomObject]@{ items = $items }
+    }
+    return [PSCustomObject]@{ items = @() }
+}
+function Get-ProcessesFromGroup {
+    param([string]$SiteURL,[string]$Token,$GroupID,[string]$GroupUniqueId,$IncludeSubgroups)
+    return @($script:TempGroupContents)
+}
+
+function Invoke-NpmApi {
+    param([string]$Url,[string]$Token,[string]$Method='Get',$Body=$null,[int]$MaxRetries=0)
+    function Ok($r) { return [PSCustomObject]@{ Success=$true; StatusCode=200; Response=$r; Error=$null } }
+
+    if ($Url -match 'ListType=(\d+)') {
+        $wantArchived = ([int]$Matches[1] -eq 7)
+        $items = @()
+        foreach ($id in @($T1,$MA)) {
+            if ($null -eq $script:Archived[$id]) { continue }
+            if ($script:Archived[$id] -ne $wantArchived) { continue }
+            $items += [PSCustomObject]@{
+                processUniqueId=$id; id=1; processName=$script:Names[$id]; groupId=$script:GroupOf[$id] }
+        }
+        return Ok ([PSCustomObject]@{ items = $items })
+    }
+    if ($Url -match 'CheckProcessDependencies') { return Ok $null }
+
+    if ($Url -match 'RestoreProcess') {
+        $id = $Body.processUniqueId
+        $script:RestoreCalls += $id
+        $script:Archived[$id] = $false
+        $script:GroupOf[$id] = [int]$Body.processGroupId
+        # The coupling: pulling the variation out of the archive drags the master in.
+        if ($id -eq $T1) { $script:Archived[$MA] = $true }
+        return Ok @{}
+    }
+    if ($Url -match 'ArchiveProcess') {
+        $script:ArchiveCalls += $Body.processUniqueId
+        $script:Archived[$Body.processUniqueId] = $true
+        return Ok @{}
+    }
+    if ($Url -match 'DeleteProcess') {
+        $id = $Body.processUniqueId
+        $script:Deleted += $id
+        $script:Archived.Remove($id)
+        return Ok @{}
+    }
+    if ($Url -match 'mobile/api/v1/processes') { return Ok ([PSCustomObject]@{ data = @() }) }
+    if ($Method -eq 'Get' -and $Url -match '/Api/v1/Processes/([0-9a-fA-F\-]+)$') {
+        $id = $Matches[1]
+        return Ok ([PSCustomObject]@{ processJson = [PSCustomObject]@{
+            UniqueId=$id; Name=$script:Names[$id]; GroupId=$script:GroupOf[$id]; StateId=1 } })
+    }
+    return Ok $null
+}
+
+# First, the gate still holds for -Force on its own. Without this the scenario
+# below proves only that the run works, not that the switch is what let it.
+Reset-AcceptTenant
+$workA1 = Join-Path ([System.IO.Path]::GetTempPath()) "accept-force-$([guid]::NewGuid())"
+New-Item -ItemType Directory -Path $workA1 -Force | Out-Null
+Push-Location $workA1
+try {
+    Invoke-BulkDeleteProcesses -SiteURL 'https://mock' -Token 't' -SourceType 'Archived' `
+        -TempGroupName 'Bulk Delete Temporary Group' -CurrentUsername 'u' -Force
+
+    Assert-Equal 0 $script:Deleted.Count '-Force alone still stops at the collateral gate'
+    Assert-Equal 0 @($script:LastResults | Where-Object { $_.Status -eq 'Accepted' }).Count `
+        'and approves nothing'
+}
+finally { Pop-Location; Remove-Item $workA1 -Recurse -Force -ErrorAction SilentlyContinue }
+
+Reset-AcceptTenant
+$workA2 = Join-Path ([System.IO.Path]::GetTempPath()) "accept-$([guid]::NewGuid())"
+New-Item -ItemType Directory -Path $workA2 -Force | Out-Null
+Push-Location $workA2
+try {
+    $out = (Invoke-BulkDeleteProcesses -SiteURL 'https://mock' -Token 't' -SourceType 'Archived' `
+        -TempGroupName 'Bulk Delete Temporary Group' -CurrentUsername 'u' -Force -AcceptCollateral) 6>&1 | Out-String
+
+    Assert-Equal 1 $script:Deleted.Count 'with -AcceptCollateral the run reaches the delete phase'
+    Assert-True ($script:Deleted -contains $T1) 'and deletes the target it was given'
+
+    # The list has to be in front of the operator before the run acts on the
+    # approval, not summarised after it.
+    $listedAt  = $out.IndexOf('COLLATERAL CHANGES DETECTED')
+    $acceptAt  = $out.IndexOf('-AcceptCollateral supplied')
+    $deleteAt  = $out.IndexOf('=== DELETING TARGETS ===')
+    Assert-True ($listedAt -ge 0) 'the full collateral list is printed'
+    Assert-True ($acceptAt -gt $listedAt) 'the approval is announced after the list, not instead of it'
+    Assert-True ($deleteAt -gt $acceptAt) 'and both come before anything is deleted'
+    Assert-True ($out -match 'Order Handling') 'the affected process is named'
+
+    $rows = @($script:LastResults)
+    $acceptedRows = @($rows | Where-Object { $_.Operation -eq 'Collateral' -and $_.Status -eq 'Accepted' })
+    Assert-Equal 1 $acceptedRows.Count 'the approved process gets one Accepted row'
+    Assert-Equal $MA $acceptedRows[0].ObjectID 'naming the process that was approved'
+    Assert-True ($acceptedRows[0].Message -like '*-AcceptCollateral*') `
+        'and saying it was the switch rather than somebody at a prompt'
+
+    Assert-Equal 0 @($rows | Where-Object { $_.Operation -eq 'Collateral' -and $_.Status -eq 'Failed' }).Count `
+        'an approved change is not also filed as a failure'
+    Assert-Equal 1 @($rows | Where-Object { $_.Operation -eq 'Collateral' } |
+        ForEach-Object { $_.ObjectID } | Select-Object -Unique).Count `
+        'and it is raised once, not again at every checkpoint after the one that asked'
+    Assert-Equal 1 @($rows | Where-Object { $_.Operation -eq 'Collateral' }).Count `
+        'one row per approved process'
+
+    # Approval is permission to carry on, not a request to leave the tenant changed.
+    Assert-Equal $false $script:Archived[$MA] 'the approved collateral is still put back'
+    Assert-Equal 100 $script:GroupOf[$MA] 'into its own group'
+    Assert-Equal 1 @($rows | Where-Object {
+        $_.Operation -eq 'ReverseCollateral' -and $_.ObjectID -eq $MA -and $_.Status -eq 'Success' }).Count `
+        'and the reversal is recorded exactly once, not once per list that carries it'
+
+    Assert-Equal $true $script:TempGroupDeleted 'the holding group is still cleaned up'
+}
+finally { Pop-Location; Remove-Item $workA2 -Recurse -Force -ErrorAction SilentlyContinue }
+
+# ---------------------------------------------------------------------------
+Write-Host "`nScenario: -AcceptCollateral also answers the variation pre-flight" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# The other gate that takes a typed YES and nothing else. It runs before the
+# first mutation, so a -Force run stopped here without having touched anything.
+
+Reset-AcceptTenant
+$script:Names = @{ $T1 = 'Order Handling :: AU'; $MA = 'Order Handling' }   # now the heuristic matches
+
+$workB = Join-Path ([System.IO.Path]::GetTempPath()) "acceptpre-$([guid]::NewGuid())"
+New-Item -ItemType Directory -Path $workB -Force | Out-Null
+Push-Location $workB
+try {
+    Invoke-BulkDeleteProcesses -SiteURL 'https://mock' -Token 't' -SourceType 'Archived' `
+        -TempGroupName 'Bulk Delete Temporary Group' -CurrentUsername 'u' -Force -AcceptCollateral
+
+    Assert-Equal 1 $script:Deleted.Count 'the pre-flight no longer stops the run'
+
+    $rows = @($script:LastResults)
+    $warnRows = @($rows | Where-Object { $_.Operation -eq 'VariationWarning' })
+    Assert-Equal 1 $warnRows.Count 'the master is still named in the results'
+    Assert-Equal 'Accepted' $warnRows[0].Status 'as an authorisation rather than a failure'
+    Assert-Equal $MA $warnRows[0].ObjectID 'and it is the right master'
+    Assert-Equal '100' ([string]$warnRows[0].GroupId) 'the row says which group that master is in'
+}
+finally { Pop-Location; Remove-Item $workB -Recurse -Force -ErrorAction SilentlyContinue }
+
+# ---------------------------------------------------------------------------
+Write-Host "`nScenario: a ReArchive row says which group the process landed in" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# GroupId and StatusCode exist so the manual-review companion can be built from
+# the rows rather than by parsing Message back apart. They were added to
+# New-ProcessResultRow and then passed by no Mode 5 call site, so across a
+# 45-row run both were empty and the data was going into prose instead.
+#
+# ReArchive is the row that carries it: the run moves a target back to its home
+# group and archives it there, and where it landed is the whole point of the row.
+
+Reset-AcceptTenant
+$workC = Join-Path ([System.IO.Path]::GetTempPath()) "rearchive-$([guid]::NewGuid())"
+New-Item -ItemType Directory -Path $workC -Force | Out-Null
+Push-Location $workC
+try {
+    # No -AcceptCollateral, so the collateral gate stops the run and the target
+    # is returned to group 100 and re-archived on the way out.
+    Invoke-BulkDeleteProcesses -SiteURL 'https://mock' -Token 't' -SourceType 'Archived' `
+        -TempGroupName 'Bulk Delete Temporary Group' -CurrentUsername 'u' -Force
+
+    $rows = @($script:LastResults)
+    $reArchive = @($rows | Where-Object { $_.Operation -eq 'ReArchive' })
+
+    Assert-True ($reArchive.Count -gt 0) 'the unwind produced ReArchive rows'
+    Assert-Equal 0 @($reArchive | Where-Object { -not $_.GroupId }).Count `
+        'and not one of them has an empty GroupId'
+    Assert-Equal '100' ([string]$reArchive[0].GroupId) `
+        'it is the home group, not the holding group the process was parked in'
+    Assert-True ($reArchive[0].Message -like '*100*') 'and the Message still tells the story'
+
+    $reverse = @($rows | Where-Object { $_.Operation -eq 'ReverseCollateral' })
+    Assert-True ($reverse.Count -gt 0) 'the collateral reversal produced rows too'
+    Assert-Equal 0 @($reverse | Where-Object { -not $_.GroupId }).Count `
+        'and those carry a group as well'
+}
+finally { Pop-Location; Remove-Item $workC -Recurse -Force -ErrorAction SilentlyContinue }
+
+# A failed API call puts its status in the column, not only in the prose.
+Assert-Equal '404' (New-ProcessResultRow -UniqueId $T1 -Name 'Alpha' -Operation 'Hold' `
+    -Status 'Failed' -StatusCode 404 -Message 'x').StatusCode `
+    'New-ProcessResultRow carries a status code through to the row'
+Assert-Equal '830' (New-ProcessResultRow -UniqueId $T1 -Name 'Alpha' -Operation 'Hold' `
+    -Status 'Failed' -GroupId 830 -Message 'x').GroupId `
+    'and a group id'
+
+# Export-Csv takes its header from the first object it is given, and Mode 5's
+# rows come from several producers with different shapes. Normalising before the
+# write is what stops the file's columns depending on which row came first.
+$mixed = @(ConvertTo-NpmResultRow -Rows @(
+    [PSCustomObject]@{ ObjectType='ProcessGroup'; ObjectID='g830'; Name='Temp'
+                       Operation='Cleanup'; Status='Success'; Message='x' },
+    (New-ProcessResultRow -UniqueId $T1 -Name 'Alpha' -Operation 'ReArchive' `
+        -Status 'Success' -GroupId 100 -Message 'y')
+))
+Assert-True ($null -ne $mixed[0].PSObject.Properties['GroupId']) `
+    'a row that carries no group still gets the column, so a header cannot lose it'
+Assert-Equal '100' ([string]$mixed[1].GroupId) 'and a row that does keeps its value'
+
+# ---------------------------------------------------------------------------
+Write-Host "`nScenario: the results file can be fed back into the script" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# Every results file this script writes uses ObjectID, which Get-IdFromCsvRow
+# did not accept. So the obvious operator move, take the failures out of
+# Delete_Results_*.csv and re-run them, silently produced "No processes to
+# delete" - the same line an empty file produces.
+
+Assert-Equal $T1 (Get-IdFromCsvRow -Row ([PSCustomObject]@{ ObjectType='Process'; ObjectID=$T1; Name='Alpha' })) `
+    'ObjectID is read as an id'
+Assert-Equal $T1 (Get-IdFromCsvRow -Row ([PSCustomObject]@{ ObjectId=$T1 })) `
+    'and so is ObjectId'
+Assert-Equal $T1 (Get-IdFromCsvRow -Row ([PSCustomObject]@{ ProcessID=''; ObjectID=$T1 })) `
+    'a header that exists but is blank on this row does not swallow the lookup'
+Assert-Equal $null (Get-IdFromCsvRow -Row ([PSCustomObject]@{ Name='Alpha'; Status='Failed' })) `
+    'a row with no id column at all still yields nothing'
+
+Reset-MockTenant
+function Invoke-ApiGet {
+    param([string]$Url,[string]$Token)
+    if ($Url -match 'ListType=7') {
+        $page = 1
+        if ($Url -match 'Page=(\d+)') { $page = [int]$Matches[1] }
+        if ($page -gt 1) { return [PSCustomObject]@{ items = @() } }
+        $items = @()
+        foreach ($id in @($T1,$T2,$T3)) {
+            if (-not $script:Archived[$id]) { continue }
+            $items += [PSCustomObject]@{ processUniqueId=$id; processName=$script:Names[$id]; groupId=$script:GroupOf[$id] }
+        }
+        return [PSCustomObject]@{ items = $items }
+    }
+    return [PSCustomObject]@{ items = @() }
+}
+function Invoke-NpmApi {
+    param([string]$Url,[string]$Token,[string]$Method='Get',$Body=$null,[int]$MaxRetries=0)
+    function Ok($r) { return [PSCustomObject]@{ Success=$true; StatusCode=200; Response=$r; Error=$null } }
+    if ($Url -match 'ListType=(\d+)') {
+        $wantArchived = ([int]$Matches[1] -eq 7)
+        $items = @()
+        foreach ($id in @($T1,$T2,$T3)) {
+            if ($null -eq $script:Archived[$id]) { continue }
+            if ($script:Archived[$id] -ne $wantArchived) { continue }
+            $items += [PSCustomObject]@{
+                processUniqueId=$id; id=1; processName=$script:Names[$id]; groupId=$script:GroupOf[$id] }
+        }
+        return Ok ([PSCustomObject]@{ items = $items })
+    }
+    if ($Url -match 'CheckProcessDependencies') { return Ok $null }
+    if ($Url -match 'RestoreProcess') {
+        $id = $Body.processUniqueId
+        $script:RestoreCalls += $id
+        $script:Archived[$id] = $false
+        $script:GroupOf[$id] = [int]$Body.processGroupId
+        return Ok @{}
+    }
+    if ($Url -match 'ArchiveProcess') {
+        $script:ArchiveCalls += $Body.processUniqueId
+        $script:Archived[$Body.processUniqueId] = $true
+        return Ok @{}
+    }
+    if ($Url -match 'DeleteProcess') {
+        $id = $Body.processUniqueId
+        $script:Deleted += $id
+        $script:Archived.Remove($id)
+        return Ok @{}
+    }
+    if ($Url -match 'mobile/api/v1/processes') { return Ok ([PSCustomObject]@{ data = @() }) }
+    if ($Method -eq 'Get' -and $Url -match '/Api/v1/Processes/([0-9a-fA-F\-]+)$') {
+        $id = $Matches[1]
+        return Ok ([PSCustomObject]@{ processJson = [PSCustomObject]@{
+            UniqueId=$id; Name=$script:Names[$id]; GroupId=$script:GroupOf[$id]; StateId=1 } })
+    }
+    return Ok $null
+}
+
+$workD = Join-Path ([System.IO.Path]::GetTempPath()) "feedback-$([guid]::NewGuid())"
+New-Item -ItemType Directory -Path $workD -Force | Out-Null
+
+# Shaped exactly like a file this script writes.
+$resultsCsv = Join-Path $workD 'Delete_Results_20260919_040932.csv'
+@(
+    'ObjectType,ObjectID,Name,Operation,Status,Message,GroupId,StatusCode'
+    "Process,$T1,Alpha,Delete,Failed,Delete failed,100,500"
+    "Process,$T2,Bravo,Delete,Failed,Delete failed,100,500"
+) -join "`n" | Set-Content -Path $resultsCsv -Encoding UTF8
+
+Push-Location $workD
+try {
+    Invoke-BulkDeleteProcesses -SiteURL 'https://mock' -Token 't' -SourceType 'CSV' -CsvPath $resultsCsv `
+        -TempGroupName 'Bulk Delete Temporary Group' -CurrentUsername 'u' -Force
+
+    Assert-Equal 2 $script:Deleted.Count 'the two failures out of a results file are re-run'
+    Assert-True ($script:Deleted -contains $T1) 'the first of them'
+    Assert-True ($script:Deleted -contains $T2) 'and the second'
+    Assert-Equal $false ($script:Deleted -contains $T3) 'and nothing that was not in the file'
+}
+finally { Pop-Location; Remove-Item $workD -Recurse -Force -ErrorAction SilentlyContinue }
+
+# ---------------------------------------------------------------------------
+Write-Host "`nScenario: an unreadable header does not look like an empty file" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+
+Reset-MockTenant
+$workE = Join-Path ([System.IO.Path]::GetTempPath()) "noidcol-$([guid]::NewGuid())"
+New-Item -ItemType Directory -Path $workE -Force | Out-Null
+$noIdCsv = Join-Path $workE 'targets.csv'
+@(
+    'Process Name,Owner'
+    'Alpha,someone'
+    'Bravo,someone else'
+) -join "`n" | Set-Content -Path $noIdCsv -Encoding UTF8
+
+Push-Location $workE
+try {
+    $out = (Invoke-BulkDeleteProcesses -SiteURL 'https://mock' -Token 't' -SourceType 'CSV' -CsvPath $noIdCsv `
+        -TempGroupName 'Bulk Delete Temporary Group' -CurrentUsername 'u' -Force) 6>&1 | Out-String
+
+    Assert-True ($out -match 'Read 2 row\(s\)') 'the run says how many rows it read'
+    Assert-True ($out -match 'found no id column') 'and that the headers are why it got nothing'
+    Assert-True ($out -match 'Process Name, Owner') 'naming the columns the file actually has'
+    Assert-True ($out -match 'ObjectID') 'and the ones it would have accepted'
+    Assert-Equal 0 $script:Deleted.Count 'nothing is deleted'
+}
+finally { Pop-Location; Remove-Item $workE -Recurse -Force -ErrorAction SilentlyContinue }
+
+# ---------------------------------------------------------------------------
 Write-Host "`nScenario: both archived-list readers page identically" -ForegroundColor Cyan
 # ---------------------------------------------------------------------------
 $script:PageSizesSeen = @()

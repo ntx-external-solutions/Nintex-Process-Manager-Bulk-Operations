@@ -460,6 +460,39 @@ try {
 finally { Pop-Location; Remove-Item $work2 -Recurse -Force -ErrorAction SilentlyContinue }
 
 # ---------------------------------------------------------------------------
+Write-Host "`nScenario: -AcceptCollateral answers the variation pre-flight" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# The pre-flight is the only gate in Mode 1 that -Force cannot answer, which on
+# a tenant full of variation families means no unattended archive at all. The
+# switch says what -Force cannot: the operator read this list and accepts it.
+# Mode 1's collateral is reported and reversed rather than gated, so there is
+# nothing else here for the switch to approve.
+
+Reset-ArchiveTenant
+$work2b = Join-Path ([System.IO.Path]::GetTempPath()) "bulkarchive-$([guid]::NewGuid())"
+New-Item -ItemType Directory -Path $work2b -Force | Out-Null
+Push-Location $work2b
+try {
+    $out = (Invoke-BulkArchiveProcesses -SiteURL 'https://mock' -Token 't' -SourceType 'Group' `
+        -GroupID 100 -ChangeDescription 'Bulk Cleanup.' -Force -AcceptCollateral) 6>&1 | Out-String
+
+    Assert-True ($out -match 'Advertise Job Position') 'the master is still named before anything is archived'
+    Assert-True ($out -match '-AcceptCollateral supplied') 'and the approval is announced after that list'
+    Assert-True ($script:ArchiveCalls.Count -gt 0) 'the run now proceeds past the pre-flight'
+
+    $rows = @($script:LastArchiveResults)
+    $warn = @($rows | Where-Object { $_.Operation -eq 'VariationWarning' })
+    Assert-Equal 1 $warn.Count 'the master is recorded in the results file'
+    Assert-Equal 'Accepted' $warn[0].Status 'as an authorisation rather than a failure'
+    Assert-Equal $MASTER $warn[0].ObjectID 'and it is the right master'
+
+    # The pre-flight is a warning, not the checkpoint. Whatever the archive pass
+    # actually drags along is still found and put back afterwards.
+    Assert-Equal $false $script:Archived[$MASTER] 'the master is still put back if the coupling fires'
+}
+finally { Pop-Location; Remove-Item $work2b -Recurse -Force -ErrorAction SilentlyContinue }
+
+# ---------------------------------------------------------------------------
 Write-Host "`nScenario: a master dragged into the archive is put back" -ForegroundColor Cyan
 # ---------------------------------------------------------------------------
 # The pre-flight is a name heuristic and its blind spot is measured: a master
