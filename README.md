@@ -1,6 +1,6 @@
 # Nintex Process Manager Bulk Operations
 
-**Version 4.11.** The version is defined once, in `$script:ScriptVersion` at the top of
+**Version 4.12.** The version is defined once, in `$script:ScriptVersion` at the top of
 `Nintex-BulkOperations.ps1`, and printed at startup.
 
 A PowerShell script for bulk operations on Nintex Process Manager (Promapp) processes
@@ -368,15 +368,17 @@ is dictated by measured API behaviour, not preference:
 1. **Gather** - resolve CSV, group or archived sources to process UniqueIds
 2. **Hold** - restore archived *targets*, so references held against them stop being
    suppressed from the dependency check
-3. **Plan** - discover claims, restore archived holders *in place*, re-run discovery
-   until the claim set is stable, scan for the API's blind spot, locate every site by
-   walking JSON, reconcile, and write the plan to disk
+3. **Plan** - discover claims, restore archived holders (*in place*, or into the
+   holding group where their own group is gone), re-run discovery until the claim set
+   is stable, scan for the API's blind spot, locate every site by walking JSON,
+   reconcile, and write the plan to disk
 4. **Remove** - one fetch, one save, one publish per *holding* process, carrying every
    target at once
 5. **Verify** - re-walk each holder while everything is still **active**, because
    archiving suppresses the very rows that would reveal a miss
 6. **Delete** - archive then delete the targets
-7. **Restore** - re-archive whatever the run restored, to its **original** group
+7. **Restore** - re-archive whatever the run restored, targets and dependency holders
+   alike, to its **original** group where that group still exists
 8. **Cleanup** - remove the holding group, optionally the source group folders
 
 The plan file (`Delete_Plan_<timestamp>.json`) is the crash-safety net. It is written
@@ -701,6 +703,17 @@ Known broken or incomplete as of this revision:
   behind. Re-run it once the tenant will restore it, or pass `-AllowUnheldTargets`
   to accept the risk explicitly. `-AcceptCollateral` does **not** cover this; it is a
   separate switch for a separate risk.
+- **A dependency holder that cannot be read anywhere still blocks the run.** An
+  archived holder whose own group is gone is put in the holding group and read
+  there, so this no longer fires on the ordinary orphan. It is left for the case
+  where the holding group refuses it too: there is then nowhere to read its
+  Input/Output edges, and a target it points at cannot be deleted on a complete
+  reading of the tenant.
+- **Archived dependency holders are only restored when a holding group exists,**
+  and one is created only when at least one target is archived. A run whose
+  targets are all active does not restore an archived holder at all and falls
+  back to the Input/Output blind-spot scan, which reads the two list sweeps and
+  so cannot cover a holder that neither sweep returns.
 - **Orphan detection depends on a field the tenant may not send.** It reads
   `groupExists` from the process listing. Where the listing omits it, every row
   falls back to "the group is there" and the run reports zero orphans because it
@@ -712,10 +725,11 @@ Known broken or incomplete as of this revision:
   be restored anywhere, because `RestoreProcess` needs a group id and answers HTTP 500
   for one that does not exist. The run names these targets before it starts, never
   attempts the doomed restore, archives them where they sit, and the results file names
-  the group they are actually in. A dependency *holder* in this state blocks the run
-  instead: its Input and Output references cannot be read while it is archived, and it
-  cannot be un-archived, so a target pointing at it cannot be deleted on a complete
-  reading of the tenant. Move it into a group that exists and re-run.
+  the group they are actually in. A dependency *holder* in this state is put in the
+  holding group instead, read there, and archived in place on the way out: it was
+  orphaned before the run started and is orphaned after, and that is the only place its
+  Input and Output references can be read. The plan log and its results row both name
+  the group it came from.
 - **Group moves are not reversed automatically.** When a run changes a process it was
   not asked to change, an unwanted archive or un-archive is undone, but a process that
   merely moved group while staying active is named for manual correction instead. The
@@ -747,7 +761,51 @@ For issues or questions:
 
 ## Version History
 
-**Version 4.11** (Current)
+**Version 4.12** (Current)
+- Fixed: **an archived dependency holder whose own group was deleted blocked the
+  whole run.** Its Input/Output references cannot be read until it is un-archived,
+  and it could not be un-archived because `RestoreProcess` needs a group that
+  exists, so the engine refused to plan and told the operator to go and move
+  processes by hand. Eleven such holders sat behind eleven of twenty targets on
+  the demo tenant, which meant no delete run there could complete. They are now
+  held in the holding group, read there, and archived in place on the way out,
+  which is exactly what the Hold phase already did for an orphaned *target*.
+  Parking one costs it nothing it had not already lost: its group was deleted
+  before the run started, so it is orphaned either way, and the plan log and the
+  results row both name the original group so the trail survives. If the holding
+  group refuses it too there is nowhere left to read it, and the old blocker is
+  still the right answer.
+- Fixed: **the run left every dependency holder it had un-archived active, and
+  reported none of them.** A measured run restored eleven holders for discovery,
+  was then blocked, re-archived its twenty targets and stopped: the tenant went
+  from 181 active / 464 archived to 192 / 454, and not one of the 45 results rows
+  mentioned any of the eleven. Two causes, both real and both now covered by
+  tests that fail without their fix:
+  - `New-ProcessDeletePlan` assigned `$plan.Ledger` only at the very end, so a
+    plan that returned early carried no ledger at all. Every early return is a
+    blocked plan, and a blocked plan is precisely when the caller is about to
+    unwind and most needs to know what was restored. The ledger is now published
+    at every return.
+  - the blocked path in Mode 5 then assigned a target-only snapshot **over** the
+    plan's ledger, erasing the holders from the run's own memory before the
+    unwind read it. It merges now: the snapshot still wins for the processes it
+    covers, and everything else is kept.
+- Added: `ReArchiveHolder`, so a dependency holder the run un-archived and put
+  back has its own operation in the results file. A holder is not a target and
+  is not collateral damage; filing all three under one name left no way to see
+  that a holder had been moved at all. Ledger entries now carry `Role` and
+  `ParkedInHoldingGroup` to support it.
+- Changed: **a process the run could not put back is named, not just counted.**
+  The manual-attention list printed only inside the collateral block, so a run
+  that stranded a process with no collateral to report said nothing beyond a
+  number on the `Failed` line. It is now its own section covering every failed
+  re-archive and every unreversed collateral change. The summary moved into
+  `Show-DeleteResultsSummary` so it can be tested without writing a file.
+- Tests: 680 across all suites. The two holder defects are covered end to end by
+  a Mode 5 run that blocks mid-plan, and each half of the ledger fix was
+  confirmed to fail the new assertions when reverted on its own.
+
+**Version 4.11**
 - Added: **`-AcceptCollateral`.** The collateral checkpoint and the variation
   pre-flight take a typed `YES` and nothing else, and `-Force` is deliberately not an
   answer to either. On a tenant whose targets belong to variation families that left

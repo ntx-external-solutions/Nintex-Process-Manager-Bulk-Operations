@@ -842,6 +842,11 @@ function Invoke-NpmApi {
         if ("$($Body.processGroupId)" -eq '1') {
             return [PSCustomObject]@{ Success=$false; StatusCode=500; Response=$null; Error='Internal Server Error' }
         }
+        # Lets a test refuse the holding group too, which is the one case where
+        # an orphaned holder has nowhere left to be read and blocking is right.
+        if ($script:OrphanRefuseHold -and "$($Body.processGroupId)" -eq "$TempGroupId") {
+            return [PSCustomObject]@{ Success=$false; StatusCode=500; Response=$null; Error='Internal Server Error' }
+        }
         $script:OrphanArchived = @($script:OrphanArchived | Where-Object { $_ -ne $id })
         $script:OrphanGroups[$id] = $Body.processGroupId
         return Ok ([PSCustomObject]@{ ok = $true })
@@ -853,6 +858,8 @@ function Invoke-NpmApi {
 
     return Ok $null
 }
+
+$script:OrphanRefuseHold = $false
 
 Reset-NpmRelocationProbe
 $oIndex = Get-NpmProcessIndex -SiteURL 'https://mock' -Token 't'
@@ -932,9 +939,15 @@ Assert-Equal 'Success' $homeRow.Status 'a process whose group still exists is un
 Assert-True ($homeRow.Message -match 'group 500') 'and is reported back in its own group'
 Assert-True ($script:OrphanArchived -contains $HolderId) 'and re-archived'
 
-# ---- A holder that cannot be restored blocks the run ------------------------
-# Its Input/Output edges stay hidden, so a target pointing at it cannot be
-# deleted on a complete reading of the tenant.
+# ---- A holder whose group is gone is HELD, not made into a blocker ----------
+# This used to stop the run dead: the holders were named and the operator was
+# told to move them by hand, so no delete could complete on a tenant that has
+# any. Eleven of them sat behind eleven of twenty targets on the demo tenant.
+#
+# The run already parks an orphaned TARGET in the holding group, reads it there
+# and archives it in place on the way out. A holder is the same problem, and
+# parking it costs nothing it had not already lost: its group was deleted before
+# this run started, so it is orphaned either way.
 $script:OrphanArchived = @($OrphanId)
 $script:OrphanGroups[$OrphanId] = 1
 $script:OrphanGroups[$LiveId] = 500
@@ -943,19 +956,53 @@ $script:OrphanDeps = @{ $LiveId = @"
 "@ }
 $script:OrphanCalls = @()
 
+$heldIndex = Get-NpmProcessIndex -SiteURL 'https://mock' -Token 't'
+$heldPlan = New-ProcessDeletePlan -SiteURL 'https://mock' -Token 't' `
+    -TargetUniqueIds @($LiveId) -Index $heldIndex -HoldingGroupId $TempGroupId -AllowRestore $true
+
+Assert-True ($heldPlan.Status -ne 'Blocked') 'a holder whose group is gone no longer blocks the run'
+Assert-Equal 0 @($heldPlan.OrphanedHolders).Count 'and is not reported as an orphan the operator must go and move'
+
+$heldRestores = @($script:OrphanCalls | Where-Object {
+    $_.Url -match 'RestoreProcess' -and "$($_.Body.processUniqueId)" -eq $OrphanId })
+Assert-Equal 1 $heldRestores.Count 'it is restored once'
+Assert-Equal "$TempGroupId" "$($heldRestores[0].Body.processGroupId)" `
+    'into the holding group, which is the only group it can be read in'
+
+$heldEntry = @($heldPlan.Ledger | Where-Object { $_.UniqueId -eq $OrphanId })[0]
+Assert-True ($null -ne $heldEntry) 'the ledger carries the holder'
+Assert-Equal $true $heldEntry.RestoredByThisRun 'and records that this run un-archived it'
+Assert-Equal $true $heldEntry.ParkedInHoldingGroup 'and that it was parked rather than sent home'
+Assert-Equal 'Holder' $heldEntry.Role 'and that it is a holder, not one of the run targets'
+Assert-Equal 1 $heldEntry.OriginalGroupId 'the dead group it came from is still on the record'
+Assert-Equal 1 @($heldPlan.Log | Where-Object { $_ -match 'Held .* in the holding group' }).Count `
+    'and the plan log says so, naming the group that is gone'
+
+# A target in the same plan is still marked as a target.
+$liveEntry = @($heldPlan.Ledger | Where-Object { $_.UniqueId -eq $LiveId })[0]
+Assert-Equal 'Target' $liveEntry.Role 'the run target is labelled as one'
+
+# ---- If it cannot even be held, the old blocker is still the right answer ---
+# The holding group was the fallback. With that refused there is nowhere left to
+# read the holder, so its Input/Output edges stay hidden and a target pointing at
+# it cannot be deleted on a complete reading.
+$script:OrphanArchived = @($OrphanId)
+$script:OrphanGroups[$OrphanId] = 1
+$script:OrphanGroups[$LiveId] = 500
+$script:OrphanCalls = @()
+$script:OrphanRefuseHold = $true
+
 $blockIndex = Get-NpmProcessIndex -SiteURL 'https://mock' -Token 't'
 $blockPlan = New-ProcessDeletePlan -SiteURL 'https://mock' -Token 't' `
     -TargetUniqueIds @($LiveId) -Index $blockIndex -HoldingGroupId $TempGroupId -AllowRestore $true
 
-Assert-Equal 'Blocked' $blockPlan.Status 'a holder whose group is gone blocks the run'
+Assert-Equal 'Blocked' $blockPlan.Status 'a holder that cannot be held anywhere still blocks the run'
 Assert-Equal 1 @($blockPlan.OrphanedHolders).Count 'and is named'
 Assert-Equal $OrphanId @($blockPlan.OrphanedHolders)[0].UniqueId 'by id'
-Assert-Equal 1 @($blockPlan.Log | Where-Object { $_ -match 'its group no longer exists' }).Count `
-    'with the cause given, rather than surfacing three floors down as a reconciliation mismatch'
+Assert-Equal 1 @($blockPlan.Log | Where-Object { $_ -match 'could not be held in the holding group' }).Count `
+    'with the cause given: the fallback was tried and refused'
 Assert-Equal 0 @($blockPlan.Reconciliation).Count 'the run stops before reconciliation, so there is no mismatch to misread'
-Assert-Equal 0 @($script:OrphanCalls | Where-Object {
-    $_.Url -match 'RestoreProcess' -and "$($_.Body.processUniqueId)" -eq $OrphanId }).Count `
-    'and the doomed restore is never attempted'
+$script:OrphanRefuseHold = $false
 
 # The narrow test again: the same shape with a holder whose group is fine plans normally.
 $script:OrphanArchived = @($HolderId)
