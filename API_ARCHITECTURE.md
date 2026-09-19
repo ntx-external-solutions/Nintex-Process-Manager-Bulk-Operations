@@ -567,9 +567,25 @@ curl 'https://demo.promapp.com/{tenantId}/Api/v1/Processes/{processUniqueId}' \
 
 **Query Parameters:** `searchBehavior=31`
 
-`searchBehavior` is a bitmask. Earlier revisions of this script used `15`; use `31`.
-The individual bit-to-type mapping has not been confirmed. Probe it per tenant if you
-ever need to filter by type at the API level rather than client-side.
+`searchBehavior` is a bitmask. **The script sends `31`. The Process Manager UI sends
+`15` for its own archive dependency check.**
+
+| Value | Sent by | Used for |
+|---|---|---|
+| `31` | this script, every dependency call | the delete path, where a missed reference blocks the delete |
+| `15` | the Process Manager UI | the check it runs before archiving a process |
+
+The script uses `31` because the delete path must not miss a reference: a narrower
+mask that omits a category the tenant does hold produces a removal plan that leaves
+the delete blocked, and the wider mask costs nothing but rows the client already
+filters. `15` is recorded here because it is what the UI actually sends, which means
+a difference between the UI's answer and ours on the same process is explained by the
+mask before it is explained by a defect.
+
+The `15` value was read out of the UI's own network traffic. It is not vendor
+documentation, and the individual bit-to-type mapping has not been confirmed for
+either value. Probe it per tenant if you ever need to filter by type at the API level
+rather than client-side.
 
 **Usage:**
 ```powershell
@@ -771,6 +787,71 @@ all three archived. So a failed archive is not evidence the process is still
 active, and neither list of things needing manual attention should be printed
 from what the calls said. Both are re-derived from a fresh read of the tenant at
 the moment the run ends.
+
+#### On an approvals-enabled tenant, HTTP 200 does not mean archived
+
+`ArchiveProcess` returns 200 and leaves the process in **Pending Archive Approval**
+rather than archived. The override is the same one the UI offers under the cog as
+"Archive now":
+
+```
+POST /Api/v1/Processes/{processUniqueId}/Publish
+{ "ProcessRevisionEditId": "<id>", "IsPublishNow": true }
+```
+
+Four things about it, all measured:
+
+- **The revision id must be re-read after the archive.** Archiving bumps the version
+  and creates a new revision, so the id read before the archive is stale. In the
+  measured run `10132` became `10133`.
+- **It is sent as a string**, not a number.
+- **A bearer token is sufficient.** No anti-forgery token and no cookie are required.
+- **Whether the override is needed is read, not declared.** `GET /Api/v1/Processes/{id}`
+  answers for the process both while it is pending and after it is archived, and its
+  `isArchived` field is the signal. An operator switch predicting what the tenant will
+  do is wrong in both directions: forget it and everything sits pending, pass it on a
+  tenant that archives outright and every process pays for a needless publish.
+
+Measured trace, bearer token, no CSRF token:
+
+```
+restore                  Ver=2.1   ProcessRevisionEditId=10132
+POST ArchiveProcess  200 Ver=2.2   ProcessRevisionEditId=10133   still active, pending
+POST .../Publish     200 {"actionUrl": ...}                      isArchived=true
+```
+
+The UI also surfaces the pending state as a process warning whose text mentions
+approval and publishing. That field is not relied on here and has not been
+re-verified; `isArchived` is the reliable signal.
+
+### Archive can be refused by the tenant, with HTTP 400
+
+A 400 from `ArchiveProcess` is usually not a property of the request. It is a
+property of the **process data**, and the same process fails the same way in the UI.
+
+The mechanism is the same in every case seen so far: **archiving bumps the version,
+the version bump revalidates the process, and anything the process references that
+is no longer valid surfaces as a 400 at archive time.**
+
+Two causes confirmed on the demo tenant, and the list is not closed:
+
+| Cause | How it was confirmed |
+|---|---|
+| A linked document that had already been deleted | server logs; cleared manually, after which the process archived |
+| An owner or expert who is a disabled user | a second process, 2026-09-18 |
+
+Consequences for anything built on this endpoint:
+
+- **Do not retry a 4xx.** It is deterministic. Retrying it only burns the rate budget.
+- **Do not classify the reason.** Two causes are known and there will be more. The
+  reason the operator needs is the one the server sent, which lives in the response
+  **body**, not in `$_.Exception.Message`. On a 400 that message is the generic
+  `Response status code does not indicate success: 400 (Bad Request).`; PowerShell 7
+  puts the body in `$_.ErrorDetails.Message`.
+- **Do not stop the batch.** A refusal is one process, not a run.
+- **`processActions.CanArchive` does not predict it.** It was sampled across the test
+  set and read `False` for every process, including ones that archived without
+  complaint. Gating on it would block the whole run.
 
 `RestoreProcess` is the only endpoint here that takes a group id. Its documented
 job is un-archiving, and whether it also relocates a process that is already

@@ -4,6 +4,13 @@ config.txt
 # Results files
 *_Results_*.csv
 
+# Archive previews and the manual review companion. Every -WhatIf run writes a
+# preview and every run with a refused process writes a review list, both into
+# the working directory, so without these the repository is dirty after a run.
+# They carry tenant process names and ids; keep them out of version control.
+Archive_Preview_*.csv
+Archive_ManualReview_*.csv
+
 # Delete plan ledgers. Written to the working directory by every Mode 5 run,
 # including dry runs, so without this every run leaves the repository dirty.
 # They can carry tenant process names and ids; keep them out of version control.

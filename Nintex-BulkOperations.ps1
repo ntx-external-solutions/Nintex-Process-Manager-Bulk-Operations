@@ -91,13 +91,21 @@ param(
 
     [switch]$WhatIf,
     [switch]$Force,
-    [switch]$ApprovalsEnabled,
+
+    # Permission to bypass a pending archive approval, not a claim about the
+    # tenant. Whether the bypass is needed is read from the process after the
+    # archive, so this defaults on: an operator asking for a bulk archive is
+    # asking for the processes to end up archived, and the UI offers the same
+    # override under the cog as "Archive now". Withhold it with
+    # -ApprovalsEnabled:$false and anything left pending is reported as Pending.
+    [switch]$ApprovalsEnabled = $true,
+
     [switch]$ThoroughScan,
     [switch]$IncludeSubgroups,
     [switch]$AllowUnheldTargets
 )
 
-$script:ScriptVersion = '4.9'
+$script:ScriptVersion = '4.10'
 
 # ----------------------------------------------------------------------------
 # Dependency engine. Mode 5 delegates all dependency discovery, reference
@@ -1532,9 +1540,12 @@ function Invoke-BulkArchiveProcesses {
 
         WHY ARCHIVE NEEDS PROTECTION AT ALL, given that it is reversible:
 
-        Archiving a variation also archives its master, established over rounds
-        2 to 4 and invisible in every field the API returns. The master may live
-        in a group nobody named. Once archived it is an ordinary member of the
+        Archiving a variation CAN also archive its master, observed over rounds
+        2 to 4 and invisible in every field the API returns. Round 9 then
+        measured a master staying active, so the coupling fires sometimes rather
+        than always; under-claiming a risk that sometimes fires is worse than
+        over-claiming one, so the guard stays exactly as strict. The master may
+        live in a group nobody named. Once archived it is an ordinary member of the
         archive list, and Mode 5 takes its targets from the archive list. So an
         unprotected archive of one group can put a master from another group in
         front of a delete run, with every step looking correct in isolation and
@@ -1561,7 +1572,10 @@ function Invoke-BulkArchiveProcesses {
         [switch]$IncludeSubgroups,
         [switch]$WhatIf,
         [switch]$Force,
-        [switch]$ApprovalsEnabled
+
+        # Permission to override a pending archive approval. See the script
+        # parameter of the same name.
+        [switch]$ApprovalsEnabled = $true
     )
 
     Write-Host "`n========================================" -ForegroundColor Cyan
@@ -1569,7 +1583,7 @@ function Invoke-BulkArchiveProcesses {
     Write-Host "========================================" -ForegroundColor Cyan
     if ($WhatIf) { Write-Host "*** PREVIEW MODE: nothing will be changed ***" -ForegroundColor Yellow }
     Write-Host "  Change description: $ChangeDescription" -ForegroundColor Gray
-    Write-Host "  Approvals enabled : $([bool]$ApprovalsEnabled)" -ForegroundColor Gray
+    Write-Host "  Approval override : $(if ($ApprovalsEnabled) { 'permitted' } else { 'withheld' })" -ForegroundColor Gray
 
     $results = @()
     $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
@@ -1650,7 +1664,7 @@ function Invoke-BulkArchiveProcesses {
     $variationMatches = @(Find-VariationMaster -Index $index -TargetUniqueIds $targetUniqueIds)
     if ($variationMatches.Count -gt 0) {
         Show-VariationWarning -Matches $variationMatches
-        Write-Host "`nArchiving these targets is expected to archive those masters too," -ForegroundColor Red
+        Write-Host "`nArchiving these targets can archive those masters too," -ForegroundColor Red
         Write-Host "which puts them in the archive list, where a later delete run takes" -ForegroundColor Red
         Write-Host "its targets from." -ForegroundColor Red
 
@@ -1706,14 +1720,35 @@ function Invoke-BulkArchiveProcesses {
         Write-NpmProgress -Activity 'Bulk archive' -Status 'Archiving' -Done $done -Total $targets.Count -Id 1
 
         $touched += $target.UniqueId
-        $ok = Set-NpmProcessArchived -SiteURL $SiteURL -Token $Token `
+        $outcome = Set-NpmProcessArchived -SiteURL $SiteURL -Token $Token `
             -ProcessUniqueId $target.UniqueId -Comment $ChangeDescription `
             -ApprovalsEnabled ([bool]$ApprovalsEnabled)
 
+        # .Success, never the object. A PSCustomObject is always truthy, so
+        # `if ($outcome)` would read every refusal as an archive.
+        $status = switch ($outcome.Outcome) {
+            'Archived'        { 'Success' }
+            'Overridden'      { 'Overridden' }
+            'PendingApproval' { 'Pending' }
+            'Refused'         { 'Blocked' }
+            default           { 'Failed' }
+        }
+
+        $message = $outcome.Message
+        if ($outcome.Success) { $message = "$message from group $($target.GroupId)" }
+
         $results += New-ProcessResultRow -UniqueId $target.UniqueId -NameLookup $index `
-            -Operation 'Archive' -Status $(if ($ok) { 'Success' } else { 'Failed' }) `
-            -Message $(if ($ok) { "Archive requested from group $($target.GroupId)" }
-                       else { 'Archive call failed' })
+            -Operation 'Archive' -Status $status -Message $message `
+            -GroupId $target.GroupId -StatusCode $outcome.StatusCode
+
+        # A refusal is data, not an exception. The loop carries on: a tenant
+        # where a fifth of the group has a stale document link must still
+        # archive the rest in one run.
+        if ($status -eq 'Blocked') {
+            Write-Host ""
+            Write-Host "  BLOCKED  $(Resolve-CollateralName -NameLookup $index -UniqueId $target.UniqueId)" -ForegroundColor Yellow
+            Write-Host "           $message" -ForegroundColor DarkGray
+        }
     }
     Complete-NpmProgress -Activity 'Bulk archive' -Id 1
     Write-Host "`r    Archived $done of $($targets.Count).                    " -ForegroundColor Gray
@@ -1724,21 +1759,47 @@ function Invoke-BulkArchiveProcesses {
 
     $verified = @()
     foreach ($row in $results) {
-        if ($row.Operation -ne 'Archive' -or $row.Status -ne 'Success') { $verified += $row; continue }
+        if ($row.Operation -ne 'Archive' -or $row.Status -notin @('Success', 'Overridden')) { $verified += $row; continue }
 
         $now = Get-NpmIndexEntry -Index $after -UniqueId $row.ObjectID
         if ($null -ne $now -and $now.IsArchived) { $verified += $row; continue }
 
-        # The call said yes and the tenant disagrees. The tenant wins.
+        # The call said yes and the tenant disagrees. The tenant wins, but the
+        # two ways it can disagree are not the same thing. Still active is a
+        # real failure. In neither listing is the listing being incomplete,
+        # which this tenant does routinely; API_ARCHITECTURE.md already records
+        # that neither sweep is complete. Calling that Failed sends an operator
+        # after a process that is very likely archived.
+        if ($null -eq $now) {
+            $verified += New-ProcessResultRow -UniqueId $row.ObjectID -NameLookup $index `
+                -Name $row.Name -Operation 'Archive' -Status 'Unverified' -GroupId $row.GroupId `
+                -Message 'Archive was accepted but neither listing returns the process, so its state could not be confirmed from a re-read'
+            continue
+        }
+
         $verified += New-ProcessResultRow -UniqueId $row.ObjectID -NameLookup $index `
-            -Name $row.Name -Operation 'Archive' -Status 'Failed' `
-            -Message $(if ($null -eq $now) { 'Archive reported success but the process is in neither list afterwards' }
-                       else { 'Archive reported success but the process is still active' })
+            -Name $row.Name -Operation 'Archive' -Status 'Failed' -GroupId $row.GroupId `
+            -Message 'Archive reported success but the process is still active'
     }
     $results = $verified
 
-    $stillActive = @($results | Where-Object { $_.Operation -eq 'Archive' -and $_.Status -eq 'Failed' })
-    Write-Host "  $(@($results | Where-Object { $_.Operation -eq 'Archive' -and $_.Status -eq 'Success' }).Count) confirmed archived, $($stillActive.Count) not." -ForegroundColor $(if ($stillActive.Count -gt 0) { 'Yellow' } else { 'Green' })
+    $archiveRows = @($results | Where-Object { $_.Operation -eq 'Archive' })
+    $confirmed = @($archiveRows | Where-Object { $_.Status -in @('Success', 'Overridden') }).Count
+    $stillActive = @($archiveRows | Where-Object { $_.Status -eq 'Failed' })
+    $unverified = @($archiveRows | Where-Object { $_.Status -eq 'Unverified' })
+    $blockedRows = @($archiveRows | Where-Object { $_.Status -eq 'Blocked' })
+    $pendingRows = @($archiveRows | Where-Object { $_.Status -eq 'Pending' })
+
+    Write-Host "  $confirmed confirmed archived, $($stillActive.Count) not." -ForegroundColor $(if ($stillActive.Count -gt 0) { 'Yellow' } else { 'Green' })
+    if ($unverified.Count -gt 0) {
+        Write-Host "  $($unverified.Count) accepted but in neither listing, so unconfirmed." -ForegroundColor Yellow
+    }
+    if ($pendingRows.Count -gt 0) {
+        Write-Host "  $($pendingRows.Count) awaiting approval." -ForegroundColor Yellow
+    }
+    if ($blockedRows.Count -gt 0) {
+        Write-Host "  $($blockedRows.Count) refused by the tenant; see the manual review list below." -ForegroundColor Yellow
+    }
 
     # ---- Collateral: what else moved ------------------------------------------
     Write-Host "`n=== CHECKING FOR COLLATERAL CHANGES ===" -ForegroundColor Cyan
@@ -1763,10 +1824,28 @@ function Invoke-BulkArchiveProcesses {
     Save-ArchiveResults -Results $results -Timestamp $timestamp
 }
 
+# The results vocabulary for Mode 1, in the order the summary prints it.
+#
+#   Success     archived, confirmed by the re-read
+#   Overridden  archived after the pending-approval override ran
+#   Preview     -WhatIf only; nothing was changed
+#   Skipped     already archived, or nothing to do
+#   Pending     the archive was accepted and is awaiting approval; the override
+#               did not run or was not permitted
+#   Unverified  the archive was accepted and neither listing returns the
+#               process, so its state could not be confirmed from a re-read
+#   Blocked     the tenant refused with a 4xx. Not Failed: the script is
+#               working and a human has to fix the process
+#   Failed      anything else, including 5xx, transport failures, and a
+#               re-read that says the process is still active
+$script:ArchiveResultStatuses = @(
+    'Success', 'Overridden', 'Preview', 'Skipped', 'Pending', 'Unverified', 'Blocked', 'Failed'
+)
+
 function Save-ArchiveResults {
     param($Results, [string]$Timestamp, [switch]$WhatIf)
 
-    $rows = @($Results)
+    $rows = @(ConvertTo-NpmResultRow -Rows $Results)
     $path = if ($WhatIf) { "Archive_Preview_$Timestamp.csv" } else { "Archive_Results_$Timestamp.csv" }
     $rows | Export-Csv -Path $path -NoTypeInformation
     $script:LastArchiveResults = $rows
@@ -1774,12 +1853,42 @@ function Save-ArchiveResults {
     Write-Host ""
     Write-Host "Results saved to: $path" -ForegroundColor Green
     Write-Host "  Total rows : $($rows.Count)" -ForegroundColor Cyan
-    foreach ($status in @('Success', 'Preview', 'Skipped', 'Failed')) {
+    foreach ($status in $script:ArchiveResultStatuses) {
         $n = @($rows | Where-Object { $_.Status -eq $status }).Count
         if ($n -gt 0) {
-            Write-Host "  $status".PadRight(13) -NoNewline -ForegroundColor Gray
-            Write-Host ": $n" -ForegroundColor $(if ($status -eq 'Failed') { 'Red' } else { 'Gray' })
+            $colour = switch ($status) {
+                'Failed'  { 'Red' }
+                'Blocked' { 'Yellow' }
+                'Pending' { 'Yellow' }
+                default   { 'Gray' }
+            }
+            Write-Host "  $status".PadRight(14) -NoNewline -ForegroundColor Gray
+            Write-Host ": $n" -ForegroundColor $colour
         }
+    }
+
+    # Any status the vocabulary does not name would otherwise be written to the
+    # CSV and counted nowhere, which is how Pending and Blocked were invisible
+    # before they were added to the list above.
+    $uncounted = @($rows | Where-Object { $_.Status -and $script:ArchiveResultStatuses -notcontains $_.Status })
+    foreach ($group in ($uncounted | Group-Object Status)) {
+        Write-Host "  $($group.Name)".PadRight(14) -NoNewline -ForegroundColor Gray
+        Write-Host ": $($group.Count)" -ForegroundColor Magenta
+    }
+
+    $blocked = @($rows | Where-Object { $_.Status -eq 'Blocked' })
+    $reviewPath = ''
+    if ($blocked.Count -gt 0 -and -not $WhatIf) {
+        # A separate file because this list is handed to a tenant administrator,
+        # and filtering a 500-row results file by hand is not the job.
+        $reviewPath = "Archive_ManualReview_$Timestamp.csv"
+        $blocked | Select-Object `
+            @{ Name = 'ObjectID';   Expression = { $_.ObjectID } },
+            @{ Name = 'Name';       Expression = { $_.Name } },
+            @{ Name = 'GroupId';    Expression = { $_.GroupId } },
+            @{ Name = 'StatusCode'; Expression = { $_.StatusCode } },
+            @{ Name = 'Reason';     Expression = { $_.Message } } |
+            Export-Csv -Path $reviewPath -NoTypeInformation
     }
 
     $unreversed = @($rows | Where-Object { $_.Operation -eq 'ReverseCollateral' -and $_.Status -ne 'Success' })
@@ -1790,6 +1899,58 @@ function Save-ArchiveResults {
             Write-Host "  $($u.Name)  ($($u.ObjectID))" -ForegroundColor Red
             Write-Host "      $($u.Message)" -ForegroundColor DarkGray
         }
+    }
+
+    # Last, so it is what is still on screen when the run ends: this is the only
+    # block that names work an operator has to take somewhere else.
+    Show-ManualReviewBlock -Blocked $blocked -Path $reviewPath
+}
+
+function Show-ManualReviewBlock {
+    <#
+    .SYNOPSIS
+        Names every process the tenant refused, and why it said no.
+
+    .DESCRIPTION
+        Two causes are confirmed on the demo tenant and the list is not closed,
+        so nothing here classifies or repairs anything. The server's own words
+        go in the row and the operator takes it from there.
+    #>
+    param($Blocked, [string]$Path = '')
+
+    $rows = @($Blocked)
+    if ($rows.Count -eq 0) { return }
+
+    Write-Host ""
+    Write-Host "=== NEEDS MANUAL REVIEW: $($rows.Count) PROCESS(ES) ===" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "The tenant refused to archive these. The script is not at fault and the UI will" -ForegroundColor Gray
+    Write-Host "refuse them the same way. Each one has to be fixed in Process Manager and then" -ForegroundColor Gray
+    Write-Host "re-run." -ForegroundColor Gray
+    Write-Host ""
+
+    foreach ($row in $rows) {
+        Write-Host "  $($row.Name)" -ForegroundColor Yellow
+        $where = "($($row.ObjectID))"
+        if ($row.GroupId) { $where = "$where  group $($row.GroupId)" }
+        Write-Host "      $where" -ForegroundColor DarkGray
+        Write-Host "      $($row.Message)" -ForegroundColor DarkGray
+        Write-Host ""
+    }
+
+    Write-Host ""
+    Write-Host "Known causes so far, both confirmed on the demo tenant:" -ForegroundColor Gray
+    Write-Host "  - a linked document that has already been deleted" -ForegroundColor Gray
+    Write-Host "  - an owner or expert who is a disabled user" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "In both cases archiving bumps the version, the version bump revalidates the" -ForegroundColor Gray
+    Write-Host "process, and anything it references that is no longer valid is refused here." -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "Re-run the archive for these once they are fixed. Everything else in this run" -ForegroundColor Gray
+    Write-Host "completed." -ForegroundColor Gray
+    if ($Path) {
+        Write-Host ""
+        Write-Host "  Manual review list: $Path" -ForegroundColor Green
     }
 }
 
@@ -2925,9 +3086,14 @@ function New-ProcessResultRow {
         [string]$Message,
         $NameLookup = $null,
         [string]$Name = '',
-        [string]$ObjectType = 'Process'
+        [string]$ObjectType = 'Process',
+        $GroupId = '',
+        [int]$StatusCode = 0
     )
 
+    # GroupId and StatusCode exist so the manual review companion can be built
+    # from the rows themselves rather than by parsing Message back apart. Both
+    # are blank where they do not apply, which is most rows.
     return [PSCustomObject]@{
         ObjectType = $ObjectType
         ObjectID   = $UniqueId
@@ -2935,7 +3101,34 @@ function New-ProcessResultRow {
         Operation  = $Operation
         Status     = $Status
         Message    = $Message
+        GroupId    = $(if ($null -ne $GroupId) { [string]$GroupId } else { '' })
+        StatusCode = $(if ($StatusCode -gt 0) { [string]$StatusCode } else { '' })
     }
+}
+
+# Every column any results row can carry. Export-Csv takes its header from the
+# first object it is given, so a run whose first row came from the dependency
+# engine (which builds rows by hand) would otherwise silently drop the columns
+# only New-ProcessResultRow sets. Normalising first makes the file's shape a
+# property of the file rather than of whichever row happened to be written first.
+$script:ProcessResultColumns = @(
+    'ObjectType', 'ObjectID', 'Name', 'Operation', 'Status', 'Message', 'GroupId', 'StatusCode'
+)
+
+function ConvertTo-NpmResultRow {
+    param($Rows)
+
+    $out = @()
+    foreach ($row in @($Rows)) {
+        $normalised = [ordered]@{}
+        foreach ($column in $script:ProcessResultColumns) {
+            $value = ''
+            if ($null -ne $row -and $row.PSObject.Properties[$column]) { $value = $row.$column }
+            $normalised[$column] = $value
+        }
+        $out += [PSCustomObject]$normalised
+    }
+    return $out
 }
 
 function Remove-HoldingGroup {
@@ -3072,7 +3265,14 @@ function Invoke-BulkDeleteProcesses {
         [string]$CurrentUsername,
         [switch]$WhatIf,
         [switch]$Force,
-        [switch]$ApprovalsEnabled,
+
+        # Same meaning as in Mode 1: permission to override a pending archive
+        # approval, read back from the process rather than declared. Mode 5's
+        # reference-removal saves also read this switch, where it still selects
+        # the approval-bypass publish for the edited process; flipping the
+        # default on therefore changes that path too.
+        [switch]$ApprovalsEnabled = $true,
+
         [switch]$ThoroughScan,
         [switch]$IncludeSubgroups,
         [switch]$AllowUnheldTargets
@@ -3239,8 +3439,8 @@ function Invoke-BulkDeleteProcesses {
     $snapshot = New-ProcessStateSnapshot -Index $index -UniqueIds $targetUniqueIds -GroupUniqueIdMap $groupUniqueIdMap
 
     # The whole tenant, not just the targets. A process variation is stored as
-    # its own record and acting on one acts on its master, with nothing in the
-    # model or the list entry to warn you. Comparing the tenant before and after
+    # its own record and acting on one can act on its master, with nothing in
+    # the model or the list entry to warn you. Comparing the tenant before and after
     # each mutating phase is the only way to see it happen.
     $tenantBaseline = New-TenantStateSnapshot -Index $index
     Write-Host "  Baseline covers the $($tenantBaseline.Count) process(es) the active and archived" -ForegroundColor Gray
@@ -4108,9 +4308,13 @@ function Invoke-BulkOperationMode {
             if (-not $changeDescription) { $changeDescription = 'Bulk archive operation' }
 
             $archiveSwitches = @{}
-            if ($script:CliOptions.Force)            { $archiveSwitches.Force = $true }
-            if ($script:CliOptions.ApprovalsEnabled) { $archiveSwitches.ApprovalsEnabled = $true }
-            if ($isDryRun)                           { $archiveSwitches.WhatIf = $true }
+            if ($script:CliOptions.Force) { $archiveSwitches.Force = $true }
+            if ($isDryRun)                { $archiveSwitches.WhatIf = $true }
+
+            # Passed unconditionally, because this switch now defaults on: only
+            # setting it when it is true would make -ApprovalsEnabled:$false
+            # impossible to express.
+            $archiveSwitches.ApprovalsEnabled = [bool]$script:CliOptions.ApprovalsEnabled
 
             if ($sourceType -eq "CSV") {
                 $csvPath = Resolve-CsvPath
@@ -4204,8 +4408,8 @@ function Invoke-BulkOperationMode {
             # Invoke-BulkDeleteProcesses prompts exactly as it always did.
             $deleteSwitches = @{}
             if ($script:CliOptions.Force)            { $deleteSwitches.Force = $true }
-            if ($script:CliOptions.ApprovalsEnabled) { $deleteSwitches.ApprovalsEnabled = $true }
             if ($script:CliOptions.ThoroughScan)     { $deleteSwitches.ThoroughScan = $true }
+            $deleteSwitches.ApprovalsEnabled = [bool]$script:CliOptions.ApprovalsEnabled
             if ($script:CliOptions.IncludeSubgroups) { $deleteSwitches.IncludeSubgroups = $true }
             if ($script:CliOptions.AllowUnheldTargets) { $deleteSwitches.AllowUnheldTargets = $true }
 
@@ -4267,7 +4471,7 @@ function Start-BulkOperations {
         [string]$ConfigPath = 'config.txt',
         [switch]$WhatIf,
         [switch]$Force,
-        [switch]$ApprovalsEnabled,
+        [switch]$ApprovalsEnabled = $true,
         [switch]$ThoroughScan,
         [switch]$IncludeSubgroups,
         [switch]$AllowUnheldTargets
