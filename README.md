@@ -1,6 +1,6 @@
 # Nintex Process Manager Bulk Operations
 
-**Version 4.5.** The version is defined once, in `$script:ScriptVersion` at the top of
+**Version 4.11.** The version is defined once, in `$script:ScriptVersion` at the top of
 `Nintex-BulkOperations.ps1`, and printed at startup.
 
 A PowerShell script for bulk operations on Nintex Process Manager (Promapp) processes
@@ -171,6 +171,7 @@ This is what makes the script scriptable and schedulable; the menu path is uncha
 | `-ThoroughScan` | Mode 5: read every active process for Input/Output references |
 | `-IncludeSubgroups` | Include subgroups for `-Source Group` |
 | `-AllowUnheldTargets` | Mode 5, dangerous: delete a target that could not be restored out of the archive, and whose references were therefore never checked |
+| `-AcceptCollateral` | Approve the collateral checkpoint and the variation pre-flight, and nothing else. Off by default |
 
 `-ApprovalsEnabled` changed meaning in R10. It used to be a claim about the tenant,
 and the script fired the approval bypass wherever the operator said approvals were on.
@@ -190,6 +191,37 @@ verification, an unresolved participant, a collateral change, or a variation
 pre-flight warning. Those still stop the
 run, because they mean the plan does not match the tenant, and that is precisely when
 nobody should be deleting anything unattended.
+
+### `-AcceptCollateral`
+
+The collateral checkpoint and the variation pre-flight take a typed `YES` and nothing
+else, and `-Force` is deliberately not an answer to either: "assume yes to everything,
+including a risk nobody has looked at" is the wrong reply to a run that has just proved
+it affects processes nobody listed.
+
+On a tenant whose targets belong to variation families, though, that left no way to run
+Mode 5 unattended at all. Every scheduled, CI or agent run stopped at the gate and
+unwound, whatever the operator already knew about the affected processes. That is not a
+safety property, it is an availability floor of zero.
+
+`-AcceptCollateral` is the third answer, and it says something `-Force` does not: the
+operator reviewed the affected processes out of band and accepts them.
+
+- It approves **those two gates only**. A reconciliation mismatch, a failed
+  verification, an unresolved participant and a target that could not be held all still
+  stop a `-Force` run exactly as before; the last of those has `-AllowUnheldTargets`.
+- `-Force` on its own still stops at both gates, and neither switch implies the other.
+- The run prints the full list of affected processes **before** it acts on the
+  approval.
+- Every approved process gets a results row with `Status = Accepted` rather than
+  `Failed`, so the file records an authorisation rather than a fault, and the run's
+  failure count stays a count of things that went wrong.
+- Approval is permission to carry on, not a request to leave the tenant changed. The
+  unwind still runs: an approved collateral change is still reversed where it can be,
+  and reported where it cannot.
+
+Mode 1 takes the switch too, for its variation pre-flight. Mode 1's collateral is
+reported and reversed rather than gated, so there is nothing else there to approve.
 
 Exit codes: `0` success, `1` the mode failed, `2` bad configuration, `3` authentication
 failed.
@@ -451,7 +483,15 @@ The script accepts various column naming conventions:
 
 **For IDs:**
 - `ProcessID`, `ProcessId`, `Process ID`, `ProcessUniqueId`, `Id`, `ID`
+- `ObjectID`, `ObjectId`, `Object ID`
 - `DocumentID`, `DocumentId` (for documents)
+
+`ObjectID` is on that list because it is the column every results file this script
+**writes** uses. Without it the obvious next move after a partly failed run, take the
+failures out of `Delete_Results_<timestamp>.csv` and feed them back in, read zero ids
+and reported `No processes to delete`, which is also what a genuinely empty file
+reports. A CSV that parses but yields no ids now says so, names the columns the file
+actually has, and lists the ones it would have accepted.
 
 **For Group IDs:**
 - `NewGroupID`, `NewGroupId`, `TargetGroupID`, `TargetGroupId`, `GroupID`, `GroupId`
@@ -612,9 +652,12 @@ temporary group was left behind.
 
 So the shape to expect is: the cheap check misses something, the expensive check
 catches it, and the run stops with the affected processes named. Read what it
-names, decide whether those processes should be in the target set, and re-run.
-The one thing not to do is reach for a flag to push past it; `-Force` deliberately
-cannot.
+names, and decide whether those processes should be in the target set.
+
+There are then two honest ways on: add them to the target set and re-run, or, having
+reviewed them and decided they are acceptable, re-run with `-AcceptCollateral`. What
+not to do is reach for `-Force`, which deliberately cannot answer this and will stop
+again in the same place.
 
 ## Limitations
 
@@ -656,7 +699,8 @@ Known broken or incomplete as of this revision:
 - **A target that cannot be restored out of the archive is not deleted.** Its
   references were never checked, so deleting it risks leaving a dangling reference
   behind. Re-run it once the tenant will restore it, or pass `-AllowUnheldTargets`
-  to accept the risk explicitly.
+  to accept the risk explicitly. `-AcceptCollateral` does **not** cover this; it is a
+  separate switch for a separate risk.
 - **Orphan detection depends on a field the tenant may not send.** It reads
   `groupExists` from the process listing. Where the listing omits it, every row
   falls back to "the group is there" and the run reports zero orphans because it
@@ -703,7 +747,59 @@ For issues or questions:
 
 ## Version History
 
-**Version 4.10** (Current)
+**Version 4.11** (Current)
+- Added: **`-AcceptCollateral`.** The collateral checkpoint and the variation
+  pre-flight take a typed `YES` and nothing else, and `-Force` is deliberately not an
+  answer to either. On a tenant whose targets belong to variation families that left
+  no way to complete Mode 5 unattended at all: every scheduled or agent run stopped at
+  the gate and unwound, which is an availability floor of zero rather than a safety
+  property. The new switch is the third answer, separate from `-Force` and off by
+  default: the operator reviewed the affected processes out of band and accepts them.
+  It approves those two gates and nothing else, prints the full list before acting on
+  the approval, and records each approved process as `Accepted` rather than `Failed`.
+  It does not imply, and is not implied by, `-Force` or `-AllowUnheldTargets`. Mode 1
+  takes it for its variation pre-flight; Mode 1's collateral is reversed rather than
+  gated, so there is nothing else there to approve.
+- Changed: **approval is permission to carry on, not a request to leave the tenant
+  changed.** A run that gets past a gate now unwinds as far as one that refused:
+  collateral nothing else reversed is put back at the end. Every exit from Mode 5 used
+  to spell its own ending out again, ten copies of it, and none of them reversed
+  collateral that had got past a gate, because until this switch nothing could.
+- Fixed: **`GroupId` and `StatusCode` were columns no Mode 5 call site filled.** Both
+  were added to `New-ProcessResultRow` in 4.10 and then passed by nothing, so across a
+  45-row validation run both were empty and the data was going into `Message` prose
+  instead, which is exactly what the columns were added to avoid. Every Mode 5 row that
+  knows either now carries it: `ReArchive` names the group the process actually landed
+  in, `Collateral` and `ReverseCollateral` name the group the process is in when the
+  row is written, and rows built off a failed API call carry its HTTP status.
+  `Delete_Results_*.csv` is also normalised before it is written, the way
+  `Archive_Results_*.csv` already was: `Export-Csv` takes its header from the first
+  row, so which columns the file had depended on which of Mode 5's producers happened
+  to write first.
+  `Restore-NpmProcess` and `Remove-NpmProcess` answered `$true`/`$false` and threw the
+  status code away; it is kept now so a `Hold` or `Delete` failure can report it.
+- Fixed: **the results file could not be fed back into the script.**
+  `Get-IdFromCsvRow` accepted `ProcessID`, `ProcessUniqueId`, `Id` and others, but not
+  `ObjectID`, which is the column every results file it writes uses. Taking the
+  failures out of a results file and re-running them silently produced
+  `No processes to delete`, the same line an empty file produces. `ObjectID`,
+  `ObjectId` and `Object ID` are now accepted, a header that exists but is blank on a
+  row no longer swallows the lookup, and a CSV that parses but yields no ids says how
+  many rows it read, which columns the file has and which ones would have been
+  accepted.
+- Changed: a process raised at one collateral checkpoint is no longer raised again at
+  every later one. The post-delete checkpoint always applied that rule; the pre-delete
+  checkpoint did not, and the Hold-phase checkpoint's findings never reached the plan
+  the later ones read it off. It only showed once a gate could be approved rather than
+  only refused: the same process was put to the operator at every checkpoint after the
+  one they had already answered.
+- Tests: 44 new assertions in the Mode 5 suite covering the switch at both gates,
+  `-Force` alone still stopping, the list being printed before the approval is acted
+  on, the unwind still running after an approval, `ReArchive` rows carrying a group,
+  and both halves of the CSV fix; 7 more in the Mode 1 suite. Total across all suites:
+  633.
+
+**Version 4.10**
 - Fixed: **Mode 1 could not tell the operator what happened.** Three different
   outcomes all collapsed into `Failed`: the process archived, the archive landed
   in Pending Archive Approval, and the tenant refused the archive outright for a

@@ -41,7 +41,29 @@
     Answer the confirmation prompts affirmatively and run unattended. It does NOT
     wave through a reconciliation mismatch or a failed verification in Mode 5:
     those still stop the run, because they mean the plan does not match the
-    tenant. It does not imply -AllowUnheldTargets either.
+    tenant. It does not imply -AllowUnheldTargets or -AcceptCollateral either.
+
+.PARAMETER AcceptCollateral
+    Approve the collateral checkpoint and the variation pre-flight, and nothing
+    else. Off by default.
+
+    Those two gates take a typed YES and nothing else, which -Force deliberately
+    cannot supply: "assume yes to everything, including a risk nobody has looked
+    at" is the wrong answer to a run that has just proved it affects processes
+    nobody listed. But on a tenant whose targets belong to variation families,
+    that leaves no way to complete Mode 5 unattended at all: a scheduled run
+    always stops and unwinds, whatever the operator already knows.
+
+    This is the third answer, and it says something different from -Force: the
+    operator reviewed the affected processes out of band and accepts them. The
+    run still prints the full list before it continues, and every approved
+    process gets a results row with Status 'Accepted', so the file records an
+    authorisation rather than a fault.
+
+    It does NOT weaken anything else. A reconciliation mismatch, a failed
+    verification, an unresolved participant and a target that could not be held
+    all still stop a -Force run exactly as before; the last of those has its own
+    switch.
 
 .PARAMETER AllowUnheldTargets
     Mode 5 only, and dangerous. Delete a target even though it could not be
@@ -102,10 +124,11 @@ param(
 
     [switch]$ThoroughScan,
     [switch]$IncludeSubgroups,
-    [switch]$AllowUnheldTargets
+    [switch]$AllowUnheldTargets,
+    [switch]$AcceptCollateral
 )
 
-$script:ScriptVersion = '4.10'
+$script:ScriptVersion = '4.11'
 
 # ----------------------------------------------------------------------------
 # Dependency engine. Mode 5 delegates all dependency discovery, reference
@@ -606,19 +629,58 @@ function Read-CsvWithFlexibleHeaders {
     }
 }
 
+# Every column header this script will read an id out of.
+#
+# ObjectID is on the list because it is the column every results file this
+# script WRITES uses. Without it the obvious operator move, take the failures
+# out of Delete_Results_*.csv and re-run them, read zero ids and reported "No
+# processes to delete", which is also what a genuinely empty file reports. The
+# tool could not read its own output and said nothing about why.
+$script:CsvIdColumns = @(
+    'ProcessID', 'ProcessId', 'Process ID', 'ProcessUniqueId',
+    'ObjectID', 'ObjectId', 'Object ID',
+    'Id', 'ID', 'DocumentID', 'DocumentId'
+)
+
 function Get-IdFromCsvRow {
     param($Row)
 
-    # Try various common column names for ID
-    $possibleIdColumns = @('ProcessID', 'ProcessId', 'Process ID', 'ProcessUniqueId', 'Id', 'ID', 'DocumentID', 'DocumentId')
-
-    foreach ($col in $possibleIdColumns) {
+    foreach ($col in $script:CsvIdColumns) {
         if ($Row.PSObject.Properties.Name -contains $col) {
-            return $Row.$col
+            $value = [string]$Row.$col
+            # A header that exists but is blank on this row is not an answer;
+            # the next candidate column may still carry the id.
+            if (-not [string]::IsNullOrWhiteSpace($value)) { return $value.Trim() }
         }
     }
 
     return $null
+}
+
+function Show-NpmCsvIdColumnMiss {
+    <#
+    .SYNOPSIS
+        Says why a CSV that parsed yielded nothing, when the reason is its
+        headers rather than its contents.
+
+    .DESCRIPTION
+        "No processes to delete" is the right thing to say about an empty file
+        and the wrong thing to say about twenty rows under a header this script
+        does not read. Both printed the same line, so an unreadable file looked
+        exactly like an empty target set.
+    #>
+    param($Csv, [string]$Path)
+
+    $rows = @($Csv)
+    if ($rows.Count -eq 0) { return }
+
+    $headers = @()
+    if ($null -ne $rows[0]) { $headers = @($rows[0].PSObject.Properties.Name) }
+
+    Write-Host "Read $($rows.Count) row(s) from $Path but found no id column." -ForegroundColor Red
+    Write-Host "  Columns in the file : $(($headers -join ', '))" -ForegroundColor Yellow
+    Write-Host "  Expected one of     : $(($script:CsvIdColumns -join ', '))" -ForegroundColor Yellow
+    Write-Host "Rename a column to one of those, or export the ids under a ProcessID header." -ForegroundColor Yellow
 }
 
 # Matches a Nintex process UniqueId (GUID) so we can tell GUIDs apart from numeric Process IDs
@@ -1575,7 +1637,12 @@ function Invoke-BulkArchiveProcesses {
 
         # Permission to override a pending archive approval. See the script
         # parameter of the same name.
-        [switch]$ApprovalsEnabled = $true
+        [switch]$ApprovalsEnabled = $true,
+
+        # Approves the variation pre-flight, which is this mode's only gate that
+        # -Force cannot answer. Mode 1's collateral is reported and reversed
+        # rather than gated, so there is nothing else here for it to approve.
+        [switch]$AcceptCollateral
     )
 
     Write-Host "`n========================================" -ForegroundColor Cyan
@@ -1599,10 +1666,12 @@ function Invoke-BulkArchiveProcesses {
         $csv = Read-CsvWithFlexibleHeaders -Path $CsvPath
         if (-not $csv) { return }
 
+        $idsRead = 0
         $numericLookup = Get-ProcessUniqueIdMap -SiteURL $SiteURL -Token $Token
         foreach ($row in $csv) {
             $id = Get-IdFromCsvRow -Row $row
             if (-not $id) { continue }
+            $idsRead++
 
             $uniqueId = $id
             if (-not (Test-IsProcessGuid -Value $id)) {
@@ -1623,6 +1692,7 @@ function Invoke-BulkArchiveProcesses {
             }
             $targets += $entry
         }
+        if ($idsRead -eq 0) { Show-NpmCsvIdColumnMiss -Csv $csv -Path $CsvPath }
     }
     else {
         # The group tree is fetched once and walked, rather than one API call per
@@ -1669,10 +1739,15 @@ function Invoke-BulkArchiveProcesses {
         Write-Host "its targets from." -ForegroundColor Red
 
         $proceed = $false
-        if ($Force) {
+        if ($AcceptCollateral) {
+            Write-Host "`n-AcceptCollateral supplied. The masters listed above were reviewed out of" -ForegroundColor Red
+            Write-Host "band and the risk to them is accepted. Continuing." -ForegroundColor Red
+            $proceed = $true
+        } elseif ($Force) {
             Write-Host "`n-Force will not proceed past a variation warning. Stopping." -ForegroundColor Red
-            Write-Host "Add the masters to the target set if they should be archived too, or" -ForegroundColor Yellow
-            Write-Host "re-run interactively to decide case by case." -ForegroundColor Yellow
+            Write-Host "Add the masters to the target set if they should be archived too, re-run" -ForegroundColor Yellow
+            Write-Host "interactively to decide case by case, or pass -AcceptCollateral to accept" -ForegroundColor Yellow
+            Write-Host "the risk after reviewing the list." -ForegroundColor Yellow
         } elseif ($WhatIf) {
             Write-Host "`nPreview only; continuing so the list can be inspected." -ForegroundColor Yellow
             $proceed = $true
@@ -1680,11 +1755,21 @@ function Invoke-BulkArchiveProcesses {
             $proceed = ((Read-Host "`nContinue anyway? Type 'YES' to accept the risk to these masters") -eq 'YES')
         }
 
+        if ($proceed -and -not $WhatIf) {
+            foreach ($m in $variationMatches) {
+                $results += New-ProcessResultRow -UniqueId $m.MasterUniqueId -NameLookup $index `
+                    -Name ([string]$m.MasterName) -Operation 'VariationWarning' -Status 'Accepted' `
+                    -GroupId $m.MasterGroupId `
+                    -Message "Master of target '$($m.TargetName)' and not itself a target; risk accepted before the run started"
+            }
+        }
+
         if (-not $proceed) {
             Write-Host "Operation cancelled. Nothing has been changed." -ForegroundColor Yellow
             foreach ($m in $variationMatches) {
                 $results += New-ProcessResultRow -UniqueId $m.MasterUniqueId -NameLookup $index `
                     -Name ([string]$m.MasterName) -Operation 'VariationWarning' -Status 'Failed' `
+                    -GroupId $m.MasterGroupId `
                     -Message "Master of target '$($m.TargetName)' and not itself a target; run stopped before any change"
             }
             Save-ArchiveResults -Results $results -Timestamp $timestamp -WhatIf:$WhatIf
@@ -3222,6 +3307,7 @@ function Remove-HoldingGroup {
 
             $results += New-ProcessResultRow -UniqueId $procId -NameLookup $NameLookup `
                 -Name $name -Operation 'Collateral' -Status 'Failed' `
+                -GroupId $TempGroup.id `
                 -Message "Left stranded in the holding group '$GroupName' and was not a target; move it back manually"
         }
 
@@ -3275,7 +3361,11 @@ function Invoke-BulkDeleteProcesses {
 
         [switch]$ThoroughScan,
         [switch]$IncludeSubgroups,
-        [switch]$AllowUnheldTargets
+        [switch]$AllowUnheldTargets,
+
+        # The third answer to the collateral gate and the variation pre-flight,
+        # and to nothing else. See the script parameter of the same name.
+        [switch]$AcceptCollateral
     )
 
     Write-Host "`n========================================" -ForegroundColor Cyan
@@ -3322,6 +3412,53 @@ function Invoke-BulkDeleteProcesses {
     # verify what the unwind REPORTED against what the tenant shows, so it has
     # to be set wherever a ledger is.
     $runLedger = @()
+    # What the Hold-phase checkpoint found, kept out here so the plan built
+    # afterwards can carry it. The later checkpoints skip anything an earlier
+    # one already raised, and until this was on the plan they had no way to know
+    # the Hold phase had raised it.
+    $holdCollateral = @()
+
+    # Every exit from this function ends the same way: put back whatever the run
+    # changed unasked, re-check both manual-attention lists against the tenant,
+    # write the file. Each of the ten exits used to spell that out again, and
+    # none of them reversed collateral that had got past a gate, because until
+    # -AcceptCollateral nothing could.
+    #
+    # Approval is permission to carry on, not a request to leave the tenant
+    # changed. An approved run therefore unwinds exactly as far as a refused one
+    # does; the difference is only that it got to do the work first.
+    $finishRun = {
+        param($Rows)
+
+        $rows = @($Rows)
+
+        $reversed = @{}
+        foreach ($row in $rows) {
+            if ($row.Operation -eq 'ReverseCollateral') {
+                $reversed[([string]$row.ObjectID).ToLowerInvariant()] = $true
+            }
+        }
+
+        $pending = @()
+        $seen = @{}
+        foreach ($item in @($runCollateral)) {
+            if (-not $item.UniqueId) { continue }
+            $key = ([string]$item.UniqueId).ToLowerInvariant()
+            if ($reversed.ContainsKey($key) -or $seen.ContainsKey($key)) { continue }
+            $seen[$key] = $true
+            $pending += $item
+        }
+
+        if ($pending.Count -gt 0) {
+            $rows += @(Restore-CollateralState -SiteURL $SiteURL -Token $Token `
+                -Collateral $pending -ApprovalsEnabled $approvalsEnabled)
+        }
+
+        $rows = @(Resolve-RunOutcome -SiteURL $SiteURL -Token $Token `
+            -Collateral $runCollateral -Ledger $runLedger -Results $rows)
+        Save-DeleteResults -Results $rows -Timestamp $timestamp
+        return $rows
+    }
 
     # The Hold phase logs to a preliminary plan, and the real plan is later
     # written over the same path. Without carrying these forward the finished
@@ -3358,6 +3495,7 @@ function Invoke-BulkDeleteProcesses {
             $id = Get-IdFromCsvRow -Row $row
             if ($id) { $rawIds += $id }
         }
+        if ($rawIds.Count -eq 0) { Show-NpmCsvIdColumnMiss -Csv $csv -Path $CsvPath }
     }
     elseif ($SourceType -eq "Archived") {
         Write-Host "Fetching all archived processes..." -ForegroundColor Yellow
@@ -3454,16 +3592,33 @@ function Invoke-BulkDeleteProcesses {
     $collateralDecision = {
         param($Collateral)
 
+        # Checked before -Force, because it is the more specific statement. The
+        # full list has just been printed by Show-CollateralDamage; this says
+        # which decision is being taken over it, so the console records the
+        # authorisation next to the thing authorised.
+        if ($AcceptCollateral) {
+            Write-Host "`n-AcceptCollateral supplied. The $(@($Collateral).Count) process(es) listed above" -ForegroundColor Red
+            Write-Host "were reviewed out of band and are accepted. Continuing." -ForegroundColor Red
+            Write-Host "They are recorded as 'Accepted' in the results file, not as failures." -ForegroundColor Yellow
+            return $true
+        }
+
         if ($Force) {
             Write-Host "`n-Force cannot approve collateral changes. Stopping." -ForegroundColor Red
-            Write-Host "Re-run interactively, or add the affected processes to the target set if" -ForegroundColor Yellow
-            Write-Host "they really should be included." -ForegroundColor Yellow
+            Write-Host "Re-run interactively, add the affected processes to the target set if they" -ForegroundColor Yellow
+            Write-Host "really should be included, or pass -AcceptCollateral to approve this list" -ForegroundColor Yellow
+            Write-Host "after reviewing it." -ForegroundColor Yellow
             return $false
         }
 
         Write-Host "`n$(@($Collateral).Count) process(es) changed that were not targets." -ForegroundColor Red
         return ((Read-Host "Continue anyway? Type 'YES' to accept these changes") -eq 'YES')
     }
+
+    # What the Accepted rows say about who let the run through. The gate has two
+    # affirmative answers and the file should distinguish them: one is somebody
+    # at a keyboard looking at the list, the other is a switch on a scheduled run.
+    $acceptanceAuthority = if ($AcceptCollateral) { 'accepted by -AcceptCollateral' } else { 'accepted at the prompt' }
 
     # ---- Pre-flight: targets that look like variations ---------------------
     # The checkpoints report damage. This is the only thing that can prevent it,
@@ -3475,10 +3630,15 @@ function Invoke-BulkDeleteProcesses {
         Show-VariationWarning -Matches $variationMatches
 
         $proceedVariation = $false
-        if ($Force) {
+        if ($AcceptCollateral) {
+            Write-Host "`n-AcceptCollateral supplied. The masters listed above were reviewed out of" -ForegroundColor Red
+            Write-Host "band and the risk to them is accepted. Continuing." -ForegroundColor Red
+            $proceedVariation = $true
+        } elseif ($Force) {
             Write-Host "`n-Force will not proceed past a variation warning. Stopping." -ForegroundColor Red
-            Write-Host "Add the masters to the target set if they should be deleted too, or re-run" -ForegroundColor Yellow
-            Write-Host "interactively to decide case by case." -ForegroundColor Yellow
+            Write-Host "Add the masters to the target set if they should be deleted too, re-run" -ForegroundColor Yellow
+            Write-Host "interactively to decide case by case, or pass -AcceptCollateral to accept" -ForegroundColor Yellow
+            Write-Host "the risk after reviewing the list." -ForegroundColor Yellow
         } elseif ($WhatIf) {
             # A preview changes nothing, so there is nothing to protect it from.
             Write-Host "`nPreview only; continuing so the plan can be inspected." -ForegroundColor Yellow
@@ -3487,17 +3647,27 @@ function Invoke-BulkDeleteProcesses {
             $proceedVariation = ((Read-Host "`nContinue anyway? Type 'YES' to accept the risk to these masters") -eq 'YES')
         }
 
+        # A master the run was allowed to risk is named in the file too. The stop
+        # path has always named them; the proceed path used to say nothing, so
+        # the results of an approved run did not record what was approved.
+        if ($proceedVariation -and -not $WhatIf) {
+            foreach ($m in $variationMatches) {
+                $results += New-ProcessResultRow -UniqueId $m.MasterUniqueId -NameLookup $index `
+                    -Name ([string]$m.MasterName) -Operation 'VariationWarning' -Status 'Accepted' `
+                    -GroupId $m.MasterGroupId `
+                    -Message "Master of target '$($m.TargetName)' and not itself a target; risk $acceptanceAuthority"
+            }
+        }
+
         if (-not $proceedVariation) {
             Write-Host "Operation cancelled. Nothing has been changed." -ForegroundColor Yellow
             foreach ($m in $variationMatches) {
-                $results += [PSCustomObject]@{
-                    ObjectType = 'Process'; ObjectID = $m.MasterUniqueId; Name = $m.MasterName
-                    Operation = 'VariationWarning'; Status = 'Failed'
-                    Message = "Master of target '$($m.TargetName)' and not itself a target; run stopped before any change"
-                }
+                $results += New-ProcessResultRow -UniqueId $m.MasterUniqueId -NameLookup $index `
+                    -Name ([string]$m.MasterName) -Operation 'VariationWarning' -Status 'Failed' `
+                    -GroupId $m.MasterGroupId `
+                    -Message "Master of target '$($m.TargetName)' and not itself a target; run stopped before any change"
             }
-            $results = @(Resolve-RunOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Ledger $runLedger -Results $results)
-                Save-DeleteResults -Results $results -Timestamp $timestamp
+            $results = @(& $finishRun $results)
             return
         }
     }
@@ -3568,10 +3738,19 @@ function Invoke-BulkDeleteProcesses {
                 Set-ProcessSnapshotRestored -Snapshot $snapshot -UniqueId $target -HoldingGroupId $tempGroup.id
             } else {
                 $failedHolds += $target
-                $holdLog += "FAILED to restore target $target into the holding group"
+                $restoreStatus = Get-NpmLastRestoreStatus
+
+                # Where it still is, not where the run wanted it. The restore
+                # failed, so the holding group is the one group this process is
+                # certainly NOT in.
+                $stuckEntry = Get-NpmIndexEntry -Index $index -UniqueId $target
+                $stuckGroup = $(if ($null -ne $stuckEntry) { $stuckEntry.GroupId } else { '' })
+
+                $holdLog += "FAILED to restore target $target into the holding group (HTTP $restoreStatus)"
                 $results += New-ProcessResultRow -UniqueId $target -NameLookup $index `
-                    -Operation 'Hold' -Status 'Failed' `
-                    -Message 'Could not restore into the holding group'
+                    -Operation 'Hold' -Status 'Failed' -StatusCode $restoreStatus `
+                    -GroupId $stuckGroup `
+                    -Message "Could not restore into the holding group (HTTP $restoreStatus); still archived in group $stuckGroup"
             }
             $preliminary.Ledger = @(ConvertTo-PlanLedgerEntry -Snapshot $snapshot)
             $runLedger = @($preliminary.Ledger)
@@ -3633,8 +3812,7 @@ function Invoke-BulkDeleteProcesses {
                     [void](Export-DependencyPlan -Plan $preliminary -Path $planPath)
                     $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup `
                         -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds -NameLookup $tenantBaseline)
-                    $results = @(Resolve-RunOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Ledger $runLedger -Results $results)
-                Save-DeleteResults -Results $results -Timestamp $timestamp
+                    $results = @(& $finishRun $results)
                     return
                 }
             }
@@ -3661,6 +3839,10 @@ function Invoke-BulkDeleteProcesses {
             Show-CollateralDamage -Collateral $holdCollateral -Phase 'after holding archived targets'
 
             $accept = & $collateralDecision $holdCollateral
+            if ($accept) {
+                $results += @(New-CollateralAcceptanceRow -Collateral $holdCollateral `
+                    -Phase 'after holding archived targets' -Authority $acceptanceAuthority)
+            }
             if (-not $accept) {
                 Write-Host "`nStopping. Nothing has been deleted." -ForegroundColor Red
 
@@ -3677,6 +3859,7 @@ function Invoke-BulkDeleteProcesses {
                 foreach ($c in $holdCollateral) {
                     $results += New-ProcessResultRow -UniqueId $c.UniqueId -NameLookup $tenantBaseline `
                         -Name ([string]$c.Name) -Operation 'Collateral' -Status 'Failed' `
+                        -GroupId $c.CurrentGroupId `
                         -Message "Changed without being a target ($($c.Change)); run stopped"
                 }
 
@@ -3689,8 +3872,7 @@ function Invoke-BulkDeleteProcesses {
                     -ReportedUniqueIds @(@($aborted.Collateral) | ForEach-Object { $_.UniqueId }) `
                     -NameLookup $tenantBaseline)
 
-                $results = @(Resolve-RunOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Ledger $runLedger -Results $results)
-                Save-DeleteResults -Results $results -Timestamp $timestamp
+                $results = @(& $finishRun $results)
                 return
             }
         } else {
@@ -3730,6 +3912,18 @@ function Invoke-BulkDeleteProcesses {
     # Carry the Hold-phase history into the plan that gets written over the same
     # path, so the finished file is the whole story rather than the last chapter.
     if ($holdLog.Count -gt 0) { $plan.Log = @($holdLog) + @($plan.Log) }
+
+    # Same for what the Hold-phase checkpoint found. The two later checkpoints
+    # skip anything an earlier one already raised, and they read that list off
+    # the plan; without this a process approved at the Hold gate is raised again
+    # at each of them, once as a second approval and once as a fresh failure.
+    if ($holdCollateral.Count -gt 0) {
+        $plan.Collateral = @($plan.Collateral) + @($holdCollateral)
+        foreach ($c in $holdCollateral) {
+            $plan.Log += "COLLATERAL after hold phase (accepted): $($c.UniqueId) ($($c.Name)) - $($c.Change)"
+        }
+    }
+
     $runLedger = @($plan.Ledger)
 
     if ($plan.Status -eq 'Blocked') {
@@ -3747,8 +3941,7 @@ function Invoke-BulkDeleteProcesses {
                 -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds `
                 -ReportedUniqueIds @(@($plan.Collateral) | ForEach-Object { $_.UniqueId }) `
                 -NameLookup $tenantBaseline)
-            $results = @(Resolve-RunOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Ledger $runLedger -Results $results)
-                Save-DeleteResults -Results $results -Timestamp $timestamp
+            $results = @(& $finishRun $results)
         }
         return
     }
@@ -3757,7 +3950,7 @@ function Invoke-BulkDeleteProcesses {
     # rather than disappearing quietly.
     foreach ($failed in @($plan.FailedTargets)) {
         $results += New-ProcessResultRow -UniqueId $failed.UniqueId -NameLookup $index `
-            -Operation 'DependencyCheck' -Status 'Failed' `
+            -Operation 'DependencyCheck' -Status 'Failed' -StatusCode ([int]$failed.Status) `
             -Message "Excluded from the run: HTTP $($failed.Status) $($failed.Error)"
     }
     $targetUniqueIds = @($plan.TargetUniqueIds)
@@ -3790,8 +3983,7 @@ function Invoke-BulkDeleteProcesses {
             if ($tempGroup) { $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds `
             -ReportedUniqueIds @(@($plan.Collateral) | ForEach-Object { $_.UniqueId }) `
             -NameLookup $tenantBaseline) }
-            $results = @(Resolve-RunOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Ledger $runLedger -Results $results)
-                Save-DeleteResults -Results $results -Timestamp $timestamp
+            $results = @(& $finishRun $results)
             return
         }
     }
@@ -3814,8 +4006,7 @@ function Invoke-BulkDeleteProcesses {
             if ($tempGroup) { $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds `
             -ReportedUniqueIds @(@($plan.Collateral) | ForEach-Object { $_.UniqueId }) `
             -NameLookup $tenantBaseline) }
-            $results = @(Resolve-RunOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Ledger $runLedger -Results $results)
-                Save-DeleteResults -Results $results -Timestamp $timestamp
+            $results = @(& $finishRun $results)
             return
         }
     }
@@ -3837,8 +4028,7 @@ function Invoke-BulkDeleteProcesses {
             if ($tempGroup) { $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds `
             -ReportedUniqueIds @(@($plan.Collateral) | ForEach-Object { $_.UniqueId }) `
             -NameLookup $tenantBaseline) }
-            $results = @(Resolve-RunOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Ledger $runLedger -Results $results)
-                Save-DeleteResults -Results $results -Timestamp $timestamp
+            $results = @(& $finishRun $results)
             return
         }
     }
@@ -3862,8 +4052,7 @@ function Invoke-BulkDeleteProcesses {
         if ($tempGroup) { $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds `
             -ReportedUniqueIds @(@($plan.Collateral) | ForEach-Object { $_.UniqueId }) `
             -NameLookup $tenantBaseline) }
-        $results = @(Resolve-RunOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Ledger $runLedger -Results $results)
-                Save-DeleteResults -Results $results -Timestamp $timestamp
+        $results = @(& $finishRun $results)
         return
     }
 
@@ -3885,7 +4074,7 @@ function Invoke-BulkDeleteProcesses {
 
     $deletionResults = @(Invoke-ProcessTargetDeletion -SiteURL $SiteURL -Token $Token -Plan $plan `
         -ApprovalsEnabled $approvalsEnabled -TenantBaseline $tenantBaseline -OnCollateral $collateralDecision `
-        -GetObservedUniqueIds $holdingGroupReader)
+        -GetObservedUniqueIds $holdingGroupReader -AcceptanceAuthority $acceptanceAuthority)
     $results += $deletionResults
     $runCollateral += @($plan.Collateral)
 
@@ -3898,8 +4087,7 @@ function Invoke-BulkDeleteProcesses {
         if ($tempGroup) { $results += @(Remove-HoldingGroup -SiteURL $SiteURL -Token $Token -TempGroup $tempGroup -GroupName $TempGroupName -TargetUniqueIds $targetUniqueIds `
             -ReportedUniqueIds @(@($plan.Collateral) | ForEach-Object { $_.UniqueId }) `
             -NameLookup $tenantBaseline) }
-        $results = @(Resolve-RunOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Ledger $runLedger -Results $results)
-                Save-DeleteResults -Results $results -Timestamp $timestamp
+        $results = @(& $finishRun $results)
         return
     }
 
@@ -3942,25 +4130,42 @@ function Invoke-BulkDeleteProcesses {
 
     $plan.Status = 'Completed'
     [void](Export-DependencyPlan -Plan $plan -Path $planPath)
-    $results = @(Resolve-RunOutcome -SiteURL $SiteURL -Token $Token -Collateral $runCollateral -Ledger $runLedger -Results $results)
-                Save-DeleteResults -Results $results -Timestamp $timestamp
+    $results = @(& $finishRun $results)
 }
 
 function Save-DeleteResults {
     param($Results, [string]$Timestamp)
 
     $outputPath = "Delete_Results_$Timestamp.csv"
-    @($Results) | Export-Csv -Path $outputPath -NoTypeInformation
+
+    # Normalised first, the way Save-ArchiveResults already does it. Export-Csv
+    # takes its header from the first object it is given, and Mode 5's rows come
+    # from several producers with different shapes: a run whose first row was a
+    # holding-group Cleanup row wrote a file with no GroupId or StatusCode column
+    # at all, and the run before it, which happened to start with a Collateral
+    # row, wrote one that had them. The file's shape belongs to the file, not to
+    # whichever row was written first.
+    $rows = @(ConvertTo-NpmResultRow -Rows $Results)
+    $rows | Export-Csv -Path $outputPath -NoTypeInformation
 
     $failed = @($Results | Where-Object { $_.Status -eq 'Failed' })
-    $collateral = @($Results | Where-Object { $_.Operation -eq 'Collateral' })
+    $accepted = @($Results | Where-Object { $_.Status -eq 'Accepted' })
     $unreversed = @($Results | Where-Object { $_.Operation -eq 'ReverseCollateral' -and $_.Status -ne 'Success' })
+
+    # Accepted rows are a record of a decision, not of damage the operator has
+    # still to look at. Counting them in the list headed "this run changed
+    # processes it was not asked to" would tell somebody to go and review what
+    # they reviewed before the run started.
+    $collateral = @($Results | Where-Object { $_.Operation -eq 'Collateral' -and $_.Status -ne 'Accepted' })
 
     Write-Host "`nResults saved to: $outputPath" -ForegroundColor Green
     Write-Host "Total operations: $(@($Results).Count)" -ForegroundColor Cyan
     Write-Host "Successful: $(@($Results | Where-Object { $_.Status -eq 'Success' }).Count)" -ForegroundColor Green
     Write-Host "Skipped: $(@($Results | Where-Object { $_.Status -eq 'Skipped' }).Count)" -ForegroundColor Yellow
     Write-Host "Failed: $($failed.Count)" -ForegroundColor Red
+    if ($accepted.Count -gt 0) {
+        Write-Host "Accepted: $($accepted.Count) (collateral change(s) an operator authorised)" -ForegroundColor Yellow
+    }
 
     # A run that changed processes nobody asked it to change is not a clean run,
     # and the counts alone let it read as one. An earlier run printed
@@ -4310,6 +4515,7 @@ function Invoke-BulkOperationMode {
             $archiveSwitches = @{}
             if ($script:CliOptions.Force) { $archiveSwitches.Force = $true }
             if ($isDryRun)                { $archiveSwitches.WhatIf = $true }
+            if ($script:CliOptions.AcceptCollateral) { $archiveSwitches.AcceptCollateral = $true }
 
             # Passed unconditionally, because this switch now defaults on: only
             # setting it when it is true would make -ApprovalsEnabled:$false
@@ -4412,6 +4618,7 @@ function Invoke-BulkOperationMode {
             $deleteSwitches.ApprovalsEnabled = [bool]$script:CliOptions.ApprovalsEnabled
             if ($script:CliOptions.IncludeSubgroups) { $deleteSwitches.IncludeSubgroups = $true }
             if ($script:CliOptions.AllowUnheldTargets) { $deleteSwitches.AllowUnheldTargets = $true }
+            if ($script:CliOptions.AcceptCollateral) { $deleteSwitches.AcceptCollateral = $true }
 
             if ($sourceType -eq "CSV") {
                 $csvPath = Resolve-CsvPath
@@ -4474,7 +4681,8 @@ function Start-BulkOperations {
         [switch]$ApprovalsEnabled = $true,
         [switch]$ThoroughScan,
         [switch]$IncludeSubgroups,
-        [switch]$AllowUnheldTargets
+        [switch]$AllowUnheldTargets,
+        [switch]$AcceptCollateral
     )
 
     $nonInteractive = [bool]$Mode
@@ -4492,6 +4700,7 @@ function Start-BulkOperations {
         ThoroughScan     = [bool]$ThoroughScan
         IncludeSubgroups = [bool]$IncludeSubgroups
         AllowUnheldTargets = [bool]$AllowUnheldTargets
+        AcceptCollateral = [bool]$AcceptCollateral
     }
 
     # Clearing the screen throws away whatever the caller was looking at, which
@@ -4594,7 +4803,8 @@ if ($MyInvocation.InvocationName -ne '.') {
         -GroupId $GroupId -ObjectType $ObjectType -RestoreGroupId $RestoreGroupId `
         -ConfigPath $ConfigPath -WhatIf:$WhatIf -Force:$Force `
         -ApprovalsEnabled:$ApprovalsEnabled -ThoroughScan:$ThoroughScan `
-        -IncludeSubgroups:$IncludeSubgroups -AllowUnheldTargets:$AllowUnheldTargets
+        -IncludeSubgroups:$IncludeSubgroups -AllowUnheldTargets:$AllowUnheldTargets `
+        -AcceptCollateral:$AcceptCollateral
 
     exit $exitCode
 }

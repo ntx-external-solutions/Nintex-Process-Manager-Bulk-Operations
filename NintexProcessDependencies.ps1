@@ -1941,6 +1941,40 @@ function Show-CollateralDamage {
     Write-Host "Another user editing the tenant during the run produces the same signal." -ForegroundColor Yellow
 }
 
+function New-CollateralAcceptanceRow {
+    <#
+    .SYNOPSIS
+        One row per collateral change an operator authorised, rather than one
+        per change the run had to stop for.
+
+    .DESCRIPTION
+        The gate has two answers that both continue the run: a typed YES at the
+        prompt, and -AcceptCollateral on a run nobody is watching. Either way a
+        person read the list and said go on, so the file should record an
+        authorisation, not a fault.
+
+        Writing these as Failed, which is what the stop path writes, means a run
+        that did exactly what it was told still reports failures, and whoever
+        reads the file has to re-derive from the Message which of them were
+        their own decision.
+    #>
+    param($Collateral, [string]$Phase = '', [string]$Authority = 'accepted at the prompt')
+
+    $rows = @()
+    foreach ($item in @($Collateral)) {
+        $name = Format-NpmProcessName -Name ([string]$item.Name) -UniqueId ([string]$item.UniqueId)
+        $where = if ($Phase) { " $Phase" } else { '' }
+        $rows += [PSCustomObject]@{
+            ObjectType = 'Process'; ObjectID = $item.UniqueId; Name = $name
+            Operation = 'Collateral'; Status = 'Accepted'
+            Message = "Changed without being a target ($($item.Change))$where; $Authority, so the run continued"
+            GroupId = $(if ($null -ne $item.CurrentGroupId) { [string]$item.CurrentGroupId } else { '' })
+            StatusCode = ''
+        }
+    }
+    return $rows
+}
+
 function Resolve-CollateralOutcome {
     <#
     .SYNOPSIS
@@ -2027,6 +2061,8 @@ function Resolve-CollateralOutcome {
                 ObjectType = $row.ObjectType; ObjectID = $row.ObjectID; Name = $row.Name
                 Operation = 'ReverseCollateral'; Status = 'Success'
                 Message = "Back in group $($want.OriginalGroupId) by the end of the run; no action needed"
+                GroupId = [string]$now.GroupId
+                StatusCode = ''
             }
         } else {
             $updated += $row
@@ -2154,6 +2190,8 @@ function Resolve-TargetOutcome {
         $updated += [PSCustomObject]@{
             ObjectType = $row.ObjectType; ObjectID = $row.ObjectID; Name = $row.Name
             Operation = 'ReArchive'; Status = $status; Message = $message
+            GroupId = [string]$now.GroupId
+            StatusCode = $row.StatusCode
         }
     }
 
@@ -2238,12 +2276,17 @@ function Restore-CollateralState {
     foreach ($item in $items) {
         $name = Format-NpmProcessName -Name ([string]$item.Name) -UniqueId ([string]$item.UniqueId)
 
+        # Where the process sits at the moment the row is written. Every branch
+        # below either leaves it here or names where it moved it to instead.
+        $where = $(if ($null -ne $item.CurrentGroupId) { [string]$item.CurrentGroupId } else { '' })
+
         if ($item.Change -eq 'NotInBaseline') {
             Write-Host "  $name has no recorded before-state; not guessing at one." -ForegroundColor Yellow
             $results += [PSCustomObject]@{
                 ObjectType = 'Process'; ObjectID = $item.UniqueId; Name = $name
                 Operation = 'ReverseCollateral'; Status = 'Skipped'
                 Message = 'No before-state was captured for this process; check it manually'
+                GroupId = $where; StatusCode = ''
             }
             continue
         }
@@ -2254,6 +2297,7 @@ function Restore-CollateralState {
                 ObjectType = 'Process'; ObjectID = $item.UniqueId; Name = $name
                 Operation = 'ReverseCollateral'; Status = 'Failed'
                 Message = 'Process disappeared during the run and cannot be restored automatically'
+                GroupId = ''; StatusCode = ''
             }
             continue
         }
@@ -2271,6 +2315,7 @@ function Restore-CollateralState {
                     ObjectType = 'Process'; ObjectID = $item.UniqueId; Name = $name
                     Operation = 'ReverseCollateral'; Status = 'Failed'
                     Message = "Cannot be restored: its group $($item.OriginalGroupId) no longer exists. It is archived; restore it manually into a group that does."
+                    GroupId = $where; StatusCode = ''
                 }
                 continue
             }
@@ -2286,6 +2331,8 @@ function Restore-CollateralState {
                 Status = $(if ($ok) { 'Success' } else { 'Failed' })
                 Message = $(if ($ok) { "Restored to group $($item.OriginalGroupId)" }
                             else { "Restore FAILED; still archived. Restore it manually to group $($item.OriginalGroupId)" })
+                GroupId = $(if ($ok) { [string]$item.OriginalGroupId } else { $where })
+                StatusCode = $(if ($ok) { '' } else { [string](Get-NpmLastRestoreStatus) })
             }
             if (-not $ok) { Write-Host "    Failed. Restore $name manually to group $($item.OriginalGroupId)." -ForegroundColor Red }
             continue
@@ -2305,6 +2352,8 @@ function Restore-CollateralState {
                 Status = $(if ($ok) { 'Success' } else { 'Failed' })
                 Message = $(if ($ok) { 'Re-archived' }
                             else { "Re-archive FAILED; this process is still ACTIVE. $($outcome.Message)" })
+                GroupId = $where
+                StatusCode = $(if ([int]$outcome.StatusCode -gt 0) { [string]$outcome.StatusCode } else { '' })
             }
             if (-not $ok) {
                 Write-Host "    Failed. $name is still active and must be archived manually." -ForegroundColor Red
@@ -2319,6 +2368,7 @@ function Restore-CollateralState {
             ObjectType = 'Process'; ObjectID = $item.UniqueId; Name = $name
             Operation = 'ReverseCollateral'; Status = 'Skipped'
             Message = "Moved from group $($item.OriginalGroupId) to $($item.CurrentGroupId). Move it back manually; no trustworthy move endpoint is available here."
+            GroupId = $where; StatusCode = ''
         }
     }
 
@@ -2605,6 +2655,7 @@ function Restore-NpmProcess {
     )
 
     $script:NpmLastRestoreFailure = ''
+    $script:NpmLastRestoreStatus = 0
 
     if (-not $DestinationGroupExists) {
         $script:NpmLastRestoreFailure = 'MissingGroup'
@@ -2617,8 +2668,19 @@ function Restore-NpmProcess {
         processUniqueId = $ProcessUniqueId
         processGroupId  = [string]$ProcessGroupId
     }
+    $script:NpmLastRestoreStatus = [int]$result.StatusCode
     return $result.Success
 }
+
+# These two endpoints answer $true/$false, which is all their callers need to
+# decide what to do next and one field short of what the results file needs to
+# say. The status code of the most recent call is kept here so a row built off
+# a failure can carry it in its own column rather than in prose, or not at all.
+$script:NpmLastRestoreStatus = 0
+$script:NpmLastDeleteStatus = 0
+
+function Get-NpmLastRestoreStatus { return [int]$script:NpmLastRestoreStatus }
+function Get-NpmLastDeleteStatus { return [int]$script:NpmLastDeleteStatus }
 
 function New-NpmArchiveOutcome {
     param(
@@ -2831,6 +2893,7 @@ function Remove-NpmProcess {
 
     Start-NpmThrottle
     $result = Invoke-NpmApi -Url "$SiteURL/Process/Edit/DeleteProcess" -Token $Token -Method Post -Body $body
+    $script:NpmLastDeleteStatus = [int]$result.StatusCode
     return $result.Success
 }
 
@@ -3647,6 +3710,7 @@ function Invoke-ProcessDeletePlan {
                 ObjectType = 'Process'; ObjectID = $holderId; Name = $name
                 Operation = 'RemoveReferences'; Status = 'Failed'
                 Message = 'Could not fetch process for editing'
+                GroupId = ''; StatusCode = ''
             }
             continue
         }
@@ -3672,6 +3736,8 @@ function Invoke-ProcessDeletePlan {
             Status = $(if ($save.Success) { 'Success' } else { 'Failed' })
             Message = $(if ($save.Success) { "Removed $($removal.ReferencesRemoved) reference(s), $($save.Stage)" }
                         else { "$($save.Stage) failed: $($save.Error)" })
+            GroupId = ''
+            StatusCode = $(if (-not $save.Success -and [int]$save.StatusCode -gt 0) { [string]$save.StatusCode } else { '' })
         }
 
         if (-not $save.Success) {
@@ -3746,6 +3812,11 @@ function Invoke-ProcessTargetDeletion {
         Returns $true to continue to deletion, $false to stop. Omitted means
         stop, because deleting after unexplained changes is the one outcome
         nobody can undo.
+
+    .PARAMETER AcceptanceAuthority
+        How the caller's gate was answered, for the Accepted rows written when
+        OnCollateral lets the run through. The caller knows whether that was a
+        typed YES or a switch; this function only sees the $true.
     #>
     param(
         [string]$SiteURL,
@@ -3755,7 +3826,8 @@ function Invoke-ProcessTargetDeletion {
         $TenantBaseline = $null,
         [scriptblock]$OnCollateral = $null,
         [string[]]$ObservedUniqueIds = @(),
-        [scriptblock]$GetObservedUniqueIds = $null
+        [scriptblock]$GetObservedUniqueIds = $null,
+        [string]$AcceptanceAuthority = 'accepted at the prompt'
     )
 
     $results = @()
@@ -3804,6 +3876,20 @@ function Invoke-ProcessTargetDeletion {
         $collateral = @(Compare-TenantState -Baseline $TenantBaseline -Index $freshIndex `
             -ExpectedUniqueIds $expected -ObservedUniqueIds $observedNow)
 
+        # Anything an earlier checkpoint already raised is not news here either,
+        # which is the rule the post-delete checkpoint has always applied. It
+        # matters once a gate can be approved rather than only refused: an
+        # approved process is still changed against the baseline, so without
+        # this it is put to the operator again at every checkpoint after the one
+        # they answered.
+        $alreadyRaised = @{}
+        foreach ($c in @($Plan.Collateral)) {
+            if ($c.UniqueId) { $alreadyRaised[([string]$c.UniqueId).ToLowerInvariant()] = $true }
+        }
+        $collateral = @($collateral | Where-Object {
+            -not $alreadyRaised.ContainsKey(([string]$_.UniqueId).ToLowerInvariant())
+        })
+
         if ($collateral.Count -gt 0) {
             $Plan.Collateral = @($Plan.Collateral) + $collateral
             foreach ($c in $collateral) {
@@ -3823,10 +3909,17 @@ function Invoke-ProcessTargetDeletion {
                         ObjectType = 'Process'; ObjectID = $c.UniqueId; Name = $name
                         Operation = 'Collateral'; Status = 'Failed'
                         Message = "Changed without being a target ($($c.Change)); run stopped before deletion"
+                        GroupId = $(if ($null -ne $c.CurrentGroupId) { [string]$c.CurrentGroupId } else { '' })
+                        StatusCode = ''
                     }
                 }
                 return $results
             }
+
+            # Continuing here was somebody's decision, and the file should say
+            # so rather than filing it under the same Failed as a stop.
+            $results += @(New-CollateralAcceptanceRow -Collateral $collateral `
+                -Phase 'after archiving targets, before deleting' -Authority $AcceptanceAuthority)
         } else {
             Write-Host "  No collateral changes. Only the targets moved." -ForegroundColor Green
         }
@@ -3853,11 +3946,14 @@ function Invoke-ProcessTargetDeletion {
             else { $record[0] | Add-Member -NotePropertyName Deleted -NotePropertyValue $true -Force }
         }
 
+        $deleteStatus = [int](Get-NpmLastDeleteStatus)
         $results += [PSCustomObject]@{
             ObjectType = 'Process'; ObjectID = $target; Name = $name
             Operation = 'Delete'
             Status = $(if ($ok) { 'Success' } else { 'Failed' })
-            Message = $(if ($ok) { 'Deleted' } else { 'Delete failed' })
+            Message = $(if ($ok) { 'Deleted' } else { "Delete failed (HTTP $deleteStatus)" })
+            GroupId = $(if ($record.Count -gt 0 -and $null -ne $record[0].OriginalGroupId) { [string]$record[0].OriginalGroupId } else { '' })
+            StatusCode = $(if (-not $ok -and $deleteStatus -gt 0) { [string]$deleteStatus } else { '' })
         }
     }
     Write-Host ""
@@ -3919,6 +4015,8 @@ function Invoke-ProcessTargetDeletion {
                     ObjectType = 'Process'; ObjectID = $c.UniqueId; Name = $cname
                     Operation = 'Collateral'; Status = 'Failed'
                     Message = "Changed without being a target ($($c.Change)); detected after deletion"
+                    GroupId = $(if ($null -ne $c.CurrentGroupId) { [string]$c.CurrentGroupId } else { '' })
+                    StatusCode = ''
                 }
             }
 
@@ -4054,6 +4152,11 @@ function Restore-ProcessPlanState {
         It used to report OriginalGroupUniqueId unconditionally, so the results
         CSV asserted a placement that had never happened, in the one file
         operators are told to check.
+
+        That group goes in the row's own GroupId column as well as in its
+        Message. The column is what the manual-review companion is built from;
+        with it empty the companion could only be assembled by parsing the
+        prose back apart, which is the job the column was added to remove.
     #>
     param(
         [string]$SiteURL,
@@ -4077,9 +4180,18 @@ function Restore-ProcessPlanState {
         $placement = ''
         $movedOk = $true
 
+        # The group the process is in when its row is written, as a value rather
+        # than as a phrase inside $placement. Empty only where a read could not
+        # establish it, which is the one case where the row has nothing to claim.
+        $landedGroupId = ''
+
         if ($null -eq $homeGroupId) {
             # Nothing recorded to move it back to. Archive in place and say so,
             # rather than implying a placement that was never attempted.
+            $current = Get-NpmProcessGroupId -SiteURL $SiteURL -Token $Token `
+                -ProcessUniqueId $entry.UniqueId -IsArchived $false
+            if ($null -ne $current) { $landedGroupId = [string]$current }
+
             Write-Host "  $($entry.Name): no original group recorded; archiving where it sits." -ForegroundColor Yellow
             $placement = 'no original group was recorded, so it was archived where it sat'
             $movedOk = $false
@@ -4096,6 +4208,7 @@ function Restore-ProcessPlanState {
                 -ProcessUniqueId $entry.UniqueId -IsArchived $false
 
             $where = if ($null -ne $current) { "group $current" } else { 'the group it currently sits in' }
+            if ($null -ne $current) { $landedGroupId = [string]$current }
             Write-Host "  $($entry.Name): its original group ($homeGroupId) no longer exists; archiving in place in $where." -ForegroundColor Yellow
             $placement = "$where; its original group $homeGroupId no longer exists"
             $movedOk = $false
@@ -4107,6 +4220,7 @@ function Restore-ProcessPlanState {
             if ($null -ne $current -and "$current" -eq "$homeGroupId") {
                 Write-Host "  $($entry.Name) is already in group $homeGroupId." -ForegroundColor Gray
                 $placement = "group $homeGroupId"
+                $landedGroupId = [string]$homeGroupId
             }
             else {
                 Write-Host "  Returning $($entry.Name) to group $homeGroupId..." -ForegroundColor Gray
@@ -4116,8 +4230,10 @@ function Restore-ProcessPlanState {
                 $movedOk = [bool]$move.Moved
                 if ($move.Moved) {
                     $placement = "group $homeGroupId"
+                    $landedGroupId = [string]$homeGroupId
                 } elseif ($move.Verified) {
                     $placement = "group $($move.ActualGroupId), NOT the original group $homeGroupId"
+                    $landedGroupId = [string]$move.ActualGroupId
                     Write-Host "    Could not move it; it is in group $($move.ActualGroupId)." -ForegroundColor Red
                 } else {
                     $placement = "an UNVERIFIED group; the move to $homeGroupId could not be confirmed"
@@ -4143,6 +4259,8 @@ function Restore-ProcessPlanState {
             Status = $status
             Message = $(if ($ok) { "Re-archived in $placement" }
                         else { "Re-archive failed; this process is still ACTIVE in $placement. $($outcome.Message)" })
+            GroupId = $landedGroupId
+            StatusCode = $(if ([int]$outcome.StatusCode -gt 0) { [string]$outcome.StatusCode } else { '' })
         }
 
         if (-not $ok) {
