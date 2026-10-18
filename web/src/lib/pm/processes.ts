@@ -85,6 +85,12 @@ export interface ProcessListItem {
   groupName: string;
   processOwner: string;
   processExpert: string;
+  /**
+   * False when the row's group was deleted while the process sat in the archive. Not
+   * always present; absent means "not reported", never "deleted"
+   * (API_ARCHITECTURE.md, "groupExists").
+   */
+  groupExists?: boolean;
 }
 
 export interface ProcessListPage {
