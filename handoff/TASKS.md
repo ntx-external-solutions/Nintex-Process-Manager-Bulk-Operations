@@ -216,7 +216,7 @@ only" or "match current state" for published processes, the way PGM does it.
 
 ## F2. Fixes from live round R12
 
-Status: Ready (after W4, before W5)
+Status: Done (809966c)
 
 R12 ran Archive, folder cleanup and Move on `https://bulk.ntx-poc.com/` against test
 content on the demo tenant. All three worked end to end and the tenant matched every
