@@ -1,0 +1,233 @@
+# Bulk Operations web app: architecture spec
+
+Written by the Cowork session, 18 Oct 2026. This replaces the PowerShell script as the
+product. The script stays in the repo, frozen at v4.11, as the reference implementation
+for the delete engine (see "What happens to the PowerShell" below).
+
+## What we're building
+
+A web app on Vercel. A user signs in to their Process Manager site with username and
+password, then picks one of four operations:
+
+1. **Bulk Archive.** Browse the group tree with its processes, select whole groups
+   (with subgroups) or individual processes, and archive them.
+2. **Bulk Delete.** Select from the group tree or from the archived list, and delete.
+   The app handles dependency removal.
+3. **Bulk Move.** Select processes or groups from the tree and choose a destination group.
+4. **Bulk Update Ownership.** CSV upload, same format as `Update-ProcessOwnership.ps1`.
+
+## Start from process-group-manager, don't start from scratch
+
+`ntx-external-solutions/process-group-manager` (PGM) is already a Next.js 16 app on
+Vercel that solves the hard platform problems for this exact API. Lift these modules
+into `web/` in this repo and adapt them, rather than re-deriving them:
+
+| PGM module | What it gives us |
+|---|---|
+| `src/app/api/auth/route.ts`, `src/lib/auth/*` | Sign-in via `POST /oauth2/token` (password grant). Password is exchanged and dropped; the bearer token is sealed into an httpOnly cookie with `AUTH_SECRET`. No server-side store. |
+| `src/app/api/pm/route.ts`, `src/lib/pm/operations.ts` | The proxy. Exists because Process Manager sends no CORS headers. The browser can only name an operation from an allowlist; the tenant comes from the cookie, never the caller. |
+| `src/lib/pm/client.ts`, `types.ts` | Request helper, error typing, a 401 that signs the user out instead of hammering on. |
+| `src/lib/pm/groups.ts` | Tree read (`GetChildProcessGroupTreeItems`), `ValidateGroupAction`, `ReorderTreeNodes` move, viewer counts. |
+| `src/lib/pm/scim.ts` | SCIM user lookup, key supplied per call and never stored. Needed for ownership. |
+| `src/lib/exec/journal.ts`, `runner.ts`, `report.ts` | Append-only run journal (begin, commit, fail, skip per step), idempotent resume, results export. |
+| `src/lib/ui/treeCache.ts`, `src/lib/plan/tree.ts`, `revalidate.ts` | Five-minute tree cache with visible age, re-read of the touched levels right before applying. |
+| `src/lib/plan/groupPlan.ts` | Move validation: no cycles, no moving a group into its own subtree, no document-group destinations. |
+
+Two PGM rules change on purpose. PGM's allowlist has no delete or archive operation, and
+that is a structural safety property. This app adds them, so the allowlist entries for
+archive, delete and group delete each need a server-side check that the request names
+exactly one id, and the proxy still never offers a generic pass-through. PGM's
+`GroupBrowser` filters processes out of the tree; ours keeps them.
+
+Use PGM's stack as-is: Node 24, TypeScript, `node --test`, no UI framework beyond React.
+
+## Where things run, and why no database
+
+Every operation is a **browser-driven run**: the page holds the plan and calls the proxy
+once per Process Manager request. No proxy call does more than one or two tenant
+requests, so nothing comes near Vercel's 300s function limit, and a 17-minute delete is
+just a long series of short calls.
+
+State lives in three places, none of them a database:
+
+- **Session:** the sealed cookie. Expires with the token.
+- **Run state:** the journal and the plan ledger, in the browser. PGM keeps its journal in
+  `sessionStorage`, which is fine for PGM's small plans. The delete planner's ledger held
+  659 process models in R3, which can blow past the ~5 MB storage limit, so use
+  IndexedDB for the ledger and keep the journal small.
+- **Durable record:** downloadable files. The results CSV (same columns as the script's)
+  and the plan file. The plan file can be re-uploaded to resume or unwind an interrupted
+  run, the same way the script's `Delete_Plan_*.json` works today.
+
+What we give up without a database, and why that's acceptable for v1:
+
+- **No cross-device resume.** A run is tied to the tab. Closing it mid-run is recoverable
+  from the plan file, not automatically.
+- **No run history in the app.** The downloaded results files are the audit trail.
+- **No lock between two operators on the same tenant.** Two people running deletes at once
+  could collide. `revalidate.ts` catches a plan that's gone stale before writing; it does
+  not prevent the race. If this turns out to matter, a small KV store holding a per-tenant
+  run lock is the smallest fix.
+
+Vercel notes: response bodies cap at 4.5 MB, so process models go through the proxy one
+at a time (they already do). Hobby is limited to non-commercial use, so this should
+deploy to a Nintex Vercel team on Pro.
+
+## Auth
+
+Password grant only, exactly as PGM and the script do it. That means **SSO-only tenants
+cannot sign in**, because their users have no Process Manager password. PGM recorded that
+as accepted on 10 Aug. The sign-in page should say so up front.
+
+## The tree browser (shared by Archive, Delete and Move)
+
+One component used by all three operations:
+
+- Lazy-loads one level at a time from `GetChildProcessGroupTreeItems`, showing groups,
+  document groups and processes, like Manage Groups.
+- Tri-state checkboxes. Checking a group means "everything under it as of planning time",
+  not a snapshot of what was expanded. The planner walks the full subtree.
+- Document groups are shown but not selectable for Archive or Delete.
+- The plan screen shows the resolved list (every process, with its path) before anything
+  is written. Dry run is the default and applying is a separate, explicit action.
+
+Bulk Delete also needs the **archived view**: the paginated archived listing
+(`/Bff/Process/api/v1/processes`, archived list type), grouped by original group path,
+with a separate bucket for processes whose group no longer exists (`groupExists: false`).
+On the demo tenant that bucket is large: 177 of 467 archived processes when measured.
+
+## Bulk Archive
+
+**Flow.** Select in the tree, preview, apply, download results.
+
+**What the port must carry over** (all in `API_ARCHITECTURE.md` and the script):
+
+- `ArchiveProcess` archives in place and takes a comment. Use one change description per
+  run, entered once.
+- On an approvals-enabled tenant, HTTP 200 means pending, not archived. Read back
+  `isArchived`; if it's false, re-read the revision id and call `Publish` with
+  `IsPublishNow: true` (id sent as a string). Never decide this from a setting. R11
+  measured both outcomes on one tenant.
+- A 400 is usually the process data, not the request, and fails the same way in the UI.
+  Report it with the tenant's message and a link; don't retry.
+- A call that reports failure can still have worked. The final status of every process
+  comes from a fresh read at the end of the run, not from what the calls returned.
+- Process variations are coupled (R3). Show the operator any variation siblings of
+  selected processes in the preview.
+
+**Step 3, "delete the left-behind folders": this needs a spike before we promise it.**
+Two problems:
+
+1. **Archived processes still count as group content.** In the UI, a group holding
+   archived processes or documents can't be deleted ("Unable to Delete Group ... has
+   associated content", items marked "(archived)"). So right after an archive, the
+   folders are not actually empty. What `POST /Process/Edit/DeleteGroup` does in that
+   case through the API is unknown. PGM's notes say the confirmation is client-side only,
+   so the API may allow it.
+2. **If the API does allow it, that's how orphans are made.** An archived process whose
+   group is deleted can't be restored anywhere, and orphaned processes are exactly what
+   blocked R11's delete (the T2 problem below). 177 orphans already exist on the demo
+   tenant.
+
+Recommendation: don't offer folder deletion after Archive in v1. Offer it after Bulk
+Delete has purged the processes, when the groups really are empty, deepest subgroup
+first. If the spike shows the API deletes non-empty groups and you still want it after
+Archive, it ships behind a warning that names the processes that will become
+unrestorable. Documents block group deletion too, so groups holding documents are
+reported, not deleted.
+
+## Bulk Delete
+
+**Two ways in.** Pick from the tree (whole groups or processes), or pick from the archived
+view. Selecting active processes means "archive, then delete" in one plan, shown as two
+phases in the preview.
+
+**Delete by group.** The target set is every process in the selected subtree plus every
+archived process whose original group is in that subtree. This is the case that kept
+hitting dead ends. The dead end in R11 was orphaned dependency holders (T2), not the
+target selection.
+
+**The engine is a port of `NintexProcessDependencies.ps1`** (4,275 lines) into
+`web/src/lib/delete/`. It's the riskiest part of the project, because most of its
+behavior is learned from the tenant, not documented. Port it phase by phase with the
+offline tests coming over first:
+
+1. Discovery: claims from `CheckProcessDependencies`, location fetches, reconciliation.
+2. Hold phase: restore archived participants so their Input/Output edges show, orphaned
+   targets into a temporary holding group.
+3. Reference removal: read-modify-write `PUT /Api/v1/Processes/{id}` with `ProcessJson`
+   as a string, `SuppressChangeNotification: true`, `LinkedStakeholders` preserved.
+4. Collateral checkpoints: baseline, compare after each mutating phase, the
+   `-AcceptCollateral` gate as an explicit on-screen confirmation.
+5. Delete, then the post-delete checkpoint (never yet exercised live).
+6. Unwind: re-archive everything this run restored, remove the holding group only if
+   empty.
+
+**T1 and T2 from R11 are folded into the port.** Implement them in TypeScript, not in
+the PowerShell:
+
+- **T1:** the unwind must put back every process the run un-archived, holders and
+  targets, with a results row each, on every exit path.
+- **T2:** orphaned holders go through the holding group the way orphaned targets
+  already do, re-archived before the group is removed, with their own results operation.
+
+## Bulk Move
+
+`POST /Process/Edit/ReorderTreeNodes`, with `NodeType` passed straight through from the
+tree item's `itemType`. Moves don't touch a process revision, so nothing republishes and
+nobody is notified.
+
+- One node per call, even though the endpoint takes an array, so each move is journaled
+  and attributable. PGM made the same call for the same reason.
+- Pre-flight with `ValidateProcessAction` (action type 11) for processes. Reuse PGM's
+  cycle and document-group checks for groups.
+- Show the viewer delta (`GetTotalSpecifiedGroupRoleAndUserViewers`, source and
+  destination) in the preview, since moving changes who can see a process.
+- **Spike first:** PGM only moved groups. Moving a single process was seen once in a HAR,
+  for an in-progress process. Published processes, linked processes and variations are
+  untested.
+
+## Bulk Update Ownership
+
+CSV upload, same columns and rules as `Update-ProcessOwnership.ps1`: blank leaves a role
+unchanged, an unassign keyword sets user id 2, usernames resolved through SCIM (PGM's
+`scim.ts`, key entered per run). Preview every row before writing.
+
+Two things the script does that the web version should not copy without a decision:
+
+- It saves with `DoPublish: false`. On a published process that creates a new in-progress
+  revision, so the live version keeps the old owner until someone publishes. Offer PGM's
+  "save only" vs "match current state" choice.
+- It sends `SuppressChangeNotification: false`, so every row notifies stakeholders. Default
+  it to true, as PGM does.
+
+## Spikes before building
+
+| # | Question | Blocks |
+|---|---|---|
+| S1 | What does `DeleteGroup` do through the API on a group holding archived processes, and one holding archived documents? | Folder deletion in Archive and Delete |
+| S2 | Does `ReorderTreeNodes` move a single published process, a linked process, and a variation? | Bulk Move of processes |
+| S3 | Which archived-list fields give the original group path, so the archived view can be grouped without a lookup per row? | Archived view |
+
+Each is a few calls against the demo tenant. The Cowork session runs them and records the
+answers in `API_ARCHITECTURE.md`.
+
+## What happens to the PowerShell
+
+Frozen at v4.11. No more fixes, including T1 and T2, which move into the port. It stays in
+the repo as the reference for the delete engine and its tests, and is deleted once the web
+delete has passed the same live rounds.
+
+## Decisions
+
+Confirmed by JB, 18 Oct 2026:
+
+1. **Separate app in this repo, foundation lifted from PGM**, not new operations added to
+   PGM. PGM's "nothing is ever deleted" guarantee stays intact.
+2. **Selecting active processes in Delete archives them first.** Required, not optional.
+3. **SSO-only tenants are unsupported.** Password grant only.
+
+Made by Cowork, not yet revisited:
+
+4. **No folder deletion right after Archive in v1**, pending spike S1.
+5. **PowerShell frozen at v4.11**, with T1 and T2 implemented only in TypeScript.
