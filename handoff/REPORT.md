@@ -6,6 +6,55 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## W5 phase 3. Hold
+
+Commit `a3ee966` on `claude/web-w5-3-hold`. Cowork's documentation commit `da8daea` was only on the F4 branch, so this branch merges `claude/main` on top of it. I stopped after this PR, as the task asks.
+
+**What changed.**
+
+- **Hold, ported from the script.** Every `notPorted('hold')` stub is now implemented:
+  - `restoreProcess` (`executor.ts`), the port of `Restore-NpmProcess`. It sends nothing when the group is known to be gone, and the result is `MissingGroup`. A null group gets the same answer, because there is nowhere to send it. A refusal comes back as `Endpoint`, with the HTTP status for the results row. A dead session is rethrown. The planner's restore loop, written in phase 2, now runs on it.
+  - `findOrphanedGroupProcesses` and `groupExistsCoverage` (`groups.ts`). Both key on the `groupExists` flag, never on `groupId === 1`. Also `groupExistsCoverageLines`, the text of `Show-GroupExistsCoverage`.
+  - `processStateSnapshot`, `markSnapshotRestored`, `snapshotToPlanLedger` and `mergePlanLedger` (`ledger.ts`). The merge keeps every holder the snapshot doesn't cover, and keeps a `deleted` or `denormalized` the plan already recorded.
+  - `orphanedTargetWarningLines` (`holdingGroup.ts`).
+  - `groupDescendantIds` and `processesInGroups` (`groups.ts`). These were still `discovery` stubs, because phase 2 had no caller for them. Delete-by-group (W6) uses them. They are tested now, ported from Test-BulkArchive's "Enumerating a group".
+- **Cowork's phase 2 review:**
+  - **Archived holders with no group** are named in the plan summary, preview included: "Archived holders with no group: N. Their groups were deleted…". Each holder gets its id and the group that is gone. It also says what happened to it: not restored by this preview, parked in the holding group for this run, or could not be held, which blocks the run. Only holders are counted; orphaned targets have their own warning, below.
+  - **`DoubleCounted`**: `Reconciliation` has a new `doubleCounted` field. It is true only for a Link mismatch with `located >= 1` and `claimed === 2 × located`. Those pairs are listed under "LINKS THE DEPENDENCY API COUNTS TWICE (n)", and "RECONCILIATION MISMATCHES" now holds only the rest. On R11's set, that should put 21 under the new heading and 3 under mismatches. The child-procedure asymmetry is still checked first. A plan file without the field lists everything as a mismatch, as before.
+  - **W2's 404 branch** (`archive/outcome.ts`): a 404 after an archive is now `Failed`, "Not found; it may have been deleted", with status code 404, and no override is sent. Before, it was reported Archived. The `ArchiveState.found` comment in `pm/processes.ts` now says a 404 means a deleted process. The archive run's final read leaves a Failed row as it is.
+- **The `/delete` dry run** also shows the warnings a real run raises before its first change. It names the orphaned targets (Cowork counted 4 on R11's set) and says when the listing doesn't report `groupExists`. These lines come before the plan summary. The page is still read-only.
+
+**Results-file operations.** None new.
+
+**Tests.** 454 tests: 394 pass, 0 fail, 60 skipped. That's +12 tests and +26 passing:
+- The 14 hold tests are now on: the five in `groups.test.ts`, seven in `executor.test.ts`, one in `ledger.test.ts` and one in `bulkDelete.test.ts`. They all passed against the port with no test changes.
+- 12 new tests:
+  - two for the group enumeration;
+  - two in `claims.test.ts` for the classification: 2/1 and 4/2 are double-counted, while 1/0, 3/1, matches and Input are not;
+  - eight in the new `hold.test.ts`: the restore's failure paths, the snapshot's group UniqueId and restored flag, the orphaned-target warning, coverage lines, the summary section for holders with no group in a preview and in a real run, and the double-counted section. That last one includes a plan file from before the field existed.
+- One test was rewritten: the archive outcome test for a 404 now expects Failed.
+
+Typecheck and production build are clean.
+
+**End-to-end, offline.** I rebuilt against the mock and ran all five scenarios:
+- delete: the same plan as phase 2, and no writes;
+- archive: 4 Success, 1 Overridden, 4 Skipped, 1 Blocked, 1 Orphaned, one group deleted;
+- expired, move and ownership: unchanged.
+
+The mock has no orphaned holder or doubled links, so the new summary sections are covered by unit tests only. Cowork's live dry run will be their first real exercise.
+
+**Deferred, and why.**
+
+- **There is no restore or create-group proxy operation yet, and the page doesn't hold anything.** The only callers of the hold writes are the planner with `allowRestore` and the orchestrator (`runBulkDelete`), and the orchestrator is ported with the unwind, as phase 1 laid out. A live run that restored processes before there's an unwind to put them back is the R11 failure. So the allowlist gains the writes in the phase that first runs them from the browser.
+
+**Decisions Cowork should check.**
+
+- **`doubleCounted` is a flag, not a new status.** A new status would have taken those rows out of every `status === 'Mismatch'` filter, including the mismatch gate. That would change the rule, which the review said not to do yet. When Cowork confirms the shape, changing the gate is one line.
+- **The snapshot falls back to the listing's group UniqueId** when the numeric-to-UniqueId map doesn't have the group. The script's index had no group UniqueId to fall back to, and the app's index does. Without the fallback the field would be empty, and the delete call would be sent with no group.
+- **The coverage and orphaned-target warnings on the dry run** weren't asked for. They're the script's pre-flight text, and they cost no extra calls.
+
+---
+
 ## F4. Fixes from the W4 live test
 
 Commit `ba4028b` on `claude/web-f4-ownership-fixes`, stacked on F3.

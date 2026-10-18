@@ -250,7 +250,7 @@ results row (report: project doc `claude/bulk-ops-r12-2026-10-18.md`). Three fix
 
 ## W5. Bulk Delete engine
 
-Status: Ready. Phases 1 and 2 done and **reviewed by Cowork**; phase 3 (hold) is next
+Status: Ready. Phases 1 and 2 done and **reviewed by Cowork**; phase 3 (hold) done in a3ee966; stopped for review before reference removal
 
 ### Cowork's review of phase 2 (18 Oct)
 
