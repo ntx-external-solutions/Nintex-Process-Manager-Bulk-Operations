@@ -108,7 +108,27 @@ export function processStateSnapshot(
   uniqueIds: readonly string[],
   groupUniqueIds?: ReadonlyMap<string, string>,
 ): ProcessStateSnapshot {
-  return notPorted('hold');
+  const snapshot: ProcessStateSnapshot = new Map();
+  for (const id of uniqueIds) {
+    if (!id) continue;
+    const entry = index.get(id.toLowerCase());
+    if (!entry) continue;
+    // The map first, as the script resolves it; then the listing's own group UniqueId,
+    // which the app's index carries and the script's did not.
+    const mapped = entry.groupId !== null ? groupUniqueIds?.get(String(entry.groupId)) : undefined;
+    snapshot.set(entry.uniqueId.toLowerCase(), {
+      uniqueId: entry.uniqueId,
+      name: entry.name,
+      numericId: entry.numericId,
+      wasArchived: entry.isArchived,
+      isArchivedNow: entry.isArchived,
+      originalGroupId: entry.groupId,
+      originalGroupUniqueId: mapped ?? entry.groupUniqueId ?? '',
+      originalGroupExists: readGroupExists(entry.groupExists).exists,
+      restoredByThisRun: false,
+    });
+  }
+  return snapshot;
 }
 
 /**
@@ -128,9 +148,13 @@ export function tenantStateSnapshot<E extends IndexEntry>(index: ReadonlyMap<str
 export function markSnapshotRestored(
   snapshot: ProcessStateSnapshot | null,
   uniqueId: string,
-  holdingGroupId?: number | null,
+  // The script takes the holding group id and never uses it; kept for the same signature.
+  _holdingGroupId?: number | null,
 ): void {
-  return notPorted('hold');
+  const row = snapshot?.get(uniqueId.toLowerCase());
+  if (!row) return;
+  row.restoredByThisRun = true;
+  row.isArchivedNow = false;
 }
 
 export type LedgerRole = 'Target' | 'Holder';
@@ -159,7 +183,21 @@ export interface ParticipantRecord extends PlanLedgerRow {
 
 /** Snapshot rows as plan ledger rows, all `Target`, so the plan can be saved before the first mutation. Port of `ConvertTo-PlanLedgerEntry`. */
 export function snapshotToPlanLedger(snapshot: ProcessStateSnapshot | null): PlanLedgerRow[] {
-  return notPorted('hold');
+  return [...(snapshot?.values() ?? [])].map((row) => ({
+    uniqueId: row.uniqueId,
+    name: row.name,
+    numericId: row.numericId,
+    wasArchived: row.wasArchived,
+    originalGroupUniqueId: row.originalGroupUniqueId,
+    originalGroupId: row.originalGroupId,
+    originalGroupExists: readGroupExists(row.originalGroupExists).exists,
+    restoredByThisRun: row.restoredByThisRun,
+    // A snapshot only covers the run's own targets: holders are not known until the plan is built.
+    role: 'Target',
+    parkedInHoldingGroup: false,
+    denormalized: false,
+    deleted: false,
+  }));
 }
 
 /** The working ledger as plan rows, models dropped. Port of `ConvertTo-PlanLedgerRow`. */
@@ -192,7 +230,21 @@ export function mergePlanLedger(
   ledger: readonly PlanLedgerRow[],
   snapshot: ProcessStateSnapshot | null,
 ): PlanLedgerRow[] {
-  return notPorted('hold');
+  const existing = new Map(ledger.filter((r) => r.uniqueId).map((r) => [r.uniqueId.toLowerCase(), r]));
+  const covered = new Set<string>();
+  const merged: PlanLedgerRow[] = [];
+  for (const row of snapshotToPlanLedger(snapshot)) {
+    if (!row.uniqueId) continue;
+    const key = row.uniqueId.toLowerCase();
+    covered.add(key);
+    // A fresh snapshot row reports both as false; the plan may already know better.
+    const prior = existing.get(key);
+    merged.push(prior ? { ...row, deleted: row.deleted || prior.deleted, denormalized: row.denormalized || prior.denormalized } : row);
+  }
+  for (const row of ledger) {
+    if (row.uniqueId && !covered.has(row.uniqueId.toLowerCase())) merged.push(row);
+  }
+  return merged;
 }
 
 /**

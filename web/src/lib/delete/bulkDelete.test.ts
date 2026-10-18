@@ -706,7 +706,7 @@ test('the summary names every process the run left needing attention, and only t
   assert.doesNotMatch(clean, /STILL NEEDS MANUAL ATTENTION/, 'and a clean run says nothing of the kind');
 });
 
-test('folding the snapshot into the plan ledger keeps every holder', { skip: PHASE.hold }, () => {
+test('folding the snapshot into the plan ledger keeps every holder', () => {
   const snapshot: ProcessStateSnapshot = new Map([
     [
       'aaa',

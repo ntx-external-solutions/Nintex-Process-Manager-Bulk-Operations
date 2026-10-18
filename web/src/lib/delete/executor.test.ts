@@ -187,7 +187,7 @@ test('an archived holder reads as archived', async () => {
   assert.equal(entry(index, holder.UniqueId)?.isArchived, true, 'the holder reads as archived');
 });
 
-test('an archived holder is restored so its hidden edges show, and its home is recorded first', { skip: PHASE.hold }, async () => {
+test('an archived holder is restored so its hidden edges show, and its home is recorded first', async () => {
   const { tenant, holder, target } = capturedTenant({ holderArchived: true });
   const index = await loadDeleteIndex(tenant);
   const p = await plan(tenant, { targetUniqueIds: [target.UniqueId], index, holdingGroupId: 999, allowRestore: true });
@@ -380,7 +380,7 @@ test('a preview restores nothing and says so', async () => {
   assert.doesNotMatch(shown, /restored for the run/, 'the preview does not claim restores it never made');
 });
 
-test('a real run says what it restored', { skip: PHASE.hold }, async () => {
+test('a real run says what it restored', async () => {
   const { tenant, target } = capturedTenant({ holderArchived: true });
   const realIndex = await loadDeleteIndex(tenant);
   const real = await plan(tenant, { targetUniqueIds: [target.UniqueId], index: realIndex, holdingGroupId: 999, allowRestore: true });
@@ -603,7 +603,7 @@ function orphanTenant(state: OrphanState): FakeTenant {
 
 const atRest = (): OrphanState => ({ archived: [ORPHAN, HOLDER], groups: { [ORPHAN]: 1, [HOLDER]: 500, [LIVE]: 500 } });
 
-test('the index carries groupExists, and says when the listing never answered', { skip: PHASE.hold }, async () => {
+test('the index carries groupExists, and says when the listing never answered', async () => {
   const tenant = orphanTenant(atRest());
   const oIndex = await loadDeleteIndex(tenant);
   assert.equal(entry(oIndex, ORPHAN)?.groupExists, false, 'the index carries groupExists through from the listing payload');
@@ -628,7 +628,7 @@ test('the index carries groupExists, and says when the listing never answered', 
   );
 });
 
-test('a restore into a group that is gone is never sent', { skip: PHASE.hold }, async () => {
+test('a restore into a group that is gone is never sent', async () => {
   const tenant = orphanTenant(atRest());
   const refused = await restoreProcess(tenant, ORPHAN, 1, { destinationGroupExists: false });
   assert.equal(refused.ok, false, 'a restore into a group that is gone fails');
@@ -675,7 +675,7 @@ test('the unwind archives an orphan where it sits and says where, and sends the 
 
 const linkTo = (uniqueId: string, name: string) => [{ Type: 'Linked Process', Dependencies: [{ Name: name, UniqueId: uniqueId }] }];
 
-test('a holder whose group is gone is held in the holding group, not made a blocker', { skip: PHASE.hold }, async () => {
+test('a holder whose group is gone is held in the holding group, not made a blocker', async () => {
   const tenant = orphanTenant({
     archived: [ORPHAN],
     groups: { [ORPHAN]: 1, [HOLDER]: 500, [LIVE]: 500 },
@@ -707,7 +707,7 @@ test('a holder whose group is gone is held in the holding group, not made a bloc
   assert.equal(heldPlan.ledger.find((r) => r.uniqueId === LIVE)?.role, 'Target', 'the run target is labelled as one');
 });
 
-test('a holder that cannot be held anywhere still blocks the run', { skip: PHASE.hold }, async () => {
+test('a holder that cannot be held anywhere still blocks the run', async () => {
   // The holding group was the fallback. With that refused there is nowhere left to read
   // the holder, so its Input/Output edges stay hidden.
   const tenant = orphanTenant({
@@ -730,7 +730,7 @@ test('a holder that cannot be held anywhere still blocks the run', { skip: PHASE
   assert.equal(blockPlan.reconciliation.length, 0, 'the run stops before reconciliation, so there is no mismatch to misread');
 });
 
-test('an archived holder whose group still exists plans as it always did', { skip: PHASE.hold }, async () => {
+test('an archived holder whose group still exists plans as it always did', async () => {
   const tenant = orphanTenant({
     archived: [HOLDER],
     groups: { [ORPHAN]: 1, [HOLDER]: 500, [LIVE]: 500 },

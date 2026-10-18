@@ -18,7 +18,7 @@
  * relocates an active process, in module globals. Here each is returned or passed.
  */
 
-import { archiveOne, type ArchiveOptions } from '../archive/outcome.ts';
+import { archiveOne, failureOf, type ArchiveOptions } from '../archive/outcome.ts';
 import type { ResultRow } from '../exec/report.ts';
 import type { ProcessIndex } from '../tenant/state.ts';
 import type { CollateralChange, CollateralGateway } from './collateral.ts';
@@ -59,13 +59,26 @@ export interface RestoreOptions {
  * in `$script:NpmLastRestoreFailure` and `NpmLastRestoreStatus`. Port of
  * `Restore-NpmProcess`.
  */
-export function restoreProcess(
+export async function restoreProcess(
   gateway: Pick<DeleteGateway, 'restore'>,
   processUniqueId: string,
   processGroupId: number | null,
-  options?: RestoreOptions,
+  options: RestoreOptions = {},
 ): Promise<RestoreOutcome> {
-  return notPorted('hold');
+  // The listing already said the group is gone, and that answer is definitive: the call
+  // would be four 500s and 14 seconds of backoff to learn it again. A null group is the
+  // same case, since there is nowhere to send it. Distinct from an endpoint failure, so a
+  // caller can pick somewhere real instead of retrying.
+  if (options.destinationGroupExists === false || processGroupId === null) {
+    return { ok: false, failure: 'MissingGroup', statusCode: 0 };
+  }
+  try {
+    await gateway.restore(processUniqueId, processGroupId, options.retry === false ? { retry: false } : {});
+    return { ok: true, failure: null, statusCode: 0 };
+  } catch (error) {
+    if (options.isFatal?.(error)) throw error;
+    return { ok: false, failure: 'Endpoint', statusCode: failureOf(error).status };
+  }
 }
 
 export type SaveStage = 'Save' | 'SavedUnpublished' | 'Publish' | 'Published';
