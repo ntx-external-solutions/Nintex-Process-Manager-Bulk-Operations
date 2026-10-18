@@ -20,7 +20,7 @@ Commit `c5c7933` on `claude/web-f3-parity`, stacked on W5 phase 2.
 
 **Results-file operations.** None.
 
-**Tests.** 437 tests: 363 pass, 0 fail, 74 skipped. That is 3 new tests (the looped tree in the archive resolver, the move resolver and the tree view) plus the warning-text test. The resolver test fails with `RangeError: Maximum call stack size exceeded` on the old code, which I checked.
+**Tests.** 438 tests: 364 pass, 0 fail, 74 skipped. That is 3 new tests (the looped tree in the archive resolver, the move resolver and the tree view) plus the warning-text test. The resolver test fails with `RangeError: Maximum call stack size exceeded` on the old code, which I checked.
 
 **Decisions Cowork should check.**
 
