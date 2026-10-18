@@ -10,7 +10,7 @@ import { TREE_LEVELS } from '../select/fixtures.ts';
 import { EMPTY_SELECTION, toggle, type Selection } from '../select/selection.ts';
 import type { IndexEntry } from '../tenant/state.ts';
 import { buildMovePlan, classifyValidation, isDraftOverPublished, movePreviewRows, type MovePlan, type MovePlanReads } from './plan.ts';
-import { itemsToMove, runMoves, settleMoves, type MoveGateway } from './run.ts';
+import { describeOutcome, itemsToMove, runMoves, settleMoves, type MoveGateway } from './run.ts';
 import { destinationOf, resolveMoveSelection } from './select.ts';
 
 const FULL = [null, 'g-fin', 'g-ap', 'g-empty', 'g-hr'] as const;
@@ -314,6 +314,15 @@ test('success false, a refusal and a dead session are each reported, and journal
 
 // ---------------------------------------------------------------- final read
 
+test('a moved item\'s result says what became of its version', () => {
+  const base = { uniqueId: 'p', title: 'P', nodeType: 'process', fromParentUniqueId: null, fromDisplay: 'X', tenantMessage: null, siblings: [], viewersBefore: null, viewersAfter: null };
+  assert.equal(describeOutcome({ ...base, kind: 'process', cost: 'draft' }, { version: '2.0', revisionStateId: 3 }), 'Published as 2.0; the open draft went live.');
+  assert.equal(describeOutcome({ ...base, kind: 'process', cost: 'republish' }, { version: '4.0', revisionStateId: 3 }), 'Published as 4.0.');
+  assert.equal(describeOutcome({ ...base, kind: 'process', cost: 'clean' }, { version: '0.4', revisionStateId: 1 }), 'Now at 0.4, in progress and not published.');
+  assert.equal(describeOutcome({ ...base, kind: 'process', cost: 'republish' }, { version: '2.1', revisionStateId: 2 }), 'Now at 2.1, awaiting approval.');
+  assert.equal(describeOutcome({ ...base, kind: 'group', cost: 'group' }, null), 'No process revision changed.');
+});
+
 function item(uniqueId: string, itemType = 'process'): TreeItem {
   return { ...(TREE_LEVELS['g-fin']![1] as TreeItem), uniqueId, itemType: itemType as TreeItem['itemType'] };
 }
@@ -342,12 +351,19 @@ test('the final read settles each move, and siblings get their own rows', async 
   const after = new Map<string, IndexEntry>([
     ['p-exp-s', { uniqueId: 'p-exp-s', name: 'Expense claims :: Staff', isArchived: false, groupId: 9, groupUniqueId: 'g-hr', groupName: 'People', groupExists: true }],
   ]);
-  const settled = settleMoves(draft, plan, levels, after);
+  const revisions = new Map<string, Revision | null>([
+    ['p-exp-c', { version: '3.0', revisionStateId: 3 }],
+    ['p-pay', null],
+  ]);
+  const settled = settleMoves(draft, plan, levels, after, revisions);
   const status = (id: string) => settled.find((r) => r.objectId === id)?.status;
+  const message = (id: string) => settled.find((r) => r.objectId === id)?.message ?? '';
   assert.equal(status('p-close'), 'Failed');
   assert.equal(status('p-exp-c'), 'Success');
+  // What happened, not the preview's "will be published".
+  assert.equal(message('p-exp-c'), 'Moved from Finance to People. Published as 3.0.');
   assert.equal(status('p-pay'), 'Success');
-  assert.match(settled.find((r) => r.objectId === 'p-pay')?.message ?? '', /confirmed by the final read/);
+  assert.match(message('p-pay'), /confirmed by the final read.*Its version could not be re-read\.$/);
   assert.equal(status('p-exp-s'), 'Success');
   assert.match(settled.find((r) => r.objectId === 'p-exp-s')?.message ?? '', /with its variation set/);
 });

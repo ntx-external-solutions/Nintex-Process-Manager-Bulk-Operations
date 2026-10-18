@@ -11,6 +11,9 @@
 //   node dev/mock-pm.mjs [port]      (default 4999; sign in to http://localhost:4999/tenant)
 //
 // GET /tenant/_log returns every request it has seen, for asserting what was sent.
+// GET /tenant/_expire kills the token the way R12 measured a dead one: 302 to the sign-in
+// page from GET /Api/v1/Processes/{id} and ArchiveProcess, 401 from everything else.
+// ?mode=redirects expires only the two 302 endpoints, so a run can reach them.
 
 import http from 'node:http';
 
@@ -62,6 +65,8 @@ const chain = (g) => {
 };
 
 const log = [];
+let expired = null;
+const REDIRECTING = [/^\/Api\/v1\/Processes\/[^/]+$/, /^\/Process\/Edit\/ArchiveProcess$/];
 const send = (res, status, body) => {
   res.writeHead(status, { 'content-type': 'application/json' });
   res.end(body === undefined ? '' : JSON.stringify(body));
@@ -75,11 +80,20 @@ http.createServer(async (req, res) => {
   log.push(`${req.method} ${p}${url.search} ${body}`);
 
   if (p === '/_log') return send(res, 200, log);
+  if (p === '/_expire') {
+    expired = url.searchParams.get('mode') ?? 'all';
+    return send(res, 200, { expired });
+  }
   if (p === '/oauth2/token') return send(res, 200, { access_token: 'tok', expires_in: 3600 });
   if (p === '/api/scim/users') {
     if (req.headers.authorization !== 'Bearer scim-key') return send(res, 401, { detail: 'bad key' });
     return send(res, 200, { Resources: scimUsers, totalResults: scimUsers.length });
   }
+  if (expired && REDIRECTING.some((r) => r.test(p))) {
+    res.writeHead(302, { location: '/tenant/Account/Login' });
+    return res.end();
+  }
+  if (expired === 'all' && p !== '/api/scim/users') return send(res, 401, { message: 'no' });
   if (req.headers.authorization !== 'Bearer tok') return send(res, 401, { message: 'no' });
 
   if (p === '/Process/View/GetChildProcessGroupTreeItems') {

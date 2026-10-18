@@ -20,6 +20,7 @@ AUTH_SECRET=... SCIM_BASE_URL=http://localhost:4999 npx next start -p 3919
 node dev/drive-archive.mjs
 node dev/drive-move.mjs
 node dev/drive-ownership.mjs   # SCIM key: scim-key
+node dev/drive-expired.mjs     # the session dies between preview and run (R12)
 ```
 
 Each script prints the screens it passes through and the write calls the mock received.
