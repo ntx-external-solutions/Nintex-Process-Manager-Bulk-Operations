@@ -21,7 +21,7 @@ Work F1 first (small, from Cowork's review of your W2 to W3 reports), then W4, t
 
 ## F1. Answers to the W2 to W3 questions, and one cleanup bug
 
-Status: Ready
+Status: Done (c1667ad)
 
 From your "Decisions Cowork should check" notes, using what the spikes recorded:
 
