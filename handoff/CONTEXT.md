@@ -39,12 +39,15 @@ Maintained by the Cowork session. Claude Code reads this but does not edit it.
   phase 4.
 - W5 phase 4 (reference removal) reviewed and approved; the publish path must be read
   from each process (reuse W4's `chooseWritePath`), fixed at the start of phase 5.
-- Phase 4 live check: right except 2 Input pairs still blocking (pair total ignores Inputs
-  held by the related process); fix queued at the start of phase 5.
-- Next for Cowork: re-run the dry run after phase 5's fixes deploy; review phase 5 (checkpoints);
-  live mutation testing waits for the unwind phase.
+- W5 phase 5 (checkpoints) reviewed and approved; live dry run after PR #66 shows 0 blocking
+  mismatches (20 doubled, 1 over-claim, 3 reconciled across categories). Draft holders:
+  refuse by default with an opt-in to publish, handed to phase 6.
+- Next for Cowork: review phase 6 (delete); the first live mutation test comes with the
+  unwind phase, on Cowork-built test content (include an orphaned holder, a holder with an
+  open draft, and one awaiting approval if the tenant allows).
+- Process and group names were removed from Cowork's handoff text (18 Oct) per CLAUDE.md.
 - Spikes S1 to S3 and the variation test are in `API_ARCHITECTURE.md`. One lasting change
-  on the tenant: "SOC 2 Submission Review" and its Partner variation are published at 3.0.
+  on the tenant: the variation set used for the S2 move test is published at 3.0 (both variations).
 - Restricting sign-in to known Process Manager hosts is deferred by JB.
 
 ## What R11 confirmed working
