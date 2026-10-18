@@ -42,9 +42,12 @@ Maintained by the Cowork session. Claude Code reads this but does not edit it.
 - W5 phase 5 (checkpoints) reviewed and approved; live dry run after PR #66 shows 0 blocking
   mismatches (20 doubled, 1 over-claim, 3 reconciled across categories). Draft holders:
   refuse by default with an opt-in to publish, handed to phase 6.
-- Next for Cowork: review phase 6 (delete); the first live mutation test comes with the
-  unwind phase, on Cowork-built test content (include an orphaned holder, a holder with an
-  open draft, and one awaiting approval if the tenant allows).
+- W5 phase 6 (delete) reviewed and approved; held-back targets must be decided before any
+  reference is removed (fix at the start of phase 7).
+- Next for Cowork: plan R13, the first live delete, on Cowork-built test content: targets
+  with an active holder, an archived holder, an archived holder whose group is gone, a
+  holder with an open draft (unticked and ticked), and two holders of one target where
+  one has a draft (the ordering case). Run it once phase 7 deploys.
 - Process and group names were removed from Cowork's handoff text (18 Oct) per CLAUDE.md.
 - Spikes S1 to S3 and the variation test are in `API_ARCHITECTURE.md`. One lasting change
   on the tenant: the variation set used for the S2 move test is published at 3.0 (both variations).
