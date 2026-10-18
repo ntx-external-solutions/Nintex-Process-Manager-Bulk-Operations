@@ -10,6 +10,25 @@ and documents.
 > [Limitations](#limitations). Nintex Process Manager itself is a legacy product, but
 > this tooling is maintained and Mode 5 has been exercised against a live tenant.
 
+## The web app
+
+The product is becoming a web app on Vercel, in [`web/`](web/README.md). This script is
+frozen at v4.11 and stays as the reference implementation for the delete engine until
+the web delete has passed the same live rounds. The design is in
+[`handoff/SPEC-WEB.md`](handoff/SPEC-WEB.md).
+
+To run the web app locally (Node 24):
+
+```sh
+cd web
+npm install
+cp .env.example .env.local   # then set AUTH_SECRET to 32+ characters
+npm run dev                  # http://localhost:3000
+```
+
+`npm test` and `npm run typecheck` run its checks. See [`web/README.md`](web/README.md)
+for what it does so far and how to deploy it.
+
 ## Features
 
 This script supports five distinct operation modes:

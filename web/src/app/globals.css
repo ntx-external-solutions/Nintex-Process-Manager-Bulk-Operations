@@ -1,0 +1,528 @@
+:root {
+  --bg: #ffffff;
+  --fg: #1a1a1a;
+  --muted: #5c6470;
+  --border: #e2e5e9;
+  --accent: #1c6bba;
+  --panel: #f7f8fa;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171a;
+    --fg: #e8eaed;
+    --muted: #99a1ac;
+    --border: #2a2f36;
+    --accent: #6aa9e9;
+    --panel: #1b1f24;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  line-height: 1.55;
+}
+
+main {
+  max-width: 46rem;
+  margin: 0 auto;
+  padding: 3rem 1.5rem 5rem;
+}
+
+h1 {
+  font-size: 1.6rem;
+  margin: 0 0 0.35rem;
+}
+
+.lede {
+  color: var(--muted);
+  margin: 0 0 2rem;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1rem;
+}
+
+.panel h2 {
+  font-size: 1rem;
+  margin: 0 0 0.5rem;
+}
+
+.panel p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.925rem;
+}
+
+ul.checklist {
+  margin: 0;
+  padding-left: 1.1rem;
+  color: var(--muted);
+  font-size: 0.925rem;
+}
+
+ul.checklist li {
+  margin: 0.2rem 0;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.875em;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.05rem 0.3rem;
+}
+
+footer {
+  margin-top: 2.5rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+label {
+  display: block;
+  font-size: 0.875rem;
+  font-weight: 600;
+  margin: 0.85rem 0 0.25rem;
+}
+
+label:first-child {
+  margin-top: 0;
+}
+
+input {
+  width: 100%;
+  padding: 0.5rem 0.65rem;
+  font: inherit;
+  font-size: 0.95rem;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+button {
+  margin-top: 1.1rem;
+  padding: 0.5rem 1rem;
+  font: inherit;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+button.secondary {
+  color: var(--fg);
+  background: transparent;
+  border-color: var(--border);
+}
+
+.row {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.panel.error {
+  border-color: #c2453d;
+}
+
+.panel.error h2 {
+  color: #c2453d;
+}
+
+a {
+  color: var(--accent);
+}
+
+/* ---------------------------------------------------------------- plan */
+
+/* The preview needs more room than a form does. */
+main:has(.counts) {
+  max-width: 68rem;
+}
+
+.panel.warning {
+  border-color: #b4761c;
+}
+
+.panel.warning h2 {
+  color: #b4761c;
+}
+
+h2.section {
+  font-size: 1.15rem;
+  margin: 2.25rem 0 0.75rem;
+}
+
+.counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-bottom: 1rem;
+}
+
+.count {
+  flex: 1 1 8rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.7rem 0.9rem;
+}
+
+.count .value {
+  display: block;
+  font-size: 1.5rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.count .label {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.count.loud .value {
+  color: var(--accent);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 0.75rem;
+  font-size: 0.9rem;
+}
+
+th {
+  text-align: left;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  padding: 0.35rem 0.6rem 0.35rem 0;
+}
+
+td {
+  vertical-align: top;
+  border-bottom: 1px solid var(--border);
+  padding: 0.5rem 0.6rem 0.5rem 0;
+}
+
+td.muted {
+  color: var(--muted);
+}
+
+td.nowrap {
+  white-space: nowrap;
+}
+
+.small {
+  font-size: 0.82rem;
+}
+
+.diff {
+  font-size: 0.875rem;
+}
+
+.diff .added {
+  color: #1f7a43;
+}
+
+.diff .removed {
+  color: #c2453d;
+}
+
+.diff .kept,
+.truncated,
+.filename {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  .diff .added {
+    color: #5cc98a;
+  }
+
+  .diff .removed {
+    color: #e8837c;
+  }
+}
+
+.tag {
+  margin-left: 0.4rem;
+  padding: 0.02rem 0.35rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+
+ul.issues {
+  margin: 0.5rem 0 0;
+  padding-left: 1.1rem;
+  font-size: 0.9rem;
+}
+
+ul.issues li {
+  margin: 0.25rem 0;
+}
+
+ul.issues .line {
+  display: inline-block;
+  min-width: 4.5rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+input[type='file'] {
+  padding: 0.4rem;
+  font-size: 0.9rem;
+}
+
+label.checkbox {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+  margin-top: 1rem;
+  font-weight: 400;
+  font-size: 0.9rem;
+}
+
+label.checkbox input {
+  width: auto;
+  margin-top: 0.25rem;
+}
+
+/* A set of mutually exclusive answers, each with its consequence spelled out. */
+.choices {
+  display: grid;
+  gap: 0.25rem;
+  margin-top: 0.5rem;
+}
+
+.choices .detail {
+  display: block;
+  margin-top: 0.15rem;
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+.pending {
+  margin-top: 1rem;
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+/* ------------------------------------------------------ structure tree */
+
+ul.tree {
+  margin: 0.5rem 0 0;
+  padding-left: 0;
+  list-style: none;
+  font-size: 0.925rem;
+}
+
+ul.tree ul.tree {
+  margin-top: 0.15rem;
+  /* The guide line is what makes depth readable at a glance. */
+  margin-left: 0.45rem;
+  padding-left: 0.9rem;
+  border-left: 1px solid var(--border);
+}
+
+ul.tree li {
+  margin: 0.15rem 0;
+}
+
+ul.tree li.new > .name {
+  font-weight: 600;
+  color: #1f7a43;
+}
+
+@media (prefers-color-scheme: dark) {
+  ul.tree li.new > .name {
+    color: #5cc98a;
+  }
+}
+
+ul.tree .tag.new {
+  color: #1f7a43;
+  border-color: currentColor;
+}
+
+@media (prefers-color-scheme: dark) {
+  ul.tree .tag.new {
+    color: #5cc98a;
+  }
+}
+
+/* A move is the change most worth spotting in the tree — it takes a whole subtree,
+   and its permissions, somewhere else. Amber rather than green: not a new thing. */
+ul.tree li.moved > .name {
+  font-weight: 600;
+  color: #a15c00;
+}
+
+ul.tree .tag.moved {
+  color: #a15c00;
+  border-color: currentColor;
+}
+
+ul.tree li.renamed > .name {
+  font-weight: 600;
+}
+
+@media (prefers-color-scheme: dark) {
+  ul.tree li.moved > .name,
+  ul.tree .tag.moved {
+    color: #e0a458;
+  }
+}
+
+ul.tree li.hidden-children {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-style: italic;
+}
+
+/* Disclosure rows in the group browser. */
+button.disclosure,
+span.disclosure {
+  display: inline-flex;
+  gap: 0.35rem;
+  align-items: baseline;
+  margin: 0;
+  padding: 0.05rem 0.2rem;
+  font: inherit;
+  font-size: 0.925rem;
+  font-weight: 400;
+  color: var(--fg);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  text-align: left;
+}
+
+span.disclosure.leaf {
+  cursor: default;
+}
+
+button.disclosure:hover {
+  background: var(--bg);
+  border-color: var(--border);
+}
+
+.disclosure .marker {
+  display: inline-block;
+  width: 0.9em;
+  color: var(--muted);
+  font-size: 0.8em;
+}
+
+.crumb {
+  margin: 0 0 0.75rem;
+  font-size: 0.875rem;
+}
+
+/* An action that reads as prose, for things offered inside a sentence. */
+button.link {
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  background: none;
+  border: none;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+button.link:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+
+a.button {
+  display: inline-block;
+  margin-top: 1.1rem;
+  padding: 0.5rem 1rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  text-decoration: none;
+}
+
+/* ---------------------------------------------------------- operation tiles */
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.tile {
+  display: block;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  color: inherit;
+  text-decoration: none;
+}
+
+.tile h2 {
+  font-size: 1rem;
+  margin: 0 0 0.35rem;
+}
+
+.tile p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.tile[aria-disabled='true'] {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.tile .status {
+  display: inline-block;
+  margin-top: 0.6rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
