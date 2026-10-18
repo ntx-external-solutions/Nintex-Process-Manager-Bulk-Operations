@@ -1324,3 +1324,97 @@ If you encounter an API-related issue:
 3. Check the -Depth parameter on ConvertTo-Json (should be 20)
 4. Review the debug logs from Invoke-ApiPut/Post/Get functions
 5. For document deletion, ensure you're using numeric `documentId`, not `documentUniqueId`
+
+---
+
+## Spike results, 18 Oct 2026 (web rebuild S1 to S3)
+
+Measured on the demo tenant from a signed-in browser session (cookie auth plus the
+page's `__RequestVerificationToken`), not a bearer token. Every request below is one the
+script or PGM already makes with a bearer token, except the breadcrumb call, which still
+needs a bearer check. All test content was created for the spike and named `ZZ Spike`.
+
+### S1. `DeleteGroup` and archived content
+
+`POST /Process/Edit/DeleteGroup` with `{"processGroupUniqueId": "<uuid>"}`.
+
+| Group holds | Result |
+|---|---|
+| Nothing visible in the tree, one **archived process** | **200, group deleted.** The process survives as an orphan: `groupExists: false`, `groupId: 1` placeholder from the first read. No prompt, no refusal. |
+| One **archived document** | **409**, `errorCode: "AssociatedContents"`, `caption: "Unable to Delete Group"`, `additionalInfos.documents: ["<name> (archived)"]`. Group not deleted. |
+| Nothing, after the archived document was permanently deleted | 200, group deleted. |
+
+So the server guards documents, archived or not, but **does not guard archived
+processes**. The UI's "Unable to Delete Group" dialog is this 409; it simply never fires
+for archived processes. `ValidateGroupAction` raised nothing for any action type 1 to 14
+on a group holding only an archived process. Anything that deletes groups must check for
+archived processes itself (archived listing, ListType 7, filtered by `groupUniqueId`).
+Not tested: a group holding an active process.
+
+Documents filter by group in both lists:
+`/bff/document/api/v1/documents?...&ListType=Archived&ProcessGroupId=<uuid>`. Document
+archive is `POST /bff/document/api/v1/documents/{id}/archive` with `{}` (204); permanent
+delete is `DELETE /bff/document/api/v1/documents/bulk` with `{"documentIds":[id]}` (200,
+`{"errors":[]}`).
+
+After deletion, the breadcrumb for the deleted group returned an empty chain. Group 832
+(deleted after round 3) still resolves, so a deleted group's path is sometimes
+recoverable and sometimes not. Don't rely on it.
+
+### S2. Moving with `ReorderTreeNodes`
+
+`POST /Process/Edit/ReorderTreeNodes` with one node,
+`{NodeType: <itemType>, ParentUniqueId, OriginalParentUniqueId, ChildUniqueId, Position: -1, SiblingUniqueId: null}`.
+
+| Moved | Result | Revision effect |
+|---|---|---|
+| `inprogress-process` | 200, `{"success":true,"errors":[]}`, home group updated | **Minor bump**, 0.2 to 0.3 |
+| `process` (published, v1.0) | 200, home group updated | **New major version published**, 1.0 to 2.0, state 3 |
+| `group` holding a published process | 200, group reparented | **None.** The process stayed at 2.0 |
+
+**PGM's "moving a process does not touch its revision" is wrong for processes.** It holds
+for groups. `ValidateProcessAction?actionType=11&isShortcut=false&processGroupUniqueId=<dest>`
+says so for a published process: `isPrompt: true`, title "Publish New Version?", message
+"for this change to take effect a new version will be created and published". For an
+in-progress process it returns valid with no prompt. The move endpoint does not enforce
+the prompt. Whether the republish notifies stakeholders was not measured.
+
+`ValidateGroupAction` action types 4 and 5 answer "A source and a destination process
+group must be provided when moving a process group" and take no destination parameter
+we know of, so group-move pre-flight stays on PGM's client-side checks.
+
+Not tested: variations (could not create one without tenant setup, and moving a real one
+would republish it) and `suggested-process`.
+
+### Tree item types on the demo tenant
+
+Full walk: 114 requests, about 18 seconds, skipping groups with `hasChild: false`.
+`group` 244, `inprogress-process` 137, `process` 19 (published), `linked-process` 5,
+`suggested-process` 2. No `documentgroup`, `vanillaprocess` or `embeddedprocess`.
+
+**`linked-process` is a shortcut.** Each one carries the same `uniqueId` as a process
+homed in another group (for example "Example Process Name" is `inprogress-process` in its
+home and `linked-process` under two other groups). Acting on it acts on the home process.
+
+13 items carry a `variationSetId`, as `inprogress-process` or `process`.
+
+### S3. Paths for the archived view
+
+Archived rows (`/Bff/Process/api/v1/processes?ListType=7`) carry only the immediate group:
+`groupId`, `groupUniqueId`, `groupName`, `groupExists`. No path, and the list shows
+"Needs to be reassigned N/A" as owner and expert on every row whatever the real values.
+
+`GET /bff/navigation/api/v1/breadcrumb?type=ProcessGroup&id=<groupUniqueId>` returns the
+ancestor chain, root (the tenant) first and the group itself last. All 47 distinct live
+groups in the archive resolved, depths 1 to 6, in about 4 seconds sequentially. One call
+per distinct group, not per row. `/breadcrumb/children` is the one-level children call
+already documented above.
+
+### Publishing needs a message in "Publish Only mode"
+
+`POST /Api/v1/Processes/{id}/Publish` with only `ProcessRevisionEditId` and
+`IsPublishNow` returned **400** "A message must be added when publishing in Publish Only
+mode". Adding `"PublishMessage": "<text>"` returned 200 and published (`Message`
+was not accepted). This is a tenant setting. The archive override in R11 succeeded
+without a message, so either that path is exempt or the setting changed since; send the
+change description as `PublishMessage` on every publish to be safe.
