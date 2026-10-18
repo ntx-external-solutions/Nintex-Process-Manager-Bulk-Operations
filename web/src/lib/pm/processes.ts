@@ -312,7 +312,7 @@ export async function listAllProcesses(
 export interface GroupDocuments {
   /** Every document whose primary group this is, archived or not. */
   total: number;
-  /** Names from the first page, for the report. */
+  /** Names from the first page of each list, for the report. Archived ones say so. */
   names: string[];
 }
 
@@ -320,17 +320,31 @@ export interface GroupDocuments {
  * The documents in one group, archived or not.
  *
  * Documents block DeleteGroup (409, spike S1), so cleanup checks for them first and
- * keeps the group rather than sending a delete it knows will be refused. One page is
- * enough: the question is "any?", and the names are for the report.
+ * keeps the group rather than sending a delete it knows will be refused. One page of
+ * each list is enough: the question is "any?", and the names are for the report.
+ *
+ * Two reads, because `ListType=All` does not include archived documents. Measured in S1
+ * and raised in Cowork's review of W2b (F1): with the test document archived, `All`
+ * returned 0 rows, `Archived` returned 1, and that document still made DeleteGroup
+ * answer 409. Reading `All` alone called that group deletable.
  */
 export async function getGroupDocuments(ctx: PmContext, groupUniqueId: string): Promise<GroupDocuments> {
-  const response = await pmRequest<{ items?: Array<{ documentName?: string }> | null; totalItemCount?: number }>(ctx, {
-    path: '/bff/document/api/v1/documents',
-    query: { Page: 1, PageSize: 200, ListType: 'All', DocumentType: 'All', ProcessGroupId: groupUniqueId },
-  });
-  const items = response?.items ?? [];
+  const read = (listType: 'All' | 'Archived') =>
+    pmRequest<{ items?: Array<{ documentName?: string }> | null; totalItemCount?: number }>(ctx, {
+      path: '/bff/document/api/v1/documents',
+      query: { Page: 1, PageSize: 200, ListType: listType, DocumentType: 'All', ProcessGroupId: groupUniqueId },
+    });
+  const count = (response: Awaited<ReturnType<typeof read>>) => {
+    const items = response?.items ?? [];
+    return {
+      total: typeof response?.totalItemCount === 'number' ? Math.max(response.totalItemCount, items.length) : items.length,
+      names: items.map((item) => item.documentName ?? '').filter((name) => name !== ''),
+    };
+  };
+  const live = count(await read('All'));
+  const archived = count(await read('Archived'));
   return {
-    total: typeof response?.totalItemCount === 'number' ? Math.max(response.totalItemCount, items.length) : items.length,
-    names: items.map((item) => item.documentName ?? '').filter((name) => name !== ''),
+    total: live.total + archived.total,
+    names: [...live.names, ...archived.names.map((name) => `${name} (archived)`)],
   };
 }

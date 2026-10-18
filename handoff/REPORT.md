@@ -6,6 +6,65 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## F1. Answers to the W2 to W3 questions, and one cleanup bug
+
+Commit `c1667ad` on `claude/web-f1-fixes`.
+
+**What changed.**
+
+- **Cleanup and archived documents.** `getGroupDocuments` (`pm/processes.ts`) now reads
+  `ListType=All` and `ListType=Archived` and adds them up, so a group whose only
+  document is archived is kept and reported, not offered for deletion. Archived names
+  carry "(archived)" in the reason. I made the change in the read rather than in
+  `gatherFacts`, so `group.documents` stays one proxy operation (two tenant calls) and the
+  planner and its tests are unchanged.
+- **Breadcrumb.** `breadcrumbTitles` (`pm/groups.ts`) reads only the captured shape,
+  `breadcrumbItems[].name`, dropping the first item (the tenant). An empty list is an
+  empty path. The guessed shapes are gone.
+- **Group links.** `groupLink` gives `{siteUrl}/Process/Group/{uuid}`. `itemLink` moved
+  from the results component into `archive/run.ts` beside `processLink`. It links
+  `ProcessGroup` rows as well as processes, on screen and in the manual review file.
+  Documents still get no link.
+- **Draft detection.** `isDraftOverPublished` (`move/plan.ts`): revision state 1 at a
+  major version of 1 or more. `buildMovePlan` reads the model through `process.summary`
+  (new `revision` read on `MovePlanReads`) **only for moves the pre-flight prompted on
+  whose wording didn't already say "outstanding changes"**. Either signal puts the process
+  in "Tick to move". If that read fails, the process goes there as `unknown`, with a note.
+- **Dev tools.** `web/dev/`: `mock-pm.mjs` (stand-in Process Manager, all names made up),
+  `cdp.mjs` (headless Chrome driver), `drive-archive.mjs`, `drive-move.mjs`, and a
+  README. Nothing in `src/` imports them, and they sit outside the build and the
+  typecheck. I extended the mock with archived documents, the breadcrumb and a full
+  process model.
+
+**Results-file operations.** None new or renamed.
+
+**Tests.** 244 tests, 244 pass (5 new, 1 rewritten). Covered: both document lists
+read and summed, a group with only an archived document has documents, the captured
+breadcrumb shape (and an empty one, and the old shapes no longer read), group and
+document links, the revision rule, a draft the wording misses caught by its revision
+(with only that one model read sent), and a failed revision read setting the process
+aside.
+
+**End-to-end, offline.** Against the mock, production build, headless Chrome. Archive
+then cleanup: Retired deleted (one `DeleteGroup`), and Forms, Policies (archived
+document only), Payables and Finance kept. Before this fix Policies would have been
+offered for deletion. Move: two `ReorderTreeNodes` calls, the draft left unticked, and
+one model read, for the published process.
+
+**Decisions Cowork should check.**
+
+- **The structured check costs one extra GET per published process moved**, not zero.
+  The move plan never called `process.summary`, and it reads `variationSetData` only for
+  processes the tree marks with a set. For a large move of published processes this
+  roughly doubles the pre-flight calls. I could fold both into one read later if it
+  matters.
+- A move the pre-flight doesn't prompt on is never model-read. S2 says every process with
+  a published version prompts, so a draft over a published version always prompts.
+- `group.documents` makes two tenant calls. If the archived document list is ever
+  refused for a permission reason, the read fails and the group is kept, which is safe.
+
+---
+
 ## W3. Bulk Move
 
 Commit `5ebca76` on `claude/web-w3-move`, stacked on W2b.

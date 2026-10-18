@@ -9,7 +9,9 @@
  *    the server's pre-flight announces as "Publish New Version?";
  *  - a process with an open draft gets the draft published with it ("has outstanding
  *    changes ... will also be published"). Those go in their own section, not selected
- *    unless the operator ticks each one;
+ *    unless the operator ticks each one. The wording is one signal; the revision is the
+ *    other (`isDraftOverPublished`), so a tenant that words it differently still lands
+ *    the process there;
  *  - a variation moves its whole set. Siblings are not in the tree, so they are named
  *    from `variationSetData`.
  *
@@ -19,6 +21,7 @@
 
 import { resultRow, type ResultRow } from '../exec/report.ts';
 import type { GroupViewerCount } from '../pm/groups.ts';
+import type { ProcessSummary } from '../pm/operations.ts';
 import type { VariationMember, VariationSet } from '../pm/processes.ts';
 import type { ValidateActionResponse } from '../pm/types.ts';
 import type { BrowseTree } from '../select/browse.ts';
@@ -92,8 +95,21 @@ export function classifyValidation(validation: ValidateActionResponse | null): {
   return { cost: 'clean', message };
 }
 
+/**
+ * True when the process has an open draft over a published version: revision state 1
+ * (in progress) at a major version of 1 or more. Measured for F1: never-published
+ * processes were 0.x in state 1, and the draft over a published version was 1.1 in
+ * state 1.
+ */
+export function isDraftOverPublished(revision: Pick<ProcessSummary, 'version' | 'revisionStateId'>): boolean {
+  const major = Number.parseInt(String(revision.version ?? '').split('.')[0] ?? '', 10);
+  return revision.revisionStateId === 1 && Number.isInteger(major) && major >= 1;
+}
+
 export interface MovePlanReads {
   validateMove(processUniqueId: string, destinationGroupUniqueId: string): Promise<ValidateActionResponse>;
+  /** The model's version and revision state, for the structured draft check. */
+  revision(processUniqueId: string): Promise<Pick<ProcessSummary, 'version' | 'revisionStateId'>>;
   variationSet(processUniqueId: string): Promise<VariationSet | null>;
   viewers(groupIds: number[]): Promise<GroupViewerCount[]>;
   isFatal?: (error: unknown) => string | null;
@@ -175,6 +191,19 @@ export async function buildMovePlan(
 
     const item: MoveItem = { ...base(candidate, 'process'), cost, tenantMessage: message };
 
+    // Only a prompted move can publish anything, and a draft the wording already caught
+    // needs no second opinion. So the model is read for republishes alone.
+    if (cost === 'republish') {
+      try {
+        if (isDraftOverPublished(await reads.revision(candidate.node.uniqueId))) item.cost = 'draft';
+      } catch (error) {
+        rethrowIfFatal(error);
+        // Not knowing whether a draft goes live is the case the section exists for.
+        item.cost = 'unknown';
+        item.tenantMessage = `${item.tenantMessage ? `${item.tenantMessage}. ` : ''}Whether it has an open draft could not be read.`;
+      }
+    }
+
     if (candidate.node.variationSetId !== null) {
       try {
         const set = await reads.variationSet(candidate.node.uniqueId);
@@ -190,7 +219,7 @@ export async function buildMovePlan(
       }
     }
 
-    (cost === 'draft' || item.cost === 'unknown' ? needsChoice : moves).push(item);
+    (item.cost === 'draft' || item.cost === 'unknown' ? needsChoice : moves).push(item);
   }
 
   // Viewer counts: one call for both ends of every move. Advisory, never a gate.

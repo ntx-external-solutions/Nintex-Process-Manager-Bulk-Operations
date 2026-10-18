@@ -143,6 +143,7 @@ export function browserMoveGateway(): MoveGateway & Omit<MovePlanReads, 'isFatal
       }),
     validateMove: (processUniqueId, destinationGroupUniqueId) =>
       callPm<ValidateActionResponse>({ op: 'process.validateMove', processUniqueId, destinationGroupUniqueId }),
+    revision: (processUniqueId) => callPm<ProcessSummary>({ op: 'process.summary', processUniqueId }),
     variationSet: (processUniqueId) =>
       callPm<VariationSet | null>({ op: 'process.variationSet', processUniqueId }),
     viewers: (groupIds) => callPm<GroupViewerCount[]>({ op: 'groups.viewers', groupIds }),

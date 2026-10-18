@@ -228,15 +228,29 @@ test('a DeleteGroup refusal is read for its blocking documents', () => {
 });
 
 test('a breadcrumb drops the tenant and keeps the group itself last', () => {
-  const chain = [{ name: 'Example Organisation' }, { name: 'Finance' }, { name: 'Accounts Payable' }];
-  assert.deepEqual(breadcrumbTitles(chain), ['Finance', 'Accounts Payable']);
-  assert.deepEqual(breadcrumbTitles({ items: chain.map((c) => ({ title: c.name })) }), ['Finance', 'Accounts Payable']);
+  // The captured shape (F1), with synthetic names and ids.
+  const item = (id: string, name: string, position: number) => ({
+    id,
+    parentId: null,
+    name,
+    position,
+    type: 'ProcessGroup',
+    url: `https://demo.promapp.com/tenant/Process/Group/${id}`,
+    version: null,
+  });
+  const response = {
+    isChildren: false,
+    breadcrumbItems: [item('root', 'Example Organisation', 1), item('g-fin', 'Finance', 2), item('g-ap', 'Accounts Payable', 3)],
+  };
+  assert.deepEqual(breadcrumbTitles(response), ['Finance', 'Accounts Payable']);
   // A deleted group's chain can come back empty: an empty path, not a guess.
-  assert.deepEqual(breadcrumbTitles([]), []);
+  assert.deepEqual(breadcrumbTitles({ isChildren: false, breadcrumbItems: [] }), []);
   assert.deepEqual(breadcrumbTitles(null), []);
+  // The old guessed shapes are no longer read.
+  assert.deepEqual(breadcrumbTitles([{ name: 'Example Organisation' }, { name: 'Finance' }]), []);
 });
 
-test('the documents read asks for every document in one group', async () => {
+test('the documents read counts live and archived documents, which ListType=All leaves out', async () => {
   const calls: string[] = [];
   const ctx: PmContext = {
     baseUrl: 'https://demo.promapp.com',
@@ -244,12 +258,35 @@ test('the documents read asks for every document in one group', async () => {
     token: 'tok',
     fetch: (async (url: string) => {
       calls.push(String(url));
-      return new Response(JSON.stringify({ items: [{ documentName: 'Form.docx' }], totalItemCount: 3 }), { status: 200 });
+      const body = /ListType=Archived/.test(String(url))
+        ? { items: [{ documentName: 'Old form.docx' }], totalItemCount: 1 }
+        : { items: [{ documentName: 'Form.docx' }], totalItemCount: 3 };
+      return new Response(JSON.stringify(body), { status: 200 });
     }) as unknown as typeof fetch,
     sleep: async () => {},
   };
-  assert.deepEqual(await getGroupDocuments(ctx, 'g-1'), { total: 3, names: ['Form.docx'] });
-  assert.match(calls[0]!, /\/bff\/document\/api\/v1\/documents\?/);
+  assert.deepEqual(await getGroupDocuments(ctx, 'g-1'), { total: 4, names: ['Form.docx', 'Old form.docx (archived)'] });
+  assert.equal(calls.length, 2);
+  for (const call of calls) {
+    assert.match(call, /\/bff\/document\/api\/v1\/documents\?/);
+    assert.match(call, /ProcessGroupId=g-1/);
+  }
   assert.match(calls[0]!, /ListType=All/);
-  assert.match(calls[0]!, /ProcessGroupId=g-1/);
+  assert.match(calls[1]!, /ListType=Archived/);
+});
+
+test('a group whose only document is archived still has documents', async () => {
+  const ctx: PmContext = {
+    baseUrl: 'https://demo.promapp.com',
+    tenant: 'tenant',
+    token: 'tok',
+    fetch: (async (url: string) => {
+      const body = /ListType=Archived/.test(String(url))
+        ? { items: [{ documentName: 'Policy.pdf' }], totalItemCount: 1 }
+        : { items: [], totalItemCount: 0 };
+      return new Response(JSON.stringify(body), { status: 200 });
+    }) as unknown as typeof fetch,
+    sleep: async () => {},
+  };
+  assert.deepEqual(await getGroupDocuments(ctx, 'g-1'), { total: 1, names: ['Policy.pdf (archived)'] });
 });
