@@ -108,7 +108,7 @@ test('no delete, restore, move or update operation can be named yet', () => {
 
 const ONE_ID_CASES: Array<[string, Record<string, unknown>]> = [
   ['process.archive', { comment: 'Bulk archive' }],
-  ['process.publishNow', { processRevisionEditId: 10133 }],
+  ['process.publishNow', { processRevisionEditId: 10133, publishMessage: 'Bulk archive' }],
   ['process.archiveState', {}],
 ];
 
@@ -151,7 +151,7 @@ test('archive needs the change description', () => {
 test('the override needs a positive integer revision', () => {
   for (const bad of [0, -1, 1.5, '10133', null]) {
     assert.equal(
-      parseOperation({ op: 'process.publishNow', processUniqueId: PROCESS, processRevisionEditId: bad }).ok,
+      parseOperation({ op: 'process.publishNow', processUniqueId: PROCESS, processRevisionEditId: bad, publishMessage: 'm' }).ok,
       false,
       String(bad),
     );
@@ -168,11 +168,28 @@ test('archive posts the id and the comment, and nothing else', async () => {
   assert.equal(h.calls[0]!.body, `{"processUniqueId":"${PROCESS}","comment":"Retired"}`);
 });
 
-test('the override publishes now, with the revision id as a string', async () => {
+test('the override publishes now, with the revision id as a string and a message', async () => {
   const h = harness([{ actionUrl: '/tenant/Process/x' }]);
-  await execute(h.ctx, { op: 'process.publishNow', processUniqueId: PROCESS, processRevisionEditId: 10133 });
+  await execute(h.ctx, {
+    op: 'process.publishNow',
+    processUniqueId: PROCESS,
+    processRevisionEditId: 10133,
+    publishMessage: 'Retired',
+  });
   assert.match(h.calls[0]!.url, new RegExp(`/Api/v1/Processes/${PROCESS}/Publish$`));
-  assert.equal(h.calls[0]!.body, '{"ProcessRevisionEditId":"10133","IsPublishNow":true}');
+  assert.equal(
+    h.calls[0]!.body,
+    '{"ProcessRevisionEditId":"10133","IsPublishNow":true,"PublishMessage":"Retired"}',
+  );
+});
+
+test('the override needs a publish message, since some tenants refuse a publish without one', () => {
+  for (const publishMessage of [undefined, '', '   ']) {
+    assert.equal(
+      parseOperation({ op: 'process.publishNow', processUniqueId: PROCESS, processRevisionEditId: 1, publishMessage }).ok,
+      false,
+    );
+  }
 });
 
 test('non-object bodies are refused', () => {

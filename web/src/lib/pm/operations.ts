@@ -36,9 +36,15 @@ export type Operation =
   | { op: 'process.archive'; processUniqueId: string; comment: string }
   /**
    * The approval override: "Archive now" under the cog in the UI. Publishes the given
-   * revision with IsPublishNow, the revision id sent as a string.
+   * revision with IsPublishNow, the revision id sent as a string, and the run's change
+   * description as PublishMessage.
    */
-  | { op: 'process.publishNow'; processUniqueId: string; processRevisionEditId: number };
+  | {
+      op: 'process.publishNow';
+      processUniqueId: string;
+      processRevisionEditId: number;
+      publishMessage: string;
+    };
 
 export type OperationName = Operation['op'];
 
@@ -92,7 +98,12 @@ export async function execute(ctx: PmContext, operation: Operation): Promise<unk
       return { accepted: true };
 
     case 'process.publishNow':
-      return publishProcess(ctx, operation.processUniqueId, operation.processRevisionEditId);
+      return publishProcess(
+        ctx,
+        operation.processUniqueId,
+        operation.processRevisionEditId,
+        operation.publishMessage,
+      );
   }
 }
 
@@ -177,7 +188,11 @@ export function parseOperation(input: unknown): ParseResult {
     }
 
     case 'process.publishNow': {
-      const processUniqueId = singleProcessId(body, op, ['processUniqueId', 'processRevisionEditId']);
+      const processUniqueId = singleProcessId(body, op, [
+        'processUniqueId',
+        'processRevisionEditId',
+        'publishMessage',
+      ]);
       if (typeof processUniqueId !== 'string') return processUniqueId;
       const processRevisionEditId = body['processRevisionEditId'];
       if (
@@ -187,7 +202,15 @@ export function parseOperation(input: unknown): ParseResult {
       ) {
         return { ok: false, error: `${op}: "processRevisionEditId" must be a positive integer.` };
       }
-      return { ok: true, operation: { op, processUniqueId, processRevisionEditId } };
+      // A tenant in "Publish Only mode" refuses a publish without one (spike S2).
+      const publishMessage = requiredString(body['publishMessage']);
+      if (!publishMessage) {
+        return { ok: false, error: `${op}: "publishMessage" is required. It is the run's change description.` };
+      }
+      return {
+        ok: true,
+        operation: { op, processUniqueId, processRevisionEditId, publishMessage: publishMessage.trim() },
+      };
     }
 
     default:

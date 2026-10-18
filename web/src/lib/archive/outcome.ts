@@ -9,7 +9,8 @@
  *    archived is read back from `isArchived`, never decided from a setting, because R11
  *    measured both outcomes on one tenant;
  *  - if pending, the revision id is re-read after the archive (archiving creates a new
- *    revision) and published with IsPublishNow, the id sent as a string;
+ *    revision) and published with IsPublishNow, the id sent as a string, and the change
+ *    description as PublishMessage, which a tenant in "Publish Only mode" requires;
  *  - a 4xx is the tenant refusing on the process's own data. It is reported with the
  *    tenant's message and never retried;
  *  - absent is not false. A payload that does not report `isArchived` is not read as
@@ -44,7 +45,7 @@ export interface ArchiveState {
 export interface ArchiveGateway {
   archive(processUniqueId: string, comment: string): Promise<unknown>;
   archiveState(processUniqueId: string): Promise<ArchiveState>;
-  publishNow(processUniqueId: string, processRevisionEditId: number): Promise<unknown>;
+  publishNow(processUniqueId: string, processRevisionEditId: number, publishMessage: string): Promise<unknown>;
 }
 
 export interface ArchiveOptions {
@@ -178,7 +179,7 @@ export async function archiveOne(
   }
 
   try {
-    await gateway.publishNow(processUniqueId, state.revisionEditId);
+    await gateway.publishNow(processUniqueId, state.revisionEditId, comment);
   } catch (error) {
     if (options.isFatal(error)) throw error;
     const failure = failureOf(error);

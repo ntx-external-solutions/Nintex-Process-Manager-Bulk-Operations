@@ -137,15 +137,20 @@ export interface PublishResponse {
  *
  * Note the revision id is sent as a *string* here, unlike the number carried in
  * processJson. That asymmetry is the server's, and it is load-bearing.
+ *
+ * The message is always sent. Whether a tenant demands one is a setting nobody can read
+ * in advance, and the R11 override that succeeded without one may have predated it.
  */
 export function publishProcess(
   ctx: PmContext,
   processUniqueId: string,
   processRevisionEditId: number,
+  publishMessage: string,
 ): Promise<PublishResponse> {
   const body: PublishRequest = {
     ProcessRevisionEditId: String(processRevisionEditId),
     IsPublishNow: true,
+    PublishMessage: publishMessage,
   };
   return pmRequest<PublishResponse>(ctx, {
     path: `/Api/v1/Processes/${processUniqueId}/Publish`,

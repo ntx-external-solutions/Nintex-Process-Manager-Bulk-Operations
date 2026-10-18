@@ -104,8 +104,8 @@ export function browserArchiveGateway(): ArchiveGateway {
     archive: (processUniqueId, comment) => callPm({ op: 'process.archive', processUniqueId, comment }),
     archiveState: (processUniqueId) =>
       callPm<ArchiveState>({ op: 'process.archiveState', processUniqueId }),
-    publishNow: (processUniqueId, processRevisionEditId) =>
-      callPm({ op: 'process.publishNow', processUniqueId, processRevisionEditId }),
+    publishNow: (processUniqueId, processRevisionEditId, publishMessage) =>
+      callPm({ op: 'process.publishNow', processUniqueId, processRevisionEditId, publishMessage }),
   };
 }
 

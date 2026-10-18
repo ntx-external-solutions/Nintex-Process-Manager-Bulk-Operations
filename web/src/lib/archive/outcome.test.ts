@@ -33,8 +33,8 @@ function gateway(script: Script) {
       if (!script.state) throw new Error('state not scripted');
       return script.state();
     },
-    async publishNow(id, rev) {
-      calls.push(`publish ${id} ${rev}`);
+    async publishNow(id, rev, message) {
+      calls.push(`publish ${id} ${rev} "${message}"`);
       return script.publish ? script.publish() : { actionUrl: '/x' };
     },
   };
@@ -65,7 +65,7 @@ test('a 200 that is still pending is overridden with the revision read after the
   assert.equal(o.outcome, 'Overridden');
   assert.equal(o.overridden, true);
   // 10133 is the post-archive revision; the publish must use it, not a pre-archive one.
-  assert.deepEqual(o.calls.slice(-1), [`publish ${ID} 10133`]);
+  assert.deepEqual(o.calls.slice(-1), [`publish ${ID} 10133 "Retired in bulk"`]);
   assert.equal(statusFor(o.outcome), 'Overridden');
 });
 

@@ -99,8 +99,11 @@ test('getChildGroups parses a real tree response', async () => {
 test('publishProcess sends the revision id as a string', async () => {
   // processJson carries it as a number; this endpoint wants a string.
   const h = harness([{ actionUrl: '/tenant/Process/00000001' }]);
-  await publishProcess(h.ctx, '00000001-0000-4000-8000-000000000001', 9182);
-  assert.equal(h.calls[0]!.body, '{"ProcessRevisionEditId":"9182","IsPublishNow":true}');
+  await publishProcess(h.ctx, '00000001-0000-4000-8000-000000000001', 9182, 'Bulk archive');
+  assert.equal(
+    h.calls[0]!.body,
+    '{"ProcessRevisionEditId":"9182","IsPublishNow":true,"PublishMessage":"Bulk archive"}',
+  );
 });
 
 test('getLatestRevision reads the cheap concurrency check', async () => {
