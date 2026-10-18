@@ -253,6 +253,27 @@ results row (report: project doc `claude/bulk-ops-r12-2026-10-18.md`). Three fix
 Status: Ready. Phases 1 to 4 done and **reviewed by Cowork**; phase 5 (checkpoints) is
 next, starting with the fix below
 
+### Cowork's live check after phase 4 deployed (18 Oct)
+
+Dry run on R11's set: 21 double-counted (right), 1 over-claim (right), nothing unread by
+the scan (right; the archive-wide read now takes 73s instead of 44s, which is the full
+archive actually being read). But **2 blocking mismatches remain where 0 were expected**,
+and they're the two Input pairs the cross-category rule was meant to clear.
+
+Cause: `reconcileDependencies` counts Input/Output sites per category only where the
+**queried** process is the holder (`claims.ts` line 223, the R2 scoping rule, which is right
+per category). The pair-level total is the sum of those per-category counts, so an Input
+held by the **related** process is never counted. In both pairs, the related process
+(`Create sales order :: AMER`, `Example Process Name`) holds `Inputs.Input[0]` from the
+target, and the plan does have that site.
+
+Fix at the start of phase 5, with the publish-path fix below: the pair-level located total
+is **every planned site between the two processes, in either direction and any
+category** (child sites included). Keep the per-category numbers and scoping for each
+row's own status. Add a test with exactly R11's shape: a Link claimed on the target, an
+Input held by the related process, which must come out `MatchAcrossCategories`. After the
+fix this set should show 0 blocking mismatches.
+
 ### Cowork's review of phase 4 (18 Oct)
 
 Approved, with one change to make at the start of phase 5. The batch fix, the

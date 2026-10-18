@@ -39,7 +39,9 @@ Maintained by the Cowork session. Claude Code reads this but does not edit it.
   phase 4.
 - W5 phase 4 (reference removal) reviewed and approved; the publish path must be read
   from each process (reuse W4's `chooseWritePath`), fixed at the start of phase 5.
-- Next for Cowork: read-only dry run once phase 4 deploys; review phase 5 (checkpoints);
+- Phase 4 live check: right except 2 Input pairs still blocking (pair total ignores Inputs
+  held by the related process); fix queued at the start of phase 5.
+- Next for Cowork: re-run the dry run after phase 5's fixes deploy; review phase 5 (checkpoints);
   live mutation testing waits for the unwind phase.
 - Spikes S1 to S3 and the variation test are in `API_ARCHITECTURE.md`. One lasting change
   on the tenant: "SOC 2 Submission Review" and its Partner variation are published at 3.0.
