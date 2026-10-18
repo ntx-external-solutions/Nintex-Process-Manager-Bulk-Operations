@@ -250,7 +250,38 @@ results row (report: project doc `claude/bulk-ops-r12-2026-10-18.md`). Three fix
 
 ## W5. Bulk Delete engine
 
-Status: Ready. Phase 1 (tests and fixtures) done in d09159a; stopped for review before discovery
+Status: Ready. Phase 1 (tests and fixtures) done in d09159a and **reviewed by Cowork**;
+phase 2 (discovery) is next
+
+### Cowork's review of phase 1 (18 Oct)
+
+Approved. The assertion accounting, the stub-and-skip approach and keeping fixtures in
+place are all right. Do these as part of phase 2:
+
+- **Fix the fake tenant's archived read.** It's wrong where it claims to follow the
+  measured tenant. `GET /Api/v1/Processes/{id}` for an **archived** process answers
+  **200** with a body of only `{"success": true, "isArchived": true}` (no
+  `processJson`). Measured twice on 18 Oct, in S1 and in the S2 cleanup. **404 is for a
+  deleted process** (measured after `DeleteProcess`). So in the fake:
+  - `readModel` on an archived process returns that envelope with no model, not a 404;
+  - `archiveState` returns `found: true, isArchived: true`, which matches what the live
+    `getArchiveState` already reads from the envelope;
+  - 404 only after a delete.
+
+  Any engine code that treats "not found" as "archived" has to treat "200 without
+  `processJson`" that way instead. Check which ported tests change; that's the point.
+- **Phase boundaries.** Move `newDependencyPlan` and `ledgerToPlanRows` into discovery,
+  so the discovery PR produces a complete read-only plan. That lets Cowork run a live
+  dry run against the demo tenant and compare it to the script's R3 numbers before any
+  mutation code exists. Keep the orchestrator scenarios under unwind.
+- **T2's operation.** Yes, distinct: `ReArchiveOrphanedHolder` for a holder that was
+  parked in the holding group because its own group is gone, with a message saying it
+  stays archived without a group. Ordinary holders keep `ReArchiveHolder`.
+- **Plan file in camelCase:** fine. Web plans only round-trip with the web app.
+- **Fatal errors reject `runBulkDelete`:** fine, provided the page catches it and offers
+  resume from the saved plan. Make that a W6 requirement.
+- **Commit `9d70974`** was JB's commit from outside the session. Squash-merging the PR is
+  fine.
 
 This is the big one, so break it up: one PR per phase (tests and fixtures first, then
 discovery, hold, reference removal, checkpoints, delete, unwind), each green on its own.
@@ -274,6 +305,43 @@ backstop.
 
 The plan ledger goes in IndexedDB. The plan file is downloadable and can be re-uploaded
 to resume or unwind.
+
+---
+
+## F3. Two small things from the W5 parity check
+
+Status: Ready (after W5 phase 2)
+
+- `resolveSelection` overflows the stack if the tenant ever lists a group as its own
+  descendant. Keep a visited set and report the cycle as an excluded item with a reason,
+  rather than throwing.
+- The `/archive` variation warning should say what the script said: a master that's
+  dragged in by its variation ends up in the archived list, which is where a later Bulk
+  Delete takes its targets from.
+
+---
+
+## F4. Fixes from the W4 live test
+
+Status: Ready (after F3)
+
+W4 was tested live on 18 Oct with four test processes. The SCIM lookup, the
+unknown-user and non-GUID refusals, "Match current state" and the results file all
+worked, and the tenant matched: the in-progress process was saved only (0.2 to 0.3, new
+owner); the published one was saved and republished (1.0 to 2.0, owner set to the
+placeholder, new expert). Two fixes:
+
+- **An archived process fails instead of being skipped.** Its row read "Failed. Could not
+  be read (no response): Unexpected error handling the request." `GET
+  /Api/v1/Processes/{id}` for an archived process answers 200 with only `{"success":
+  true, "isArchived": true}` and no `processJson` (measured again today), so
+  `getOwnership` must treat a 200 without `processJson` and with `isArchived: true` as
+  "Skipped. The process is archived." and not throw. This is the same shape as the W5
+  fake-tenant note; put the check in one shared helper both use.
+- **Rows that are skipped or failed always say "(name unavailable; not in any process
+  list)".** That was shown for a live process (the unknown-user row) and an archived
+  one, both of which are in a list. Look the name up from the active index and the
+  archived listing for every row, and only use that wording when neither has it.
 
 ---
 
