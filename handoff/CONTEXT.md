@@ -24,8 +24,11 @@ Maintained by the Cowork session. Claude Code reads this but does not edit it.
   instead of skipping; skipped rows lose their names).
 - W5 phase 1 reviewed and approved with notes (fake tenant's archived read is wrong;
   move plan building into discovery so a read-only dry run is possible). Phase 2 next.
-- Next for Cowork: live dry run of W5 discovery against the demo tenant when phase 2
-  lands, compared with the script's R3 numbers.
+- W5 phase 2 live dry run (18 Oct): 74 claims (matches direct reads), 24 mismatches and
+  11 orphaned holders (both match R11). 21 of the 24 mismatches are the dependency API
+  listing each link twice; 3 are still unexplained. Phase 3 (hold) handed over.
+- Next for Cowork: investigate the 3 unexplained mismatches before W5's delete phase;
+  verify F4 live (needs JB to paste the SCIM key); review phase 3.
 - Spikes S1 to S3 and the variation test are in `API_ARCHITECTURE.md`. One lasting change
   on the tenant: "SOC 2 Submission Review" and its Partner variation are published at 3.0.
 - Restricting sign-in to known Process Manager hosts is deferred by JB.

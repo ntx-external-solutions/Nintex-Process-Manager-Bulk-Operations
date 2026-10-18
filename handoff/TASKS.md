@@ -250,8 +250,41 @@ results row (report: project doc `claude/bulk-ops-r12-2026-10-18.md`). Three fix
 
 ## W5. Bulk Delete engine
 
-Status: Ready. Phase 1 (tests and fixtures) done in d09159a and **reviewed by Cowork**;
-phase 2 (discovery, read-only plan, `/delete` dry run) done in 13fdfe5; stopped for review before hold
+Status: Ready. Phases 1 and 2 done and **reviewed by Cowork**; phase 3 (hold) is next
+
+### Cowork's review of phase 2 (18 Oct)
+
+Approved. Live dry run on the deployed app, first 20 archived processes (R11's target
+set), compared against direct reads of the tenant:
+
+- **74 claims**, identical to calling `CheckProcessDependencies` (flags 31) on each
+  target directly. 29 holders, 33 reference sites, 42 archived participants, status
+  `PlannedIncomplete`, 42s.
+- **24 reconciliation mismatches**, the same count R11 reported from the PowerShell.
+- **11 archived holders whose groups are gone**: the same eleven that blocked R11. Plus 4
+  orphaned targets.
+- An unlisted participant was recovered by direct fetch, as the script does.
+- Nothing changed on the tenant: archived count unchanged, all 20 targets still archived,
+  nothing restored in the plan.
+
+For phase 3:
+
+- **Name the orphaned holders in the dry run.** The ledger already has them
+  (`wasArchived`, `originalGroupExists: false`, role Holder), but `orphanedHolders` is
+  empty in a preview and the summary doesn't mention them. Add a line such as "11
+  archived holders have no group. A real run parks them in the holding group, reads them
+  there and re-archives them (T2)", with their names. That's the R11 blocker, and it
+  should be visible before anyone runs a delete.
+- **Most of the 24 mismatches are the API double-counting links.** Cowork measured it
+  (`API_ARCHITECTURE.md`, "Why links reconcile as 'claimed 2, located 1'"): the
+  dependency check lists every linked process twice, and the holders' models hold one
+  reference each. Don't change reconciliation's rule yet, but **classify** the exact
+  shape "Link, claimed = 2 x located, located >= 1" as `DoubleCounted` and report it
+  separately from real mismatches, so the three that are different stand out. Cowork
+  will investigate those three before the delete phase.
+- **W2's 404 branch** in `archive/outcome.ts` (you flagged it): 404 means deleted, not
+  archived. Change the branch and its comment to report "Not found; it may have been
+  deleted" as Failed. Small; do it in this PR.
 
 ### Cowork's review of phase 1 (18 Oct)
 
