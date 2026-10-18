@@ -323,7 +323,7 @@ Status: Done (c5c7933)
 
 ## F4. Fixes from the W4 live test
 
-Status: Ready (after F3)
+Status: Done (ba4028b)
 
 W4 was tested live on 18 Oct with four test processes. The SCIM lookup, the
 unknown-user and non-GUID refusals, "Match current state" and the results file all
