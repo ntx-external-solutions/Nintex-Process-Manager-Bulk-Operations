@@ -134,6 +134,8 @@ const REFUSALS: Record<WriteRefusal, string> = {
   'cannot-save': 'You do not have permission to save changes to this process.',
   // Someone else is mid-review. Editing underneath them is not ours to do.
   'awaiting-approval': 'Awaiting approval, so it was not modified.',
+  // Not reached: ownership saves into an open draft, the shared default.
+  'open-draft': 'It has an unpublished draft, so it was not modified.',
   'cannot-publish':
     'Published, but you can neither publish it nor submit it for approval. Choose "Save only" to leave the change as a draft instead.',
 };

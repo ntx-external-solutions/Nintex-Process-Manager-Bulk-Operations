@@ -138,11 +138,28 @@ test('a revision awaiting approval is edited only with permission to override it
   assert.equal(allowed.stage, 'Published', 'with the override, it is saved and published over the pending revision');
 });
 
-test('a draft in progress is saved and left unpublished, whatever its version', async () => {
-  // A draft may hold someone's unpublished edits, which are not ours to publish (W4's rule).
+test('a draft over a published version is refused unless the operator ticked it', async () => {
+  // Saving into the draft leaves the reference in the live version; publishing puts
+  // someone else's draft live (Cowork's review of W5 phase 5).
+  const draft = (): ProcessModel => ({ ...holderModel('2.1'), ProcessRevisionStateId: 1 });
   const tenant = tenantWith('2.1');
-  const outcome = await saveProcessModel(tenant, H, { ...holderModel('2.1'), ProcessRevisionStateId: 1 }, { processActions: ADMIN });
+  const refused = await saveProcessModel(tenant, H, draft(), { processActions: ADMIN });
+  assert.equal(refused.stage, 'Refused');
+  assert.equal(refused.refusal, 'open-draft');
+  assert.match(refused.error ?? '', /unpublished draft; removing the reference would publish it/);
+  assert.equal(tenant.callsTo('saveModel').length, 0, 'nothing is sent');
+
+  const ticked = await saveProcessModel(tenant, H, draft(), { processActions: ADMIN, publishOpenDraft: true });
+  assert.equal(ticked.stage, 'Published', 'ticked, the draft is saved and published with the removal');
+  assert.equal(ticked.draftPublished, true, 'and the outcome says the draft went live');
+  assert.equal(tenant.callsTo('publishNow').length, 1);
+});
+
+test('a process never published is saved and left unpublished: nothing live holds the reference', async () => {
+  const tenant = tenantWith('0.3');
+  const outcome = await saveProcessModel(tenant, H, { ...holderModel('0.3'), ProcessRevisionStateId: 1 }, { processActions: ADMIN });
   assert.equal(outcome.stage, 'SavedUnpublished');
+  assert.equal(outcome.draftPublished, undefined);
   assert.equal(tenant.callsTo('publishNow').length, 0);
 });
 

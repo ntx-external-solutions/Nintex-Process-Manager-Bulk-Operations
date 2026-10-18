@@ -24,8 +24,18 @@ import { defaultIsFatal } from '../exec/runner.ts';
 import { buildUpdateEnvelope } from '../pm/processes.ts';
 import type { ProcessActions } from '../pm/types.ts';
 import { chooseWritePath, isWritePath, writeStateOf, type WriteRefusal } from '../pm/writePath.ts';
-import type { ProcessIndex } from '../tenant/state.ts';
-import type { CollateralGate, CollateralGateway } from './collateral.ts';
+import { loadProcessIndex, type ProcessIndex } from '../tenant/state.ts';
+import {
+  ACCEPTANCE_AUTHORITY,
+  collateralAcceptanceRows,
+  collateralFailureRows,
+  decideCollateral,
+  newCollateral,
+  restoreCollateral,
+  type CollateralChange,
+  type CollateralGate,
+  type CollateralGateway,
+} from './collateral.ts';
 import type { DeleteEventSink } from './events.ts';
 import type { DeleteGateway } from './gateway.ts';
 import type { DependencyPlan } from './ledger.ts';
@@ -95,6 +105,10 @@ export interface SaveOutcome {
   stage: SaveStage;
   error: string | null;
   statusCode: number;
+  /** Why it was refused, when `stage` is `Refused`. */
+  refusal?: WriteRefusal | undefined;
+  /** The save went out over an open draft and published it: the draft's changes are live. */
+  draftPublished?: boolean | undefined;
 }
 
 export interface SaveModelOptions {
@@ -103,6 +117,13 @@ export interface SaveModelOptions {
   changeDescription?: string | undefined;
   /** Permission to edit a revision awaiting approval, and publish over it. Default false. */
   approvalsEnabled?: boolean | undefined;
+  /**
+   * Publish an open draft over a published version along with the edit. Default false:
+   * the save is refused, because saving into the draft leaves the reference in the live
+   * version, and publishing puts someone else's unfinished work live (Cowork's review of
+   * W5 phase 5). The operator ticks each holder this applies to.
+   */
+  publishOpenDraft?: boolean | undefined;
   /** Default true: these edits publish a version the owner never asked for. */
   suppressChangeNotification?: boolean | undefined;
   /** A dead session is rethrown rather than reported as a failed save. */
@@ -115,6 +136,7 @@ export const REFERENCE_REMOVAL_DESCRIPTION = 'Automated dependency removal';
 const SAVE_REFUSALS: Record<WriteRefusal, string> = {
   'cannot-save': 'This account cannot save changes to this process',
   'awaiting-approval': 'It is awaiting approval, and this run is not allowed to override a pending approval',
+  'open-draft': 'It has an unpublished draft; removing the reference would publish it',
   'cannot-publish': 'It is published, and cannot be republished by this account: it can neither publish it nor submit it for approval',
 };
 
@@ -149,11 +171,16 @@ export async function saveProcessModel(
     return { success: false, stage, error: failure.detail ?? failure.error, statusCode: failure.status };
   };
 
-  const path = chooseWritePath(writeStateOf(model, options.processActions), {
+  const state = writeStateOf(model, options.processActions);
+  const path = chooseWritePath(state, {
     publish: 'match-state',
     overridePendingApproval: options.approvalsEnabled ?? false,
+    openDraft: options.publishOpenDraft === true ? 'publish' : 'refuse',
   });
-  if (!isWritePath(path)) return { success: false, stage: 'Refused', error: SAVE_REFUSALS[path.refused], statusCode: 0 };
+  if (!isWritePath(path)) {
+    return { success: false, stage: 'Refused', error: SAVE_REFUSALS[path.refused], statusCode: 0, refusal: path.refused };
+  }
+  const draftPublished = path !== 'save-only' && state.revisionStateId === 1;
 
   try {
     await gateway.saveModel(
@@ -197,7 +224,7 @@ export async function saveProcessModel(
   } catch (error) {
     return failed('Publish', error);
   }
-  return { success: true, stage: 'Published', error: null, statusCode: 200 };
+  return { success: true, stage: 'Published', error: null, statusCode: 200, draftPublished };
 }
 
 export interface VerificationFailure {
@@ -207,10 +234,24 @@ export interface VerificationFailure {
   unreadReason?: string | undefined;
 }
 
+/** A target the delete must leave alone, because a holder of it could not be edited safely. */
+export interface HeldBackTarget {
+  targetUniqueId: string;
+  holderUniqueId: string;
+  /** For the target's `Delete` row. */
+  reason: string;
+}
+
 export interface ReferenceRemovalRun {
   /** One `RemoveReferences` row per holder. */
   results: ResultRow[];
   verificationFailed: VerificationFailure[];
+  /**
+   * Targets of a holder refused for its open draft. Left out of the delete with the reason,
+   * rather than stopping the run at verification: the refusal is a known, deliberate
+   * outcome, not a missed reference (Cowork's review of W5 phase 5).
+   */
+  heldBack: HeldBackTarget[];
 }
 
 /**
@@ -224,11 +265,15 @@ export async function removePlanReferences(
     skipVerification?: boolean | undefined;
     /** The run's change description, sent on every save and publish. */
     changeDescription?: string | undefined;
+    /** Holders with an open draft the operator ticked: their draft is published with the removal. */
+    publishDrafts?: readonly string[] | undefined;
     onEvent?: DeleteEventSink | undefined;
   } = {},
 ): Promise<ReferenceRemovalRun> {
   const isFatal = options.isFatal ?? defaultIsFatal;
   const results: ResultRow[] = [];
+  const heldBack: HeldBackTarget[] = [];
+  const ticked = new Set((options.publishDrafts ?? []).map((id) => id.toLowerCase()));
   const workItems = plan.workItems;
   const nameOf = (uniqueId: string) =>
     plan.ledger.find((r) => r.uniqueId.toLowerCase() === uniqueId.toLowerCase())?.name || resolveClaimName(plan.claims, uniqueId);
@@ -284,13 +329,21 @@ export async function removePlanReferences(
       continue;
     }
 
+    // Decided from this read, not the plan's: a draft opened since planning is refused
+    // just the same, and one published since needs no tick.
     const save = await saveProcessModel(gateway, holderId, removal.cleaned, {
       processActions,
       changeDescription: options.changeDescription,
       approvalsEnabled: options.approvalsEnabled ?? true,
+      publishOpenDraft: ticked.has(holderId.toLowerCase()),
       suppressChangeNotification: true,
       isFatal,
     });
+    const openDraft = save.refusal === 'open-draft';
+    if (openDraft) {
+      const reason = `${name} has an unpublished draft; removing its reference would publish it`;
+      for (const target of item.targetsAffected) heldBack.push({ targetUniqueId: target, holderUniqueId: holderId, reason });
+    }
     results.push(
       resultRow({
         objectId: holderId,
@@ -298,14 +351,18 @@ export async function removePlanReferences(
         operation: 'RemoveReferences',
         status: save.success ? 'Success' : 'Failed',
         message: save.success
-          ? `Removed ${removal.referencesRemoved} reference(s), ${save.stage}`
-          : save.stage === 'Refused'
-            ? `Not saved: ${save.error ?? ''}. Its references to the targets remain.`
-            : `${save.stage} failed: ${save.error ?? ''}`.trimEnd(),
+          ? `Removed ${removal.referencesRemoved} reference(s), ${save.stage}${save.draftPublished ? '; its open draft went live with the removal' : ''}`
+          : openDraft
+            ? `Not saved: ${save.error ?? ''}. Its references remain, so ${item.targetsAffected.length === 1 ? 'the target it holds is' : `the ${item.targetsAffected.length} targets it holds are`} left out of the delete. Tick it to publish the draft with the removal.`
+            : save.stage === 'Refused'
+              ? `Not saved: ${save.error ?? ''}. Its references to the targets remain.`
+              : `${save.stage} failed: ${save.error ?? ''}`.trimEnd(),
         statusCode: save.success ? null : save.statusCode,
       }),
     );
   }
+  const heldBackIds = new Set(heldBack.map((h) => h.targetUniqueId.toLowerCase()));
+  const refusedHolders = new Set(heldBack.map((h) => h.holderUniqueId.toLowerCase()));
 
   // Verify while everything is still active, by walking each holder's saved model:
   // archiving suppresses the very rows that would reveal a missed reference, so asking the
@@ -315,6 +372,10 @@ export async function removePlanReferences(
     options.onEvent?.({ kind: 'stage', stage: 'verifying' });
     for (const [i, item] of workItems.entries()) {
       options.onEvent?.({ kind: 'progress', label: 'Verifying', done: i + 1, total: workItems.length });
+      // A target that is not being deleted needs no check: a reference left to it dangles
+      // nowhere. So a refused draft holder is not read again at all.
+      const deleting = item.targetsAffected.filter((t) => !heldBackIds.has(t.toLowerCase()));
+      if (refusedHolders.has(item.holderUniqueId.toLowerCase()) || deleting.length === 0) continue;
       const { model, reason } = await readForEdit(item.holderUniqueId);
       // The script skipped a holder it could not read here, so a holder unreadable at both
       // reads went to the delete with its references unchecked. Unread is unverified.
@@ -322,12 +383,12 @@ export async function removePlanReferences(
         verificationFailed.push({ holderUniqueId: item.holderUniqueId, remaining: [], unreadReason: reason });
         continue;
       }
-      const remaining = findProcessReferenceSites(model, item.targetsAffected).filter((s) => s.action !== 'Report');
+      const remaining = findProcessReferenceSites(model, deleting).filter((s) => s.action !== 'Report');
       if (remaining.length > 0) verificationFailed.push({ holderUniqueId: item.holderUniqueId, remaining });
     }
   }
 
-  return { results, verificationFailed };
+  return { results, verificationFailed, heldBack };
 }
 
 export type { CollateralGate } from './collateral.ts';
@@ -344,8 +405,14 @@ export interface TargetDeletionOptions extends EngineOptions {
   getObservedUniqueIds?: (() => Promise<readonly string[]>) | undefined;
   /** How the gate was answered, for the Accepted rows. */
   acceptanceAuthority?: string | undefined;
+  /** From `removePlanReferences`: targets neither archived nor deleted, each with its reason. */
+  heldBack?: readonly HeldBackTarget[] | undefined;
   onEvent?: DeleteEventSink | undefined;
 }
+
+export const PRE_DELETE_ARCHIVE_COMMENT = 'Pre-delete archive';
+const PRE_DELETE_PHASE = 'after archiving targets, before deleting';
+const POST_DELETE_PHASE = 'after deleting targets';
 
 /**
  * Archives the targets this run did not already find archived, checks the tenant, deletes
@@ -354,12 +421,122 @@ export interface TargetDeletionOptions extends EngineOptions {
  * target on the ledger so the unwind does not try to re-archive it. Port of
  * `Invoke-ProcessTargetDeletion`.
  */
-export function deletePlanTargets(
+export async function deletePlanTargets(
   gateway: DeleteGateway,
   plan: DependencyPlan,
-  options?: TargetDeletionOptions,
+  options: TargetDeletionOptions = {},
 ): Promise<ResultRow[]> {
-  return notPorted('delete');
+  const isFatal = options.isFatal ?? defaultIsFatal;
+  const results: ResultRow[] = [];
+  const targets = plan.targetUniqueIds;
+  const recordOf = (uniqueId: string) => plan.ledger.find((r) => r.uniqueId.toLowerCase() === uniqueId.toLowerCase());
+  const nameOf = (uniqueId: string) => recordOf(uniqueId)?.name || resolveClaimName(plan.claims, uniqueId);
+  const heldBack = new Map((options.heldBack ?? []).map((h) => [h.targetUniqueId.toLowerCase(), h]));
+  const archiveOptions: ArchiveOptions = { approvalOverride: options.approvalsEnabled ?? true, isFatal };
+  const log = (line: string) => {
+    plan.log.push(line);
+    options.onEvent?.({ kind: 'log', line });
+  };
+
+  options.onEvent?.({ kind: 'stage', stage: 'archiving-targets' });
+  for (const [i, target] of targets.entries()) {
+    options.onEvent?.({ kind: 'progress', label: 'Archiving targets', done: i + 1, total: targets.length });
+    const record = recordOf(target);
+    if (heldBack.has(target.toLowerCase())) continue;
+    if (record?.wasArchived && !record.restoredByThisRun) continue;
+    const archive = await archiveOne(gateway, target, PRE_DELETE_ARCHIVE_COMMENT, archiveOptions);
+    // An unwind path is where a silent failure does the most damage, so the reason is
+    // logged. The delete still goes ahead and the checkpoint reads the tenant, because
+    // ArchiveProcess can report failure and take effect anyway.
+    if (!archive.success) log(`${nameOf(target)} (${target}) could not be archived before deletion: ${archive.message}`);
+  }
+
+  // Everything the run changed on purpose: the targets, and every holder it restored.
+  const expected = [...targets, ...plan.ledger.filter((r) => r.restoredByThisRun).map((r) => r.uniqueId)];
+  const checkpoint = async (label: string, observedFailure: (error: unknown) => void): Promise<CollateralChange[]> => {
+    const fresh = await loadProcessIndex((page, listType) => gateway.listProcesses(page, listType));
+    const observed = [...(options.observedUniqueIds ?? [])];
+    if (options.getObservedUniqueIds) {
+      try {
+        observed.push(...(await options.getObservedUniqueIds()));
+      } catch (error) {
+        if (isFatal(error)) throw error;
+        observedFailure(error);
+      }
+    }
+    const found = newCollateral({ baseline: options.tenantBaseline ?? null, fresh, expected, observed, alreadyRaised: plan.collateral });
+    plan.collateral.push(...found);
+    for (const c of found) log(`COLLATERAL ${label}: ${c.uniqueId} (${c.name}) - ${c.change}`);
+    return found;
+  };
+
+  if (options.tenantBaseline) {
+    options.onEvent?.({ kind: 'stage', stage: 'checking-collateral' });
+    // The script dropped a failed holding-group read here without a word. Logged now.
+    const collateral = await checkpoint('after archive phase', (error) =>
+      log(`Could not list what the run left in the holding group before deleting: ${failureOf(error).error}`),
+    );
+    if (collateral.length > 0) {
+      options.onEvent?.({ kind: 'collateral', phase: PRE_DELETE_PHASE, collateral });
+      const decision = await decideCollateral(collateral, PRE_DELETE_PHASE, { gate: options.onCollateral });
+      const authority = options.acceptanceAuthority ?? ACCEPTANCE_AUTHORITY.atGate;
+      options.onEvent?.({
+        kind: 'collateralDecision',
+        phase: PRE_DELETE_PHASE,
+        accepted: decision.proceed,
+        authority: decision.proceed ? authority : null,
+        count: collateral.length,
+      });
+      // An unwanted archive can be undone; a delete cannot. So no gate means stop.
+      if (!decision.proceed) return [...results, ...decision.rows];
+      results.push(...collateralAcceptanceRows(collateral, PRE_DELETE_PHASE, authority));
+    }
+  }
+
+  options.onEvent?.({ kind: 'stage', stage: 'deleting-targets' });
+  for (const [i, target] of targets.entries()) {
+    options.onEvent?.({ kind: 'progress', label: 'Deleting targets', done: i + 1, total: targets.length });
+    const record = recordOf(target);
+    const row = (status: string, message: string, statusCode?: number | null) =>
+      resultRow({ objectId: target, name: nameOf(target), operation: 'Delete', status, message, groupId: record?.originalGroupId ?? null, statusCode });
+
+    const held = heldBack.get(target.toLowerCase());
+    if (held) {
+      results.push(row('Skipped', `Not deleted: ${held.reason}`));
+      continue;
+    }
+    try {
+      await gateway.deleteProcess(target, record?.originalGroupUniqueId || null);
+    } catch (error) {
+      if (isFatal(error)) throw error;
+      const status = failureOf(error).status;
+      results.push(row('Failed', `Delete failed (HTTP ${status})`, status > 0 ? status : null));
+      continue;
+    }
+    // So the unwind does not try to re-archive something that no longer exists: before
+    // the Hold phase a target IS an archived process this run restored.
+    if (record) record.deleted = true;
+    results.push(row('Success', 'Deleted'));
+  }
+
+  // The variation coupling fires on DELETE, not on restore or archive (measured), so the
+  // earlier checkpoints are clean because nothing has happened yet. This one cannot
+  // prevent anything: it reports what the delete did and puts back what can be proved.
+  if (options.tenantBaseline) {
+    options.onEvent?.({ kind: 'stage', stage: 'checking-collateral-after-delete' });
+    // Observed ids collected now, not before the deletes: what the delete strands in the
+    // holding group is not there until it has happened (W3).
+    const collateral = await checkpoint('after delete phase', (error) =>
+      log(`Could not list what the run left behind: ${failureOf(error).error}`),
+    );
+    if (collateral.length > 0) {
+      options.onEvent?.({ kind: 'collateral', phase: POST_DELETE_PHASE, collateral });
+      results.push(...collateralFailureRows(collateral, 'detected after deletion'));
+      options.onEvent?.({ kind: 'stage', stage: 'reversing-collateral' });
+      results.push(...(await restoreCollateral(collateralGateway(gateway, options), collateral)));
+    }
+  }
+  return results;
 }
 
 /**
