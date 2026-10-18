@@ -37,7 +37,7 @@ against a tenant, and the allowlist has no write operation.
 
 ## W1. Tree browser with processes, and the archived view
 
-Status: Ready
+Status: Done (7e97808)
 
 Build the shared selector described in the spec:
 
