@@ -258,6 +258,18 @@ test('an Input the API calls a link reconciles across categories, and keeps both
   assert.deepEqual(reconciliationGate(rec), { blocking: [], overClaims: [], doubleCounted: [] }, 'nothing gates');
 });
 
+// Cowork's live check after phase 4: R11's two Input pairs still blocked. The related
+// process holds the Input, so the per-category count (scoped to the queried side) found
+// nothing, and the pair's total was built from those counts.
+test('a Link claimed on the target and an Input held by the related process reconcile across categories', () => {
+  const rec = pairRec([claimed('Linked Process', 1)], [site(R, Q, 'Input')]);
+  const link = rec.find((r) => r.category === 'Link');
+  assert.equal(link?.status, 'MatchAcrossCategories', 'the Input the related process holds counts toward the pair');
+  assert.equal(rec.find((r) => r.category === 'Input')?.located, 0, 'while the Input row keeps its own scoping');
+  assert.match(link?.note ?? '', /1 site\(s\) between them in all/, 'and the note gives the pair total');
+  assert.deepEqual(reconciliationGate(rec), { blocking: [], overClaims: [], doubleCounted: [] }, 'nothing gates');
+});
+
 test('a pair that finds some but fewer than claimed is an over-claim, acknowledged rather than blocking', () => {
   const rec = pairRec([claimed('Linked Process', 3)], [site(R, Q, 'Link')]);
   const link = rec.find((r) => r.category === 'Link');

@@ -22,7 +22,10 @@
 import { resultRow, type ResultRow } from '../exec/report.ts';
 import { UNASSIGNED_USER, type OwnershipRead, type OwnershipState, type UserRef } from '../pm/ownership.ts';
 import { indexUsersByLogon, type DirectoryLookup, type DirectoryUser } from '../pm/scim.ts';
+import { chooseWritePath as choosePath, isWritePath, type WritePath, type WriteRefusal } from '../pm/writePath.ts';
 import { isGuid, type OwnershipCsvRow } from './csv.ts';
+
+export type { WritePath } from '../pm/writePath.ts';
 
 export const OPERATION = 'UpdateOwnership';
 
@@ -36,9 +39,6 @@ export const UNASSIGN_KEYWORDS = ['unassigned', 'unassign', 'none', 'n/a', 'na']
  *   on seeing the old owner until someone publishes it.
  */
 export type PublishChoice = 'match-state' | 'save-only';
-
-/** How the change is written, from the process state, the choice and the permissions. */
-export type WritePath = 'save-only' | 'publish-direct' | 'submit-then-publish';
 
 export interface Directory {
   byLogon: ReadonlyMap<string, DirectoryLookup>;
@@ -130,16 +130,18 @@ function at(lines: readonly number[]): string {
   return lines.length === 1 ? `line ${lines[0]}` : `lines ${lines.join(', ')}`;
 }
 
-/** Returns a WritePath, or the reason the process cannot be written. PGM's rules. */
-export function chooseWritePath(state: OwnershipState, publish: PublishChoice): WritePath | string {
-  if (!state.canSave) return 'You do not have permission to save changes to this process.';
+const REFUSALS: Record<WriteRefusal, string> = {
+  'cannot-save': 'You do not have permission to save changes to this process.',
   // Someone else is mid-review. Editing underneath them is not ours to do.
-  if (state.revisionStateId === 2) return 'Awaiting approval, so it was not modified.';
-  if (state.revisionStateId === 1) return 'save-only';
-  if (publish === 'save-only') return 'save-only';
-  if (state.canPublishAfterEdit) return 'publish-direct';
-  if (state.canSubmitForApprovalAfterEdit) return 'submit-then-publish';
-  return 'Published, but you can neither publish it nor submit it for approval. Choose "Save only" to leave the change as a draft instead.';
+  'awaiting-approval': 'Awaiting approval, so it was not modified.',
+  'cannot-publish':
+    'Published, but you can neither publish it nor submit it for approval. Choose "Save only" to leave the change as a draft instead.',
+};
+
+/** Returns a WritePath, or the reason the process cannot be written. The rules are shared with reference removal (pm/writePath.ts). */
+export function chooseWritePath(state: OwnershipState, publish: PublishChoice): WritePath | string {
+  const path = choosePath(state, { publish });
+  return isWritePath(path) ? path : REFUSALS[path.refused];
 }
 
 function roleChange(before: UserRef | null, cell: Cell): RoleChange | null {
@@ -270,7 +272,7 @@ export async function buildOwnershipPlan(
     }
 
     const writePath = chooseWritePath(state, options.publish);
-    if (!isWritePath(writePath)) {
+    if (!isOwnershipPath(writePath)) {
       skipped.push(skip(entry.processId, state.name, 'Blocked', `${writePath} (${at(entry.lines)})`));
       continue;
     }
@@ -291,7 +293,7 @@ export async function buildOwnershipPlan(
   return { changes, skipped, publish: options.publish };
 }
 
-function isWritePath(value: WritePath | string): value is WritePath {
+function isOwnershipPath(value: WritePath | string): value is WritePath {
   return value === 'save-only' || value === 'publish-direct' || value === 'submit-then-publish';
 }
 

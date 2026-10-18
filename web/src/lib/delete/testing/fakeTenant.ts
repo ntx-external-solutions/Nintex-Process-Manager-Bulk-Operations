@@ -28,7 +28,7 @@
 
 import type { ArchiveState } from '../../archive/outcome.ts';
 import { LIST_PAGE_SIZE, type ProcessListItem, type ProcessListPage } from '../../pm/processes.ts';
-import type { ProcessUpdateEnvelope } from '../../pm/types.ts';
+import type { ProcessActions, ProcessUpdateEnvelope } from '../../pm/types.ts';
 import { ARCHIVED_LIST_TYPE } from '../../tenant/state.ts';
 import { PmRequestError } from '../../ui/gateway.ts';
 import { ARCHIVED_BATCH_SIZE, type ActiveRead, type DeleteGateway, type GroupProcess, type GroupRef, type RestoreCallOptions } from '../gateway.ts';
@@ -55,6 +55,8 @@ export interface FakeProcessSeed {
   dependencies?: unknown;
   /** The group listing's name for it, which for a variation is its master's. */
   groupListingName?: string;
+  /** What the active read's `processActions` grants. Default: save, publish and submit, as an administrator. */
+  processActions?: Partial<ProcessActions>;
 }
 
 export interface FakeProcess {
@@ -71,6 +73,7 @@ export interface FakeProcess {
   dependencies: unknown;
   groupListingName: string | null;
   revisionEditId: number;
+  processActions: Partial<ProcessActions>;
 }
 
 export type FakeOp =
@@ -80,7 +83,6 @@ export type FakeOp =
   | 'readModel'
   | 'saveModel'
   | 'publishNow'
-  | 'publishRevisionEdit'
   | 'archive'
   | 'archiveState'
   | 'restore'
@@ -94,7 +96,6 @@ export type FakeOp =
 export const PROCESS_MUTATIONS: ReadonlySet<FakeOp> = new Set<FakeOp>([
   'saveModel',
   'publishNow',
-  'publishRevisionEdit',
   'archive',
   'restore',
   'deleteProcess',
@@ -206,6 +207,7 @@ export class FakeTenant implements DeleteGateway {
       dependencies: seed.dependencies ?? null,
       groupListingName: seed.groupListingName ?? null,
       revisionEditId: typeof revision === 'number' ? revision : 1,
+      processActions: seed.processActions ?? { CanSave: true, CanPublishAfterEdit: true, CanSubmitForApprovalAfterEdit: true },
     };
     this.#processes.set(key(seed.uniqueId), process);
     return process;
@@ -301,7 +303,7 @@ export class FakeTenant implements DeleteGateway {
     // `{success, isArchived}` and no model, as the tenant was measured to (S1, S2).
     this.#begin({ op: 'readModel', uniqueId: processUniqueId }, () => (process ? null : notFound()));
     if (!this.#onActiveSide(process!)) return { kind: 'archived' };
-    return { kind: 'model', model: this.#view(process!) };
+    return { kind: 'model', model: this.#view(process!), processActions: { ...process!.processActions } };
   }
 
   async saveModel(processUniqueId: string, envelope: ProcessUpdateEnvelope): Promise<void> {
@@ -318,10 +320,6 @@ export class FakeTenant implements DeleteGateway {
 
   async publishNow(processUniqueId: string, processRevisionEditId: number, publishMessage: string): Promise<unknown> {
     return this.#publish('publishNow', processUniqueId, processRevisionEditId, publishMessage);
-  }
-
-  async publishRevisionEdit(processUniqueId: string, processRevisionEditId: number, publishMessage: string): Promise<unknown> {
-    return this.#publish('publishRevisionEdit', processUniqueId, processRevisionEditId, publishMessage);
   }
 
   async archive(processUniqueId: string, comment: string): Promise<unknown> {
@@ -426,7 +424,7 @@ export class FakeTenant implements DeleteGateway {
   }
 
   async #publish(
-    op: 'publishNow' | 'publishRevisionEdit',
+    op: 'publishNow',
     processUniqueId: string,
     processRevisionEditId: number,
     publishMessage: string,

@@ -84,12 +84,6 @@ export interface DeleteGateway extends ArchiveGateway {
   saveModel(processUniqueId: string, envelope: ProcessUpdateEnvelope): Promise<void>;
 
   /**
-   * `POST /Process/Edit/PublishProcessRevisionEdit`, the publish `Save-NpmProcessModel`
-   * uses when approvals are off. With approvals on it uses `publishNow`, inherited.
-   */
-  publishRevisionEdit(processUniqueId: string, processRevisionEditId: number, publishMessage: string): Promise<unknown>;
-
-  /**
    * `POST /Process/Edit/RestoreProcess` into one group. HTTP 500 for a group that does not
    * exist, and on the measured tenant for a process that is already active.
    */

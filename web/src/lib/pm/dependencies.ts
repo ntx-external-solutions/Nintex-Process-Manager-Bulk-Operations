@@ -9,6 +9,7 @@
 
 import { pmRequest, type PmContext } from './client.ts';
 import { readProcess } from './processes.ts';
+import type { ProcessActions } from './types.ts';
 
 /** Both directions, every category (API_ARCHITECTURE.md, "Dependency Checking APIs"). */
 export const DEPENDENCY_SEARCH_BEHAVIOR = 31;
@@ -35,11 +36,19 @@ export async function checkDependencies(ctx: PmContext, processUniqueId: string)
 }
 
 /** The active read: the model, or that the process is archived (`readProcessEnvelope`). */
-export type ActiveRead = { kind: 'model'; model: Record<string, unknown> } | { kind: 'archived' };
+/**
+ * `processActions` rides along so a writer decides its publish route from the process
+ * (pm/writePath.ts), on the same read it edits.
+ */
+export type ActiveRead =
+  | { kind: 'model'; model: Record<string, unknown>; processActions: Partial<ProcessActions> | null }
+  | { kind: 'archived' };
 
 export async function readActiveModel(ctx: PmContext, processUniqueId: string): Promise<ActiveRead> {
   const read = await readProcess(ctx, processUniqueId);
-  return read.kind === 'model' ? { kind: 'model', model: read.response.processJson } : { kind: 'archived' };
+  return read.kind === 'model'
+    ? { kind: 'model', model: read.response.processJson, processActions: read.response.processActions ?? null }
+    : { kind: 'archived' };
 }
 
 /**
