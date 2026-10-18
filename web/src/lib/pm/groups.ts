@@ -265,3 +265,46 @@ export function breadcrumbTitles(response: unknown): string[] {
   // The first entry is the tenant itself, which no group path in this app includes.
   return titles.slice(1).filter((title) => title !== '');
 }
+
+/**
+ * Make a group at the top level and return its ids (`New-ProcessGroup`). The tenant takes
+ * no name here, so the group has its default name; the script never renamed it either,
+ * and the run deletes it by UniqueId once it is empty. The numeric id, which
+ * RestoreProcess needs, is read from the top level of the tree.
+ */
+export async function createTopLevelGroup(ctx: PmContext): Promise<{ id: number; uniqueId: string }> {
+  const created = await pmRequest<Record<string, unknown>>(ctx, {
+    path: '/Process/Edit/CreateGroup',
+    method: 'POST',
+    body: { parentProcessGroupUniqueId: '' },
+    // A CreateGroup that succeeded and is sent again leaves an orphan group behind.
+    retry: 'write',
+  });
+  const uniqueId = typeof created?.['groupid'] === 'string' ? created['groupid'] : '';
+  if (!uniqueId) throw new Error('CreateGroup answered without a group id.');
+  const top = await getChildGroups(ctx, null);
+  const item = (top.treeItems ?? []).find((t) => t.uniqueId.toLowerCase() === uniqueId.toLowerCase());
+  if (!item) throw new Error(`The new group ${uniqueId} is not at the top level of the tree, so its numeric id is unknown. Delete it by hand.`);
+  return { id: item.id, uniqueId };
+}
+
+/**
+ * The live processes directly in one group, no subgroups (`Get-ProcessesFromGroup` with
+ * `-IncludeSubgroups $false`). Archived processes are not listed. A variation is listed
+ * under its master's name.
+ */
+export async function getGroupProcesses(
+  ctx: PmContext,
+  groupUniqueId: string,
+): Promise<Array<{ processUniqueId: string; processName: string }>> {
+  const response = await pmRequest<unknown>(ctx, {
+    path: '/bff/navigation/api/v1/breadcrumb/children',
+    query: { type: 'ProcessGroup', id: groupUniqueId },
+  });
+  const items = typeof response === 'object' && response !== null ? (response as Record<string, unknown>)['breadcrumbItems'] : null;
+  if (!Array.isArray(items)) return [];
+  return items
+    .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null && item['type'] === 'Process')
+    .map((item) => ({ processUniqueId: String(item['id'] ?? ''), processName: typeof item['name'] === 'string' ? item['name'] : '' }))
+    .filter((p) => p.processUniqueId !== '');
+}

@@ -7,7 +7,9 @@
 // by a live document, one held only by an archived document (F1), a draft that goes live
 // on a move, the breadcrumb, an ownership save and publish with a SCIM directory, and the
 // dependency check and batch read a Bulk Delete plan is built from (Elsewhere links to
-// Old thing, which an archived process also takes as an Input).
+// Old thing, which an archived process also takes as an Input), and the writes a real
+// delete makes: RestoreProcess (500 for an active process or a group that is gone, as
+// measured), DeleteProcess, CreateGroup and a group's process listing.
 // For ownership, start the app with SCIM_BASE_URL=http://localhost:<port>.
 //
 //   node dev/mock-pm.mjs [port]      (default 4999; sign in to http://localhost:4999/tenant)
@@ -16,6 +18,8 @@
 // GET /tenant/_expire kills the token the way R12 measured a dead one: 302 to the sign-in
 // page from GET /Api/v1/Processes/{id} and ArchiveProcess, 401 from everything else.
 // ?mode=redirects expires only the two 302 endpoints, so a run can reach them.
+// ?on=<path part> waits, and expires everything at the first request whose path has it,
+// so a run dies mid-way. GET /tenant/_revive brings the session back.
 
 import http from 'node:http';
 
@@ -78,7 +82,9 @@ const item = (uniqueId, title, itemType, n) => ({
   totalSubgroups: null, totalStakeholderUsers: null, totalPermissionRoles: null, totalPermissionUsers: null, variationSetId: null,
 });
 const levels = (parent) => [
-  ...Object.entries(groups).filter(([, g]) => g.parent === parent).map(([u, g], i) => item(u, g.title, 'group', 900 + i)),
+  // A group's numeric id is the one the process listing reports for it (GroupId), so a
+  // group found in the tree is the group RestoreProcess is sent to.
+  ...Object.entries(groups).filter(([, g]) => g.parent === parent).map(([u, g]) => item(u, g.title, 'group', Number(u.slice(-3)))),
   ...Object.entries(procs).filter(([, p]) => p.group === parent && !p.archived).map(([u, p], i) => item(u, p.name, 'process', i + 1)),
 ];
 const chain = (g) => {
@@ -89,6 +95,7 @@ const chain = (g) => {
 
 const log = [];
 let expired = null;
+let expireOn = null;
 const REDIRECTING = [/^\/Api\/v1\/Processes\/[^/]+$/, /^\/Process\/Edit\/ArchiveProcess$/];
 const send = (res, status, body) => {
   res.writeHead(status, { 'content-type': 'application/json' });
@@ -104,8 +111,18 @@ http.createServer(async (req, res) => {
 
   if (p === '/_log') return send(res, 200, log);
   if (p === '/_expire') {
-    expired = url.searchParams.get('mode') ?? 'all';
+    expireOn = url.searchParams.get('on');
+    if (!expireOn) expired = url.searchParams.get('mode') ?? 'all';
+    return send(res, 200, { expired, expireOn });
+  }
+  if (p === '/_revive') {
+    expired = null;
+    expireOn = null;
     return send(res, 200, { expired });
+  }
+  if (expireOn && p.includes(expireOn)) {
+    expired = 'all';
+    expireOn = null;
   }
   if (p === '/oauth2/token') return send(res, 200, { access_token: 'tok', expires_in: 3600 });
   if (p === '/api/scim/users') {
@@ -194,6 +211,37 @@ http.createServer(async (req, res) => {
     return send(res, 200, { isValid: true });
   }
 
+  if (p === '/Process/Edit/RestoreProcess') {
+    const { processUniqueId, processGroupId } = JSON.parse(body);
+    const x = procs[processUniqueId];
+    const g = Object.keys(groups).find((u) => String(Number(u.slice(-3))) === String(processGroupId));
+    if (!x || !g || !x.archived) return send(res, 500, { message: 'Internal Server Error' });
+    x.archived = false;
+    x.group = g;
+    x.groupGone = false;
+    return send(res, 200, {});
+  }
+  if (p === '/Process/Edit/DeleteProcess') {
+    const { processUniqueId } = JSON.parse(body);
+    if (!procs[processUniqueId]) return send(res, 404, { message: 'not found' });
+    delete procs[processUniqueId];
+    delete dependencies[processUniqueId];
+    return send(res, 200, { isValid: true });
+  }
+  if (p === '/Process/Edit/CreateGroup') {
+    const created = id(910 + Object.keys(groups).length);
+    // The tenant takes no name here; the group gets its default one.
+    groups[created] = { parent: JSON.parse(body).parentProcessGroupUniqueId ?? '', title: 'New Group' };
+    return send(res, 200, { groupid: created });
+  }
+  if (p === '/bff/navigation/api/v1/breadcrumb/children') {
+    const g = url.searchParams.get('id');
+    const items = Object.entries(procs)
+      .filter(([, x]) => x.group === g && !x.archived)
+      .map(([u, x], i) => ({ id: u, parentId: g, name: x.name, position: i + 1, type: 'Process', url: '', version: x.version }));
+    return send(res, 200, { isChildren: true, breadcrumbItems: items });
+  }
+
   let m = p.match(/^\/Api\/v1\/Processes\/([^/]+)\/Publish$/);
   if (m) {
     const x = procs[m[1]];
@@ -219,6 +267,8 @@ http.createServer(async (req, res) => {
     if (b.SuppressChangeNotification !== true) return send(res, 400, { message: 'mock: notifications must be suppressed' });
     const model = JSON.parse(b.ProcessJson);
     if (model.ProcessRevisionEditId !== x.rev) return send(res, 409, { message: 'stale' });
+    // A reference removal saves the whole model; keep what it changed.
+    links[m[1]] = { ProcessProcedures: model.ProcessProcedures ?? null, Inputs: model.Inputs ?? null, Outputs: model.Outputs ?? null };
     x.owner = { id: model.OwnerId, name: model.Owner };
     x.expert = { id: model.ExpertId, name: model.Expert };
     const [major, minor] = x.version.split('.').map(Number);
