@@ -115,8 +115,14 @@ input {
   border-radius: 6px;
 }
 
-input[type='checkbox'] {
+/*
+ * The rule above is for text inputs. R12 found it stretching the destination picker's
+ * radios to the full row width, which pushed every group name to the right edge.
+ */
+input[type='checkbox'],
+input[type='radio'] {
   width: auto;
+  flex: none;
   margin: 0;
   padding: 0;
   accent-color: var(--accent);

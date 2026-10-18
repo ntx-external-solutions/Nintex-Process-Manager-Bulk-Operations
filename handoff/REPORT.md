@@ -6,6 +6,66 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## F2. Fixes from live round R12
+
+Commit `809966c` on `claude/web-f2-r12`, stacked on W4.
+
+**What changed.**
+
+- **Dead session.** `pmRequest` (`pm/client.ts`) calls `fetch` with `redirect: 'manual'`.
+  A 3xx (or a browser's opaque redirect) throws a `PmError` with `sessionEnded: true`
+  and is never retried. A 401 sets `sessionEnded` too. A 2xx body that should be JSON
+  and isn't raises a `PmError` with the status and a 200-character excerpt instead of a
+  `SyntaxError`. If it is HTML (the sign-in page), it also ends the session. New
+  `isSessionEnded()`. A 403 is unchanged: a refusal of that call.
+- **Proxy mapping.** The route's error handling moved to `pm/proxyError.ts`
+  (`proxyError`), so it can be tested without Next.js. It now signs out on
+  `isSessionEnded`, not `status === 401`.
+- **Picker layout.** `globals.css`: the checkbox rule now covers radios too
+  (`width: auto; flex: none`). The full-width text input rule was reaching the
+  destination picker's radios. Checked in headless Chrome: the radio computes to 13px
+  and the names sit beside it.
+- **Move results.** `describeOutcome` (`move/run.ts`) says what happened from the model
+  read after the run: "Published as 2.0; the open draft went live.", "Published as
+  4.0.", "Now at 0.4, in progress and not published.", "Now at 2.1, awaiting
+  approval.", or "Its version could not be re-read." `settleMoves` takes those reads,
+  and `/move` makes one `process.summary` per moved process after the run. Groups
+  still say "No process revision changed." The preview wording is unchanged.
+- Fixed in passing: the archive run's "Stopped while archiving" message ended in "..".
+
+**Results-file operations.** None new. `UpdateLocation` messages for moved processes now
+carry the version.
+
+**Tests.** 281 tests, 281 pass (12 new). `client.test.ts`: a 302 is a dead session,
+sent once, with `redirect: 'manual'`; an opaque redirect; a sign-in page; a non-JSON
+body that is not HTML keeps the session; a 403 keeps it. `proxyError.test.ts` runs
+browser gateway, route mapping and client in one process against a tenant answering as
+R12 measured. For **a 302 and for a 2xx HTML page**, an archive run mid-flight signs out
+and stops: one tenant call, then a Failed row and Skipped "Not attempted" rows. A read
+reaches the browser as `signedOut`. A 403 keeps the tenant's words, and a refused SCIM
+key stays a 400. `move.test.ts`: `describeOutcome` for each state, and the settle
+messages.
+
+**End-to-end, offline.** `web/dev/drive-expired.mjs`: the mock's new `/_expire` makes
+`GET /Api/v1/Processes/{id}` and `ArchiveProcess` answer 302, as R12 measured. Expiring
+between preview and run: the page says "Your session ended. Sign in again and resume.",
+every process has a row (the batch already in flight Failed, the rest Skipped), and no
+"Unexpected error" appears. The move scenario makes one version read per moved process
+after the run.
+
+**Decisions Cowork should check.**
+
+- **Any 3xx from the tenant is treated as a dead session**, as the task says. If some
+  endpoint legitimately redirects (http to https, say), it would now sign the operator
+  out instead of following. Sign-in itself uses its own `fetch` and still follows
+  redirects.
+- **A non-JSON 2xx that is not HTML** is an error for that call, not a sign-out.
+- The batch in flight when the session dies still gets sent (up to four archives), as
+  before: a sent request cannot be recalled. Those rows are Failed "Stopped while
+  archiving", and the final read settles them.
+
+---
+
 ## W4. Bulk Update Ownership
 
 Commit `d0062e7` on `claude/web-w4-ownership`, stacked on F1.

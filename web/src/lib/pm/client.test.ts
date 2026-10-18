@@ -5,6 +5,7 @@ import {
   backoffMs,
   buildUrl,
   isPmError,
+  isSessionEnded,
   pmRequest,
   TENANT_MESSAGE_MAX_LENGTH,
   tenantMessage,
@@ -159,8 +160,53 @@ test('a 401 surfaces its status so the UI can ask for sign-in again', async () =
   const s = stub([json({}, 401)]);
   await assert.rejects(
     pmRequest(ctx(s.fetchImpl), { path: '/x' }),
-    (e: unknown) => isPmError(e) && e.status === 401,
+    (e: unknown) => isPmError(e) && e.status === 401 && isSessionEnded(e),
   );
+});
+
+// R12: with a dead token, GET /Api/v1/Processes/{id} and ArchiveProcess answer 302 to the
+// sign-in page, where other endpoints answer 401.
+
+test('redirects are not followed, and a 302 is a dead session, sent once', async () => {
+  const s = stub([new Response(null, { status: 302, headers: { location: '/login' } })]);
+  await assert.rejects(
+    pmRequest(ctx(s.fetchImpl), { path: '/Process/Edit/ArchiveProcess', method: 'POST', body: {}, retry: 'write' }),
+    (e: unknown) => isPmError(e) && e.status === 302 && isSessionEnded(e),
+  );
+  assert.equal(s.count(), 1);
+  // The stub records headers only, so read the option off the init itself.
+  let seen: RequestInit | undefined;
+  await pmRequest(ctx((async (_u: string, init?: RequestInit) => ((seen = init), json({}))) as unknown as typeof fetch), { path: '/x' });
+  assert.equal(seen?.redirect, 'manual');
+});
+
+test('a browser-style opaque redirect is a dead session too', async () => {
+  const opaque = { type: 'opaqueredirect', status: 0, ok: false, headers: new Headers(), text: async () => '' } as unknown as Response;
+  await assert.rejects(
+    pmRequest(ctx((async () => opaque) as unknown as typeof fetch), { path: '/x' }),
+    (e: unknown) => isSessionEnded(e),
+  );
+});
+
+test('a sign-in page where JSON was expected is a dead session, not a SyntaxError', async () => {
+  const s = stub([new Response('<!DOCTYPE html><html><body>Sign in</body></html>', { status: 200, headers: { 'content-type': 'text/html' } })]);
+  await assert.rejects(
+    pmRequest(ctx(s.fetchImpl), { path: '/Api/v1/Processes/x' }),
+    (e: unknown) => isPmError(e) && isSessionEnded(e) && e.status === 200 && /HTML page/.test(e.message),
+  );
+});
+
+test('other bodies that are not JSON are a PmError with an excerpt, and the session stands', async () => {
+  const s = stub([new Response('Service temporarily unavailable', { status: 200 })]);
+  await assert.rejects(
+    pmRequest(ctx(s.fetchImpl), { path: '/x' }),
+    (e: unknown) => isPmError(e) && !isSessionEnded(e) && /not JSON \(200\): Service temporarily/.test(e.message),
+  );
+});
+
+test('a 403 is a refusal of that call, not a dead session', async () => {
+  const s = stub([json({ message: 'no' }, 403)]);
+  await assert.rejects(pmRequest(ctx(s.fetchImpl), { path: '/x' }), (e: unknown) => isPmError(e) && !isSessionEnded(e));
 });
 
 test('gives up after the attempt limit', async () => {

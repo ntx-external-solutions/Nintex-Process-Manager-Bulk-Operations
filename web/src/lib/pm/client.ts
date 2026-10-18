@@ -61,19 +61,35 @@ export interface PmError extends Error {
   status: number | null;
   url: string;
   bodyText: string;
+  /** The tenant no longer accepts the token. Every call after this one will fail too. */
+  sessionEnded: boolean;
 }
 
 export function isPmError(e: unknown): e is PmError {
   return e instanceof Error && e.name === 'PmError';
 }
 
-function pmError(message: string, status: number | null, url: string, bodyText: string): PmError {
+/** True when the error means "sign in again", not "this one call failed". */
+export function isSessionEnded(e: unknown): boolean {
+  return isPmError(e) && e.sessionEnded === true;
+}
+
+function pmError(message: string, status: number | null, url: string, bodyText: string, sessionEnded = false): PmError {
   const err = new Error(message) as PmError;
   err.name = 'PmError';
   err.status = status;
   err.url = url;
   err.bodyText = bodyText;
+  err.sessionEnded = sessionEnded;
   return err;
+}
+
+/** How much of an unexpected body an error carries. */
+const EXCERPT_LENGTH = 200;
+
+/** A sign-in page, not an API answer. */
+function looksLikeHtml(text: string): boolean {
+  return /^\s*</.test(text);
 }
 
 /**
@@ -151,6 +167,12 @@ export async function pmRequest<T>(ctx: PmContext, options: PmRequestOptions): P
       response = await ctx.fetch(url, {
         method,
         headers,
+        // Measured in R12: with a dead token, some endpoints answer 401 and others 302 to
+        // the sign-in page (`GET /Api/v1/Processes/{id}`, `ArchiveProcess`). Followed, the
+        // 302 ends in an HTML page with a 2xx, which then failed as a JSON SyntaxError and
+        // reached the browser as "Unexpected error" on every row, never as "sign in
+        // again". Not following it lets the 3xx itself say the session has gone.
+        redirect: 'manual',
         ...(payload === undefined ? {} : { body: payload }),
       });
     } catch (cause) {
@@ -167,7 +189,19 @@ export async function pmRequest<T>(ctx: PmContext, options: PmRequestOptions): P
       throw lastError;
     }
 
-    if (response.ok) return parseBody<T>(response, parse);
+    // A manual redirect is an opaque response with status 0 in a browser, and the 3xx
+    // itself in Node. Either way nothing was done, and the tenant wants a sign-in.
+    if (response.type === 'opaqueredirect' || (response.status >= 300 && response.status <= 399)) {
+      throw pmError(
+        `Process Manager redirected ${method} ${path} to its sign-in page: the session has ended`,
+        response.status || null,
+        url,
+        '',
+        true,
+      );
+    }
+
+    if (response.ok) return parseBody<T>(response, parse, { method, path, url });
 
     const text = await safeText(response);
     lastError = pmError(
@@ -175,6 +209,7 @@ export async function pmRequest<T>(ctx: PmContext, options: PmRequestOptions): P
       response.status,
       url,
       text,
+      response.status === 401,
     );
 
     if (attempt < attempts && shouldRetry(response.status, retry)) {
@@ -193,13 +228,31 @@ export function backoffMs(attempt: number, retryAfter: number | null): number {
   return BASE_DELAY_MS * 2 ** (attempt - 1);
 }
 
-async function parseBody<T>(response: Response, parse: 'json' | 'text'): Promise<T> {
+async function parseBody<T>(
+  response: Response,
+  parse: 'json' | 'text',
+  call: { method: string; path: string; url: string },
+): Promise<T> {
   // 204 is the documented success for the process PUT.
   if (response.status === 204) return undefined as T;
   const text = await safeText(response);
   if (parse === 'text') return text as T;
   if (text.trim() === '') return undefined as T;
-  return JSON.parse(text) as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    // An HTML page where JSON was expected is the sign-in page (R12); anything else is
+    // a response this client does not understand. Either way a PmError, with the status
+    // and an excerpt, never a bare SyntaxError the proxy can only call "unexpected".
+    const html = looksLikeHtml(text);
+    throw pmError(
+      `Process Manager answered ${call.method} ${call.path} with ${html ? 'an HTML page' : 'something that is not JSON'} (${response.status}): ${text.trim().slice(0, EXCERPT_LENGTH)}`,
+      response.status,
+      call.url,
+      text.slice(0, EXCERPT_LENGTH),
+      html,
+    );
+  }
 }
 
 async function safeText(response: Response): Promise<string> {

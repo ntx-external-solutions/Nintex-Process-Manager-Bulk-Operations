@@ -7,6 +7,7 @@ import { failureOf } from '../archive/outcome.ts';
 import { step, type Journal } from '../exec/journal.ts';
 import { resultRow, type ResultRow } from '../exec/report.ts';
 import { forEachBatched, type Controls } from '../exec/runner.ts';
+import type { ProcessSummary } from '../pm/operations.ts';
 import type { TreeItem } from '../pm/types.ts';
 import { indexEntry, type ProcessIndex } from '../tenant/state.ts';
 import { describeCost, type MoveItem, type MovePlan } from './plan.ts';
@@ -128,11 +129,32 @@ export async function runMoves(
 
 const SENT: ReadonlySet<string> = new Set(['Success', 'Blocked', 'Failed']);
 
+export type Revision = Pick<ProcessSummary, 'version' | 'revisionStateId'>;
+
+/**
+ * What the move did to a process, from its model read after the run. R12 found the
+ * results repeating the preview's "Its open draft will be published along with the
+ * move", which says what was expected, not what happened.
+ */
+export function describeOutcome(item: MoveItem, revision: Revision | null | undefined): string {
+  if (item.kind === 'group') return 'No process revision changed.';
+  if (!revision) return 'Its version could not be re-read.';
+  switch (revision.revisionStateId) {
+    case 3:
+      return `Published as ${revision.version}${item.cost === 'draft' ? '; the open draft went live' : ''}.`;
+    case 2:
+      return `Now at ${revision.version}, awaiting approval.`;
+    default:
+      return `Now at ${revision.version}, in progress and not published.`;
+  }
+}
+
 /**
  * Settle each move against fresh reads: the destination's level and every source level,
  * and the process listing for variation siblings, which are not in the tree.
  *
- *  - in the destination now: Success, whatever the call said;
+ *  - in the destination now: Success, whatever the call said, saying what became of the
+ *    process's version from `revisions`;
  *  - still in its old group after a call that said yes: Failed;
  *  - in neither level after a call that said yes: Unverified;
  *  - a sibling of a variation that moved gets its own row, because the move changed it
@@ -143,6 +165,8 @@ export function settleMoves(
   plan: MovePlan,
   levels: ReadonlyMap<string, readonly TreeItem[] | null>,
   after: ProcessIndex | null,
+  /** Each moved process's model after the run, keyed by lowercased id. */
+  revisions: ReadonlyMap<string, Revision | null> = new Map(),
 ): ResultRow[] {
   const destKey = plan.destination.uniqueId ?? '';
   const items = new Map([...plan.moves, ...plan.needsChoice].map((item) => [item.uniqueId, item]));
@@ -163,9 +187,11 @@ export function settleMoves(
     let settled = row;
 
     if (inDestination === true) {
-      if (row.status !== 'Success') {
-        settled = { ...row, status: 'Success', message: `Moved to ${toDisplay}, confirmed by the final read, although the run reported: ${row.message}` };
-      }
+      const outcome = describeOutcome(item, revisions.get(item.uniqueId.toLowerCase()));
+      settled =
+        row.status === 'Success'
+          ? { ...row, message: `Moved from ${item.fromDisplay} to ${toDisplay}. ${outcome}` }
+          : { ...row, status: 'Success', message: `Moved to ${toDisplay}, confirmed by the final read, although the run reported: ${row.message} ${outcome}` };
     } else if (row.status === 'Success' && inDestination === false) {
       settled =
         inSource === true

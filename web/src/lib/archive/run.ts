@@ -128,7 +128,7 @@ export async function runArchive(
           name: target.name,
           operation: 'Archive',
           status: 'Failed',
-          message: `Stopped while archiving: ${controls.stoppedReason() ?? 'unknown error'}. The final read decides whether it took effect.`,
+          message: `Stopped while archiving: ${(controls.stoppedReason() ?? 'unknown error.').replace(/\.?$/, '.')} The final read decides whether it took effect.`,
           groupId: target.groupId,
         });
       }

@@ -19,9 +19,8 @@ import { NextResponse } from 'next/server';
 import { readCookie } from '@/lib/auth/cookie.ts';
 import { SESSION_COOKIE, unseal } from '@/lib/auth/session.ts';
 import type { PmContext } from '@/lib/pm/client.ts';
-import { isPmError, tenantMessage } from '@/lib/pm/client.ts';
 import { execute, parseOperation } from '@/lib/pm/operations.ts';
-import { isScimError } from '@/lib/pm/scim.ts';
+import { proxyError } from '@/lib/pm/proxyError.ts';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -62,41 +61,8 @@ export async function POST(request: Request): Promise<NextResponse> {
     const result = await execute(ctx, parsed.operation);
     return NextResponse.json({ ok: true, result });
   } catch (error) {
-    // Checked before the Process Manager branch below: a SCIM key the directory refuses
-    // is a wrong key, not a dead session, and signing the operator out over one would
-    // lose the plan they were part-way through building.
-    if (isScimError(error)) {
-      return NextResponse.json({ error: error.message }, { status: 400 });
-    }
-
-    if (isPmError(error)) {
-      // A 401 means our token died mid-run; tell the client to stop and re-authenticate
-      // rather than hammering through the rest of a plan.
-      //
-      // PGM treated 403 the same way. This app does not: a 403 from a write is far more
-      // likely to be the tenant refusing one process to this user than a dead session,
-      // and signing the operator out over one process would stop a bulk archive that
-      // should carry on and report it. The process is reported with its status code
-      // instead.
-      if (error.status === 401) {
-        return NextResponse.json(
-          { error: 'Process Manager rejected the session. Sign in again.', signedOut: true },
-          { status: 401 },
-        );
-      }
-      return NextResponse.json(
-        {
-          error: error.message,
-          status: error.status,
-          // The tenant's own words, for a results file an administrator has to act on.
-          message: tenantMessage(error.bodyText),
-          // Useful for diagnosis and safe: it is the tenant's own response.
-          detail: error.bodyText.slice(0, 2_000),
-        },
-        { status: 502 },
-      );
-    }
-    return NextResponse.json({ error: 'Unexpected error handling the request.' }, { status: 500 });
+    const failure = proxyError(error);
+    return NextResponse.json(failure.body, { status: failure.status });
   }
 }
 

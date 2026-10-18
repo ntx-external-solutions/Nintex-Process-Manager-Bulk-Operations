@@ -15,7 +15,7 @@ import { Journal, sessionJournalStore } from '@/lib/exec/journal.ts';
 import { resultsToCsv, type ResultRow } from '@/lib/exec/report.ts';
 import { createControls, defaultIsFatal, errorMessage } from '@/lib/exec/runner.ts';
 import { buildMovePlan, describeCost, movePreviewRows, type MoveItem, type MovePlan } from '@/lib/move/plan.ts';
-import { itemsToMove, MOVE_STATUSES, runMoves, settleMoves } from '@/lib/move/run.ts';
+import { itemsToMove, MOVE_STATUSES, runMoves, settleMoves, type Revision } from '@/lib/move/run.ts';
 import { describeDestination, destinationOf, resolveMoveSelection } from '@/lib/move/select.ts';
 import { revalidatePlacements, type StaleFinding } from '@/lib/plan/revalidate.ts';
 import type { TreeItem } from '@/lib/pm/types.ts';
@@ -147,10 +147,22 @@ function MoveFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOut:
         }
       }
 
+      // Each moved process's version after the run, so its row says what happened (R12).
+      const revisions = new Map<string, Revision | null>();
+      for (const item of items) {
+        if (item.kind !== 'process') continue;
+        try {
+          revisions.set(item.uniqueId.toLowerCase(), await gateway.processSummary(item.uniqueId));
+        } catch {
+          // Not a reason to lose the results, even when the session has ended.
+          revisions.set(item.uniqueId.toLowerCase(), null);
+        }
+      }
+
       journal.discard();
       browse.refresh();
       destinations.refresh();
-      setStage({ kind: 'done', rows: settleMoves(draft, plan, levels, after), warning: controls.stoppedReason() });
+      setStage({ kind: 'done', rows: settleMoves(draft, plan, levels, after, revisions), warning: controls.stoppedReason() });
     } catch (cause) {
       handleError(cause);
       setError(errorMessage(cause));
