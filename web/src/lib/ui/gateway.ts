@@ -10,7 +10,10 @@
 import type { ArchiveGateway, ArchiveState } from '../archive/outcome.ts';
 import type { FactsGateway } from '../cleanup/facts.ts';
 import type { CleanupGateway } from '../cleanup/run.ts';
-import type { TreeItem } from '../pm/types.ts';
+import type { MovePlanReads } from '../move/plan.ts';
+import type { MoveGateway } from '../move/run.ts';
+import type { GroupViewerCount, MovableNodeType } from '../pm/groups.ts';
+import type { TreeItem, ValidateActionResponse } from '../pm/types.ts';
 import type { PlanGateway } from '../plan/load.ts';
 import type { Operation, ProcessSummary } from '../pm/operations.ts';
 import type { ProcessListPage, VariationSet } from '../pm/processes.ts';
@@ -124,6 +127,25 @@ export function browserCleanupGateway(): CleanupGateway & FactsGateway {
     groupDocuments: (groupUniqueId) =>
       callPm<{ total: number; names: string[] }>({ op: 'group.documents', groupUniqueId }),
     deleteGroup: (groupUniqueId) => callPm({ op: 'group.delete', groupUniqueId }),
+  };
+}
+
+/** Moving nodes, and the reads a move plan needs. Each call names one node. */
+export function browserMoveGateway(): MoveGateway & Omit<MovePlanReads, 'isFatal' | 'onProgress'> {
+  return {
+    move: (item) =>
+      callPm<{ success: boolean; errors: unknown[] | null }>({
+        op: 'node.move',
+        uniqueId: item.uniqueId,
+        nodeType: item.nodeType as MovableNodeType,
+        newParentUniqueId: item.newParentUniqueId,
+        oldParentUniqueId: item.oldParentUniqueId,
+      }),
+    validateMove: (processUniqueId, destinationGroupUniqueId) =>
+      callPm<ValidateActionResponse>({ op: 'process.validateMove', processUniqueId, destinationGroupUniqueId }),
+    variationSet: (processUniqueId) =>
+      callPm<VariationSet | null>({ op: 'process.variationSet', processUniqueId }),
+    viewers: (groupIds) => callPm<GroupViewerCount[]>({ op: 'groups.viewers', groupIds }),
   };
 }
 

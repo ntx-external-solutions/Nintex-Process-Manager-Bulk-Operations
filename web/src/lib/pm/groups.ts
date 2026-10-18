@@ -53,15 +53,23 @@ export function validateGroupAction(
   });
 }
 
+/** The item types this app will move. Shortcuts and document groups are not among them. */
+export const MOVABLE_NODE_TYPES = ['group', 'process', 'inprogress-process', 'vanillaprocess'] as const;
+export type MovableNodeType = (typeof MOVABLE_NODE_TYPES)[number];
+
 /**
  * One node being reparented. The server's field names and casing, not ours.
  *
  * `NodeType` is the tree item's own `itemType` passed straight through — the client
  * does no branching by type, and `"group"` reparents a group through the identical
  * call that moves a process.
+ *
+ * What a move costs differs by type (spike S2): a group moves with no revision change;
+ * a never-published process gets a minor bump; anything with a published version is
+ * republished as a new major version, open draft included.
  */
 export interface TreeNodeMove {
-  NodeType: 'group';
+  NodeType: MovableNodeType;
   /** Empty string moves the node to the top level. */
   ParentUniqueId: string;
   OriginalParentUniqueId: string;
@@ -77,12 +85,11 @@ export interface ReorderResponse {
 }
 
 /**
- * Reparent groups. Takes an array, so many moves commit in one request.
+ * Reparent nodes. Takes an array; this app always sends one, so each move is journaled
+ * and attributable.
  *
- * The group keeps its id, and therefore its processes, permissions, and stakeholders —
- * which is what makes matching-and-moving strictly better than creating a new group and
- * re-homing everything into it. It touches no process revision, so it publishes nothing
- * and notifies nobody.
+ * A group keeps its id, and therefore its processes, permissions and stakeholders, and
+ * touches no process revision. A process move is not free: see `TreeNodeMove`.
  */
 export function reorderTreeNodes(
   ctx: PmContext,
@@ -124,6 +131,35 @@ export async function getGroupPermissions(
     path: `/Process/View/GetUserActionPermissionsByGroups?${params.toString()}`,
   });
   return response.data ?? [];
+}
+
+export const ProcessActionType = {
+  /** Move a process to another group. */
+  Move: 11,
+} as const;
+
+/**
+ * The server's own pre-flight for a process move.
+ *
+ * For a published process it prompts "Publish New Version?"; for one with an open draft
+ * it warns the draft will be published too; for a never-published one it is valid with
+ * no prompt (spike S2). The move endpoint does not enforce any of it, so the preview has
+ * to show it.
+ */
+export function validateProcessMove(
+  ctx: PmContext,
+  processUniqueId: string,
+  destinationGroupUniqueId: string,
+): Promise<ValidateActionResponse> {
+  return pmRequest<ValidateActionResponse>(ctx, {
+    path: '/Process/Edit/ValidateProcessAction',
+    query: {
+      processUniqueId,
+      actionType: ProcessActionType.Move,
+      processGroupUniqueId: destinationGroupUniqueId,
+      isShortcut: 'false',
+    },
+  });
 }
 
 export interface GroupViewerCount {
