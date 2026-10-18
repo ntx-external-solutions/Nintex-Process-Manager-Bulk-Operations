@@ -37,8 +37,10 @@ Maintained by the Cowork session. Claude Code reads this but does not edit it.
   read almost nothing; fix handed to phase 4. All 24 mismatches on R11's set verified as
   API over-claims (raw models match the plan in 24 of 24); gate relaxation handed to
   phase 4.
-- Next for Cowork: review phase 4 (reference removal); live mutation testing waits for
-  the unwind phase.
+- W5 phase 4 (reference removal) reviewed and approved; the publish path must be read
+  from each process (reuse W4's `chooseWritePath`), fixed at the start of phase 5.
+- Next for Cowork: read-only dry run once phase 4 deploys; review phase 5 (checkpoints);
+  live mutation testing waits for the unwind phase.
 - Spikes S1 to S3 and the variation test are in `API_ARCHITECTURE.md`. One lasting change
   on the tenant: "SOC 2 Submission Review" and its Partner variation are published at 3.0.
 - Restricting sign-in to known Process Manager hosts is deferred by JB.
