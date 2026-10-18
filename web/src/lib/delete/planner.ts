@@ -20,6 +20,7 @@ import {
   groupSitesByHolder,
   parseDependencyResponse,
   reconcileDependencies,
+  reconciliationGate,
   type DependencyClaim,
   type Reconciliation,
 } from './claims.ts';
@@ -34,6 +35,7 @@ import {
   type OrphanedHolder,
   type ParticipantRecord,
   type ProcessStateSnapshot,
+  type UnreadProcess,
 } from './ledger.ts';
 import { nodeArray, nodeInt, nodeString, nodeValue, type DeleteIndex, type DeleteIndexEntry, type ProcessModel } from './model.ts';
 import { resolveClaimName } from './names.ts';
@@ -183,22 +185,41 @@ export interface HiddenReferenceScanOptions {
   onEvent?: DeleteEventSink | undefined;
 }
 
+/** What the Input/Output scan found, and what it could not read. */
+export interface HiddenReferenceScan {
+  sites: ReferenceSite[];
+  /** Processes the scan never read, so any reference they hold is unknown. */
+  unread: UnreadProcess[];
+}
+
 /**
  * Input and Output references to the targets held by archived processes (and active ones
  * when asked), which no dependency response ever names: finding them would need a
  * restore, and knowing to restore would need finding them. Targets are never read. Port
  * of `Find-HiddenInputOutputReference`.
+ *
+ * DIFFERS: the script skipped a batch that failed and carried on. With its batch size
+ * over the tenant's limit, that was every full batch, and the scan read only the last
+ * partial one: 18 of 19 batches lost on the demo tenant (Cowork's live check after W5
+ * phase 3). A failed read is now reported, id by id, and the plan is incomplete.
  */
 export async function findHiddenInputOutputReferences(
   gateway: Pick<DeleteGateway, 'readModel' | 'readArchivedModels'>,
   targetUniqueIds: readonly string[],
   index: DeleteIndex,
   options: HiddenReferenceScanOptions = {},
-): Promise<ReferenceSite[]> {
+): Promise<HiddenReferenceScan> {
   const isFatal = options.isFatal ?? defaultIsFatal;
-  const batchSize = Math.min(options.batchSize ?? ARCHIVED_BATCH_SIZE, ARCHIVED_BATCH_SIZE);
+  const batchSize = Math.max(1, Math.min(options.batchSize ?? ARCHIVED_BATCH_SIZE, ARCHIVED_BATCH_SIZE));
   const cache = options.cache ?? null;
   const sites: ReferenceSite[] = [];
+  const unread: UnreadProcess[] = [];
+  const unreadEntry = (id: string, status: number, error: string): UnreadProcess => ({
+    uniqueId: id,
+    name: index.get(id.toLowerCase())?.name ?? '',
+    status,
+    error,
+  });
 
   // A reference a target holds to another target dies with both, and a target is never
   // edited, so reading one here buys nothing.
@@ -210,7 +231,7 @@ export async function findHiddenInputOutputReferences(
     if (entry.isArchived) archivedIds.push(entry.uniqueId);
     else if (options.includeActive) activeIds.push(entry.uniqueId);
   }
-  if (archivedIds.length + activeIds.length === 0) return sites;
+  if (archivedIds.length + activeIds.length === 0) return { sites, unread };
 
   // Cached only on a hit: a holder found here is read again for the ledger, and keeping
   // the rest would hold hundreds of models to serve no reads at all.
@@ -225,6 +246,7 @@ export async function findHiddenInputOutputReferences(
     // The batch endpoint is for archived processes; active ones are read one by one.
     const model = cache?.get(id.toLowerCase()) ?? (await readActive(gateway, id, isFatal));
     if (model) scan(model, id);
+    else unread.push(unreadEntry(id, 0, 'could not be read'));
   }
 
   const toFetch: string[] = [];
@@ -239,8 +261,11 @@ export async function findHiddenInputOutputReferences(
     try {
       models = await gateway.readArchivedModels(chunk);
     } catch (error) {
-      // The script skips a batch that fails and carries on, as here.
+      // A dead session still ends the run. Anything else is a batch never read: named, and
+      // never passed off as a batch with nothing in it.
       if (isFatal(error)) throw error;
+      const failure = failureOf(error);
+      for (const id of chunk) unread.push(unreadEntry(id, failure.status, failure.detail ?? failure.error));
     }
     for (const model of models) scan(model, nodeString(model, 'UniqueId'));
     options.onEvent?.({
@@ -250,7 +275,7 @@ export async function findHiddenInputOutputReferences(
       total: toFetch.length,
     });
   }
-  return sites;
+  return { sites, unread };
 }
 
 export interface DeletePlanOptions {
@@ -516,12 +541,19 @@ export async function buildDeletePlan(gateway: PlanningGateway, options: DeleteP
 
   // ---- The API blind spot: archived Input/Output holders ----
   const freshIndex = restoredTotal > 0 ? await loadDeleteIndex(gateway) : index;
-  const blindSites = await findHiddenInputOutputReferences(gateway, targetIds, freshIndex, {
+  const scan = await findHiddenInputOutputReferences(gateway, targetIds, freshIndex, {
     includeActive: options.scanActiveForInputOutput,
     cache,
     isFatal,
     onEvent: options.onEvent,
   });
+  const blindSites = scan.sites;
+  plan.unreadByScan = scan.unread;
+  if (scan.unread.length > 0) {
+    log(
+      `Input/Output scan could not read ${scan.unread.length} process(es); any Input or Output reference they hold to a target is unknown`,
+    );
+  }
   for (const site of blindSites) {
     if (!ledger.has(site.holderUniqueId.toLowerCase())) {
       await addLedgerEntry(site.holderUniqueId);
@@ -590,17 +622,30 @@ export async function buildDeletePlan(gateway: PlanningGateway, options: DeleteP
   plan.reconciliation = reconciliation;
   plan.status = 'Planned';
 
+  const reasons: string[] = [];
   if (!allowRestore) {
     const archivedCount = [...ledger.values()].filter((r) => r.wasArchived).length;
     if (archivedCount > 0) {
-      plan.status = 'PlannedIncomplete';
+      reasons.push(PREVIEW_INCOMPLETE);
       log(
         `Preview did not restore ${archivedCount} archived participant(s); their Input/Output references are hidden and this plan understates the work`,
       );
     }
   }
+  if (scan.unread.length > 0) {
+    reasons.push(
+      `The Input/Output scan could not read ${scan.unread.length} process(es), listed above. An Input or Output reference any of them holds to a target is unknown, so the targets cannot be deleted safely until they are read.`,
+    );
+  }
+  if (reasons.length > 0) {
+    plan.status = 'PlannedIncomplete';
+    plan.incompleteReasons = reasons;
+  }
   return finish();
 }
+
+const PREVIEW_INCOMPLETE =
+  'Preview mode does not restore archived processes, so their Input and Output references are hidden. A real run will find more than this preview shows.';
 
 /**
  * The best name for an id: the plan ledger, then the index, then the name the dependency
@@ -690,9 +735,16 @@ export function planSummaryLines(plan: DependencyPlan, index: DeleteIndex | null
     lines.push(`${known.length} entr(ies) differ by the known child-reference asymmetry (warning, not a gate). See the open question in API_ARCHITECTURE.md.`);
   }
 
-  const problems = plan.reconciliation.filter((r) => r.status === 'Mismatch');
-  const doubled = problems.filter((r) => r.doubleCounted === true);
-  const different = problems.filter((r) => r.doubleCounted !== true);
+  const across = plan.reconciliation.filter((r) => r.status === 'MatchAcrossCategories');
+  if (across.length > 0) {
+    lines.push(
+      `${across.length} entr(ies) disagree on the category but not on the total for their pair (the API labels some Input references as links). Not a gate; the per-category numbers are in the plan file.`,
+    );
+  }
+
+  const gate = reconciliationGate(plan.reconciliation);
+  const doubled = gate.doubleCounted;
+  const different = gate.blocking;
   const targets = new Set(plan.targetUniqueIds.map((t) => t.toLowerCase()));
   const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
   // Grouped by the queried process, so an operator scans by process rather than down 120
@@ -723,15 +775,22 @@ export function planSummaryLines(plan: DependencyPlan, index: DeleteIndex | null
 
   if (different.length > 0) {
     lines.push(`RECONCILIATION MISMATCHES (${different.length}):`);
-    lines.push('The dependency API and the process JSON disagree. Investigate before deleting.');
+    lines.push('The dependency API claims references that neither process holds. Investigate before deleting.');
     listMismatches(different, true);
   }
+  if (gate.overClaims.length > 0) {
+    lines.push(`CLAIMED MORE THAN FOUND (${gate.overClaims.length}):`);
+    lines.push(
+      'The models hold fewer references than the dependency API claims, and every one found will be removed. Every such pair checked so far was the API over-claiming. A run asks you to acknowledge these before it changes anything.',
+    );
+    listMismatches(gate.overClaims, true);
+  }
   // Apart from the rest, so the ones that are different stand out (Cowork's review of W5
-  // phase 2). Still mismatches, and still counted as such.
+  // phase 2). Cowork then checked all 21 on R11's set, so they no longer gate.
   if (doubled.length > 0) {
     lines.push(`LINKS THE DEPENDENCY API COUNTS TWICE (${doubled.length}):`);
     lines.push(
-      'Each is claimed exactly twice per reference found. The dependency check lists every linked process twice, while the holder holds one reference (API_ARCHITECTURE.md). These are still mismatches until that is confirmed.',
+      'Each is claimed exactly twice per reference found. The dependency check lists every linked process twice, while the holder holds one reference (API_ARCHITECTURE.md). Reported only; they do not stop a run.',
     );
     listMismatches(doubled, false);
   }
@@ -747,9 +806,19 @@ export function planSummaryLines(plan: DependencyPlan, index: DeleteIndex | null
     for (const line of plan.log) lines.push(`  ${line}`);
   }
 
+  const unread = plan.unreadByScan ?? [];
+  if (unread.length > 0) {
+    lines.push(`NOT READ BY THE INPUT/OUTPUT SCAN (${unread.length}):`);
+    for (const u of unread) {
+      lines.push(`  ${u.name || planProcessName(plan, index, u.uniqueId)}  (${u.uniqueId})`);
+      lines.push(`      ${u.status > 0 ? `HTTP ${u.status}: ` : ''}${u.error}`);
+    }
+  }
+
   if (plan.status === 'PlannedIncomplete') {
     lines.push('THIS PLAN IS INCOMPLETE');
-    lines.push('Preview mode does not restore archived processes, so their Input and Output references are hidden. A real run will find more than this preview shows.');
+    // A plan file from before the reasons were recorded was always a preview.
+    for (const reason of plan.incompleteReasons ?? [PREVIEW_INCOMPLETE]) lines.push(reason);
   }
   return lines;
 }

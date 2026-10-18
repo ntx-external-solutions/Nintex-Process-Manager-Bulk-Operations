@@ -47,7 +47,17 @@ export interface DeleteDecisions {
   /** Proceed with the targets whose dependency check passed. */
   failedTargets?: Decision<readonly FailedTarget[]> | undefined;
   unresolved?: Decision<readonly UnresolvedParticipant[]> | undefined;
+  /**
+   * `reconciliationGate(...).blocking`: pairs with nothing located. The script's "Continue
+   * anyway?", and asked only for these.
+   */
   mismatches?: Decision<readonly Reconciliation[]> | undefined;
+  /**
+   * `reconciliationGate(...).overClaims`: located, but fewer than claimed. An on-screen
+   * acknowledgement, not a stop (Cowork's live check after W5 phase 3). Double-counted
+   * links are never asked about.
+   */
+  overClaims?: Decision<readonly Reconciliation[]> | undefined;
   verificationFailed?: Decision<readonly VerificationFailure[]> | undefined;
   /** The typed DELETE. Absent: confirmed, on the preview, before the run began. */
   confirmDelete?: Decision<number> | undefined;

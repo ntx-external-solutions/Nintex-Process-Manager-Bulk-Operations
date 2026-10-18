@@ -6,6 +6,70 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## W5 phase 4. Reference removal
+
+Commit `aecbc40` on `claude/web-w5-4-references`, branched from `claude/main` after PR #64. I stopped after this PR, as the task asks.
+
+**What changed.**
+
+- **The archived batch read: fixed first, as asked.**
+  - `ARCHIVED_BATCH_SIZE` is 20 (`pm/dependencies.ts`). The proxy's `processes.archivedModels` takes that constant, so its limit is now 20 too.
+  - `findHiddenInputOutputReferences` (`planner.ts`) returns `{ sites, unread }`. A batch that fails is no longer skipped: every id in it goes into `unread`, named from the index, with the status and the tenant's message. A dead session still ends the run. An active process the thorough scan can't read is counted as unread too.
+  - `buildDeletePlan` puts these on `plan.unreadByScan`. If there are any, the plan comes back `PlannedIncomplete` with the reason, even on a real run. The plan also has `incompleteReasons` now, so the summary no longer calls every incomplete plan a preview. A plan file without the field still reads as a preview, as before.
+  - The summary has a "NOT READ BY THE INPUT/OUTPUT SCAN (n)" section that names each id, with its HTTP status.
+  - The fake tenant and the dev mock both refuse more than 20 ids with the tenant's 400 and message (the fake used to answer 414).
+- **Reconciliation, with the gate relaxed** (`claims.ts`):
+  - `reconcileDependencies` still counts per category, then judges the pair as a whole. If the pair's located total is not below its claimed total, each mismatched row becomes `MatchAcrossCategories`. Its note keeps every category's numbers ("claimed Link 1, Input 0, Output 0; located Link 0, Input 1, Output 0"). That covers R11's two Inputs labelled "Linked Process".
+  - When the pair falls short, a doubled link keeps `doubleCounted`. Any other mismatch is `overClaim: true` if the pair located anything. If it located nothing, the row is left as it was.
+  - `reconciliationGate(rows)` splits the mismatches three ways: `blocking` (nothing located), `overClaims` and `doubleCounted`. A plan file from before the flags existed reads everything as blocking.
+  - `DeleteDecisions` (`bulkDelete.ts`): `mismatches` is now asked only about `blocking` rows. A new `overClaims` decision is the on-screen acknowledgement. Doubled links are never asked about. The orchestrator is ported with the unwind, so these are the hooks it will call. They are documented on the type.
+  - The summary has three sections: "RECONCILIATION MISMATCHES" (nothing located), "CLAIMED MORE THAN FOUND", and "LINKS THE DEPENDENCY API COUNTS TWICE", which now says it doesn't stop a run. A count line covers pairs reconciled across categories. On R11's set I'd expect 0 mismatches, 1 over-claim (the variation's `Decision[0]`), 21 doubled links, and the 2 Input pairs reconciled.
+- **Reference removal, ported from the script:**
+  - `references.ts`: `copyProcessObject`, `clearNodeLink`, `removeChildReferences`, `removeProcessReferences`. These work on a copy and filter by value. They clear only fields that already exist. A live Decision link (4) becomes orphaned (7), and `LinkedProcessDisplayName` is kept.
+  - `executor.ts`, `saveProcessModel`. The save sends `ProcessJson` as a string, `SuppressChangeNotification: true`, and `DoSubmitForApproval` set to the approvals flag. It then re-reads the process, and if it had been published, publishes the new revision: through `publishNow` when approvals are on, `publishRevisionEdit` when they're off. Both send the change description as the message (S2). A failure names the stage it failed at, with the tenant's status, and a dead session is rethrown. `REFERENCE_REMOVAL_DESCRIPTION` is the script's default text.
+  - `executor.ts`, `removePlanReferences`. Each holder gets a fresh read, one save and one publish covering every target, and one `RemoveReferences` row. The rows are Success, Skipped ("No references found at edit time") or Failed ("Could not fetch process for editing (reason)", or "<stage> failed: …"). Then it verifies by re-reading each holder and walking it while everything is still active. It takes the run's `changeDescription` and raises the `removing-references` and `verifying` stages and their progress.
+
+**Results-file operations.** None new. `RemoveReferences` is the script's operation, and this phase is the first to write it.
+
+**Tests.** 476 tests: 422 pass, 0 fail, 54 skipped (was 454 / 394 / 60). That's 22 new tests, plus 6 skipped ones turned on, so +28 passing.
+- **Now on:** the six reference tests, five in `references.test.ts` and "both active: one save per holder" in `executor.test.ts`. They all passed against the port with no test changes.
+- **New in `claims.test.ts` (6):**
+  - an Input the API calls a link reconciles, with both sets of numbers;
+  - an over-claim is acknowledged and doesn't block;
+  - nothing located blocks;
+  - the shortfall is judged on the pair, not the category;
+  - doubled links don't gate, and an old plan file blocks as it did;
+  - both sides deleted is never judged as a pair.
+- **New in `removal.test.ts` (16):**
+  - The save: a never-published process isn't published. A published one goes by the right route for the approvals setting, with the message. A refused save, and a refused publish, each name their stage and status. A failed re-read doesn't pass a published process off as unpublished. A dead session ends the run.
+  - The removal: one fresh read and one save, carrying the run's description, with `LinkedStakeholders` sent back untouched. Nothing to remove is Skipped with no save. An unreadable holder fails its row and fails verification. A save the tenant answers 200 but drops is caught by verification. Skipping verification reads each holder once. A dead session ends the run.
+  - The batch read: 45 archived ids are read as 20, 20 and 5, every one of them, and the hidden Input in the last one is found. The fake refuses 21 ids. A failed batch is named id by id and the plan comes back `PlannedIncomplete`, on a real run, with the reason and not the preview text. A dead session still ends the run. An old plan file still reads as a preview.
+- **Proxy:** 20 ids pass and 21 are refused.
+- **Changed:** "located sites with no claims is a mismatch" is now "…is not a mismatch". The section test in `hold.test.ts` now expects the 3/1 pair under "CLAIMED MORE THAN FOUND". Both are the rule change you asked for.
+- **Still skipped:** checkpoints 13, delete 1, unwind 40.
+
+Typecheck and production build are clean. I didn't run `Tests/Run-AllTests.ps1`, because the PowerShell is frozen and unchanged. For the same reason there's no `$script:ScriptVersion` bump.
+
+**End-to-end, offline.** I rebuilt against the mock and ran `drive-delete.mjs`. It gave the same plan as phase 3 (Elsewhere's ProcessLink, and the archived holder's hidden Input found by the scan, now in a batch of at most 20), `PlannedIncomplete` with the preview reason, and no PUT or POST.
+
+**Deferred, and why.**
+
+- **No proxy operation for the save or the publish yet,** and the page doesn't remove anything. That's the same reasoning as the hold writes in phase 3. Removing references from a restored holder with no unwind to re-archive it is the R11 failure, so the writes join the allowlist in the phase that first runs them from the browser.
+- **For the orchestrator (unwind phase): a real run must stop on a `PlannedIncomplete` plan.** Today only a preview produced that status, so the script never checked it after planning. Now an unread scan batch produces it on a real run, and carrying on would delete targets whose archived Input/Output holders were never read. I've noted it here rather than in code, because `runBulkDelete` is still a stub.
+
+**Decisions Cowork should check.**
+
+- **Located above claimed is no longer a mismatch.** I took "only report a mismatch when the located total is lower" literally, which reverses one ported script test (sites located, nothing claimed). Every site found is removed, so finding more than the API claims can't leave a reference behind. If you meant only to reconcile across categories, and to keep flagging pairs where more is found than claimed, that's a one-line change in `reconcileDependencies`.
+- **An over-claim is judged on the pair.** A Link claimed twice with no Link located, but an Input located, is an over-claim and doesn't block. Every mismatched row in that pair is listed for acknowledgement, so it can show two rows.
+- **"Still blocks" kept the script's escape hatch.** A pair with nothing located goes to the `mismatches` decision, which stops by default and when unattended. The operator can still answer it yes, as the script's "Continue anyway?" allowed. The ported unwind tests rely on that answer to get past synthetic holders. If "blocks" should mean no override at all, the orchestrator can ignore the decision for those rows.
+- **Three places this deliberately differs from the script:**
+  - A failed re-read after a save falls back to the saved model's version. The script reported such a process as `SavedUnpublished` and left its draft unpublished. Now it's a `Publish` failure: "Saved, but the new revision could not be read back".
+  - A holder that can't be read at verification counts as a verification failure (`unreadReason`). The script skipped it, so it went on to the delete unchecked.
+  - There's no one-second sleep before the re-read. The ownership save reads straight after its save and matched the tenant in W4.
+- **Unread is any non-fatal failure,** not only a 4xx. A 5xx batch that the client's retries couldn't get through is just as unread.
+
+---
+
 ## W5 phase 3. Hold
 
 Commit `a3ee966` on `claude/web-w5-3-hold`. Cowork's documentation commit `da8daea` was only on the F4 branch, so this branch merges `claude/main` on top of it. I stopped after this PR, as the task asks.

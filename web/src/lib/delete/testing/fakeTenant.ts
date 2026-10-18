@@ -283,7 +283,9 @@ export class FakeTenant implements DeleteGateway {
 
   async readArchivedModels(processUniqueIds: readonly string[]): Promise<ProcessModel[]> {
     this.#begin({ op: 'readArchivedModels', uniqueIds: [...processUniqueIds] }, () =>
-      processUniqueIds.length > ARCHIVED_BATCH_SIZE ? { status: 414, message: 'Request-URI Too Long' } : null,
+      processUniqueIds.length > ARCHIVED_BATCH_SIZE
+        ? { status: 400, message: `The processUniqueIds parameter maximum size is ${ARCHIVED_BATCH_SIZE}.` }
+        : null,
     );
     const out: ProcessModel[] = [];
     for (const id of processUniqueIds) {

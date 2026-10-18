@@ -423,7 +423,9 @@ test('the delete reads name one process, or a bounded batch of process ids', () 
     assert.equal(parseOperation({ op, processUniqueId: PROCESS, searchBehavior: 1 }).ok, false, `${op}: nothing else rides along`);
   }
   assert.ok(parseOperation({ op: 'processes.archivedModels', processUniqueIds: [PROCESS, OTHER] }).ok);
-  for (const processUniqueIds of [[], ['not-a-guid'], Array.from({ length: 26 }, () => PROCESS), PROCESS]) {
+  // The tenant refuses 21 or more with 400 (measured after W5 phase 3), so the proxy does too.
+  assert.ok(parseOperation({ op: 'processes.archivedModels', processUniqueIds: Array.from({ length: 20 }, () => PROCESS) }).ok, '20 is the limit');
+  for (const processUniqueIds of [[], ['not-a-guid'], Array.from({ length: 21 }, () => PROCESS), PROCESS]) {
     assert.equal(parseOperation({ op: 'processes.archivedModels', processUniqueIds }).ok, false, JSON.stringify(processUniqueIds).slice(0, 30));
   }
   for (const op of ['process.dependencies', 'process.model', 'processes.archivedModels']) {

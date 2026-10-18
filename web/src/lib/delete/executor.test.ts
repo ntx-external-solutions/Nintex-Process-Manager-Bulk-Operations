@@ -147,7 +147,7 @@ test('both active: the holder is the work, not the target', async () => {
   assert.equal(linkRec?.status, 'Match', 'link reconciliation matches');
 });
 
-test('both active: one save per holder, and nothing else in it is lost', { skip: PHASE.references }, async () => {
+test('both active: one save per holder, and nothing else in it is lost', async () => {
   const { tenant, holder, target } = capturedTenant();
   const index = await loadDeleteIndex(tenant);
   const p = await plan(tenant, { targetUniqueIds: [target.UniqueId], index, holdingGroupId: 999, allowRestore: true });

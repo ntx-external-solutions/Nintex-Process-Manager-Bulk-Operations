@@ -14,6 +14,7 @@ import {
   groupSitesByHolder,
   parseDependencyResponse,
   reconcileDependencies,
+  reconciliationGate,
   type DependencyClaim,
 } from './claims.ts';
 import type { ProcessModel } from './model.ts';
@@ -158,7 +159,11 @@ test('Input is scoped to the queried side, where Link is a union', () => {
   assert.equal(sites.filter((s) => s.category === 'Link').length, 3, 'link sites are counted across both sides');
 });
 
-test('located sites with no claims is a mismatch', () => {
+test('located sites with no claims fall short of nothing, so they are not a mismatch', () => {
+  // DIFFERS from the script, which flagged this as a mismatch. Since W5 phase 4 the pair is
+  // judged on its totals, and only a located total below the claimed one is a mismatch
+  // (Cowork's live check after W5 phase 3): every site found is removed, so finding more
+  // than the API claims misses nothing.
   const rec = reconcileDependencies({
     queriedUniqueId: TARGET_ID,
     relatedUniqueId: HOLDER_ID,
@@ -166,11 +171,9 @@ test('located sites with no claims is a mismatch', () => {
     sites: pairSites(),
     relatedIsArchived: false,
   });
-  assert.equal(
-    rec.find((r) => r.category === 'Link')?.status,
-    'Mismatch',
-    'located sites with no claims is flagged as a mismatch',
-  );
+  const link = rec.find((r) => r.category === 'Link');
+  assert.equal(link?.status, 'MatchAcrossCategories', 'located with nothing claimed is not a mismatch');
+  assert.equal(reconciliationGate(rec).blocking.length, 0, 'and nothing gates');
 });
 
 // ---------------------------------------------------------------- links the API counts twice
@@ -216,4 +219,90 @@ test('any other count is a mismatch of its own', () => {
   assert.equal(linkRec(0, 0).status, 'Match');
   assert.equal(linkRec(1, 1).doubleCounted, false, 'a match is not classified');
   assert.equal(linkRec(2, 1, 'Input').doubleCounted, false, 'the measurement is for links, so an Input is not classified');
+});
+
+// ---------------------------------------------------------------- the pair as a whole (W5 phase 4)
+// Cowork read both raw models of all 24 mismatched pairs on R11's set: in every one the
+// models hold exactly the sites the plan removes. Two were Input references the API labels
+// "Linked Process", one a variation's Decision[0] claimed three times, 21 doubled links.
+
+function site(holder: string, target: string, category: 'Link' | 'Input', i = 0): ReferenceSite {
+  return {
+    holderUniqueId: holder,
+    targetUniqueId: target,
+    path: category === 'Link' ? `ProcessProcedures.ProcessLink[${i}]` : `Inputs.Input[${i}]`,
+    bucket: category === 'Link' ? 'ProcessLink' : 'Input',
+    category,
+    action: 'Remove',
+    matchedField: category === 'Link' ? 'LinkedProcessUniqueId' : 'FromProcessUniqueId',
+    elementId: i,
+    isChild: false,
+  };
+}
+
+function pairRec(response: unknown, sites: ReferenceSite[]) {
+  return reconcileDependencies({ queriedUniqueId: Q, relatedUniqueId: R, claims: parseDependencyResponse(response, Q), sites, relatedIsArchived: false });
+}
+
+const claimed = (type: string, n: number) => ({ Type: type, Dependencies: Array.from({ length: n }, () => ({ Name: 'Related', UniqueId: R })) });
+
+test('an Input the API calls a link reconciles across categories, and keeps both numbers', () => {
+  // Claimed 1 Link and 0 Input; located 0 Link and 1 Input, held by the queried process.
+  const rec = pairRec([claimed('Linked Process', 1)], [site(Q, R, 'Input')]);
+  const link = rec.find((r) => r.category === 'Link');
+  assert.equal(link?.status, 'MatchAcrossCategories', 'the pair totals agree, so it is not a mismatch');
+  assert.equal(link?.claimed, 1, 'the per-category claim is kept');
+  assert.equal(link?.located, 0, 'and the per-category located count');
+  assert.match(link?.note ?? '', /claimed Link 1, Input 0, Output 0; located Link 0, Input 1, Output 0/, 'the note carries every category');
+  assert.equal(rec.find((r) => r.category === 'Input')?.status, 'MatchAcrossCategories', 'so is the Input row it was counted under');
+  assert.deepEqual(reconciliationGate(rec), { blocking: [], overClaims: [], doubleCounted: [] }, 'nothing gates');
+});
+
+test('a pair that finds some but fewer than claimed is an over-claim, acknowledged rather than blocking', () => {
+  const rec = pairRec([claimed('Linked Process', 3)], [site(R, Q, 'Link')]);
+  const link = rec.find((r) => r.category === 'Link');
+  assert.equal(link?.status, 'Mismatch', 'still a mismatch');
+  assert.equal(link?.overClaim, true, 'flagged as an over-claim');
+  assert.equal(link?.doubleCounted, false, 'three times is not the doubled shape');
+  const gate = reconciliationGate(rec);
+  assert.equal(gate.overClaims.length, 1, 'asked to be acknowledged');
+  assert.equal(gate.blocking.length, 0, 'not a stop');
+});
+
+test('a pair with nothing located still blocks', () => {
+  const rec = pairRec([claimed('Linked Process', 1)], []);
+  const gate = reconciliationGate(rec);
+  assert.equal(gate.blocking.length, 1, 'nothing found for a claim blocks');
+  assert.equal(gate.blocking[0]?.overClaim, undefined, 'and is not an over-claim');
+});
+
+test('the shortfall is the pair\'s, not the category\'s', () => {
+  // Claimed 2 Link; located 0 Link and 1 Input. The Link row found nothing, but the pair
+  // found one site, so it is an over-claim, not a block.
+  const rec = pairRec([claimed('Linked Process', 2)], [site(Q, R, 'Input')]);
+  const gate = reconciliationGate(rec);
+  assert.deepEqual(gate.overClaims.map((r) => r.category), ['Link', 'Input'], 'both rows of the pair take its verdict');
+  assert.equal(gate.blocking.length, 0);
+});
+
+test('doubled links are reported and never gate, and a plan from before the flags blocks as it did', () => {
+  const rec = pairRec([claimed('Linked Process', 2)], [site(R, Q, 'Link')]);
+  const gate = reconciliationGate(rec);
+  assert.equal(gate.doubleCounted.length, 1, 'listed as doubled');
+  assert.equal(gate.blocking.length + gate.overClaims.length, 0, 'and asked about nowhere');
+
+  const old = rec.map(({ doubleCounted: _, overClaim: __, ...r }) => r as (typeof rec)[number]);
+  assert.equal(reconciliationGate(old).blocking.length, 1, 'a mismatch without the flags is read as blocking');
+});
+
+test('both sides deleted is never judged as a pair', () => {
+  const rec = reconcileDependencies({
+    queriedUniqueId: Q,
+    relatedUniqueId: R,
+    claims: parseDependencyResponse([claimed('Linked Process', 3)], Q),
+    sites: [],
+    relatedIsArchived: false,
+    bothSidesDeleted: true,
+  });
+  assert.ok(rec.every((r) => r.status === 'NotApplicable'));
 });

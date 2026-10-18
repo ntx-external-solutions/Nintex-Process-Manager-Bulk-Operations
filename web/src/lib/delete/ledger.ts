@@ -285,6 +285,16 @@ export interface OrphanedHolder {
   reason: string;
 }
 
+/** A process a read was meant to cover and did not, with the failing call's answer. */
+export interface UnreadProcess {
+  uniqueId: string;
+  /** From the index; empty when it has none. */
+  name: string;
+  /** 0 when there was no response. */
+  status: number;
+  error: string;
+}
+
 /** The plan file. Port of `New-DependencyPlan`'s object. */
 export interface DependencyPlan {
   schemaVersion: 1;
@@ -309,6 +319,13 @@ export interface DependencyPlan {
    * a plan uploaded to finish an interrupted run needs it to remove the group.
    */
   holdingGroup?: GroupRef | null;
+  /**
+   * Processes the archive-wide Input/Output scan could not read. Absent in a plan file
+   * from before it was recorded.
+   */
+  unreadByScan?: UnreadProcess[];
+  /** Why a `PlannedIncomplete` plan is incomplete, one sentence each. Absent: a preview. */
+  incompleteReasons?: string[];
 }
 
 /** An empty `Draft` plan. Port of `New-DependencyPlan`. */

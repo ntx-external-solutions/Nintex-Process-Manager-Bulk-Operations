@@ -250,8 +250,49 @@ results row (report: project doc `claude/bulk-ops-r12-2026-10-18.md`). Three fix
 
 ## W5. Bulk Delete engine
 
-Status: Ready. Phases 1 to 3 done and **reviewed by Cowork**; phase 4 (reference
-removal) is next
+Status: Ready. Phases 1 to 4 done and **reviewed by Cowork**; phase 5 (checkpoints) is
+next, starting with the fix below
+
+### Cowork's review of phase 4 (18 Oct)
+
+Approved, with one change to make at the start of phase 5. The batch fix, the
+three-way gate and the removal port are what was asked.
+
+- **Fix: decide the publish path from the process, not from `approvalsEnabled`.**
+  `saveProcessModel` chooses `DoSubmitForApproval` and the publish route from an operator
+  flag, and its default disagrees with its caller's (`false` in `saveProcessModel`, `true`
+  in `removePlanReferences`). That's the "declared, not read" pattern R10/R11 removed from
+  archive. The holder's fresh read already carries `processActions`, and W4's
+  `chooseWritePath` (PGM's rules, `ownership/plan.ts`) already makes this decision for
+  ownership saves. Move the decision into a shared module that takes `processActions` and
+  the revision state, and have both ownership and removal call it:
+  - `CanPublishAfterEdit` true: save with `DoSubmitForApproval: false`, then
+    `POST /Api/v1/Processes/{id}/Publish` with `IsPublishNow: true` and `PublishMessage`
+    (measured working on this tenant, S2 and W4);
+  - only `CanSubmitForApprovalAfterEdit` true: save with `DoSubmitForApproval: true`, then
+    the same Publish;
+  - neither: the row is Failed "cannot be republished by this account", before saving.
+  - Drop `PublishProcessRevisionEdit` from the removal path. It has never been measured on
+    the web app, and one publish route is easier to trust than two. Keep
+    `approvalsEnabled` only for what its comment says: permission to override a pending
+    approval.
+- **Located above claimed is not a mismatch:** agreed. Every located site is removed, so
+  finding more than claimed can't leave a reference behind.
+- **Over-claims judged on the pair:** agreed.
+- **The escape hatch for "nothing located":** keep it, with two conditions: the
+  confirmation names each pair, and an unattended run (or no answer) stops. In practice a
+  real leftover reference makes the tenant refuse the delete, and the unwind puts things
+  back.
+- **The three deliberate differences from the script** (failed re-read is a Publish
+  failure, unreadable at verification fails, no one-second sleep): all agreed. R3 measured
+  that the index doesn't lag, and W4 confirmed a read straight after a save.
+- **Unread means any non-fatal failure:** agreed.
+- **A real run must stop on `PlannedIncomplete`:** agreed. Make it a hard rule in the
+  orchestrator, with no override, and name the unread ids in the stop message.
+
+Live check (Cowork, read-only, after this PR deploys): R11's set should show 0 blocking
+mismatches, 1 over-claim, 21 doubled links, 2 pairs reconciled across categories, and
+nothing unread by the scan.
 
 ### Cowork's live check after phase 3 deployed (18 Oct)
 

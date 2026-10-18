@@ -171,6 +171,8 @@ http.createServer(async (req, res) => {
     return send(res, 200, dependencies[dm[1]]);
   }
   if (p === '/mobile/api/v1/processes') {
+    // The tenant's limit, measured after W5 phase 3.
+    if (url.searchParams.getAll('processUniqueIds').length > 20) return send(res, 400, { message: 'The processUniqueIds parameter maximum size is 20.' });
     const data = url.searchParams.getAll('processUniqueIds').filter((u) => procs[u]).map((u) => ({ ProcessModel: modelOf(u) }));
     return send(res, 200, { data });
   }
