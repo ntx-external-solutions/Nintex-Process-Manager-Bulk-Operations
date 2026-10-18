@@ -6,6 +6,85 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## W5 phase 5. Checkpoints
+
+Commits `1292481` (the two fixes queued at the start of the phase) and `ac465d1` (checkpoints), on `claude/web-w5-5-checkpoints`, branched from `claude/main` after PR #65. I stopped after this PR, as the task asks.
+
+**What changed.**
+
+- **Pair total counts every site between the two (fix 1, from Cowork's live check).**
+  - `reconcileDependencies` (`claims.ts`) now takes the pair's located total from `sitesBetween`: every planned site between the queried and related process, in either direction, any category, child sites included.
+  - The per-category rows keep their scoping and their own numbers. The note adds the pair total ("… 1 site(s) between them in all").
+  - R11's two Input pairs (a Link claimed on the target, an Input held by the related process) should now come out `MatchAcrossCategories`. That would leave 0 blocking on that set.
+- **Publish route read from the process (fix 2, from the phase 4 review).**
+  - New `pm/writePath.ts` holds `chooseWritePath`, `isWritePath` and `writeStateOf`. These are PGM's rules, moved out of `ownership/plan.ts`. They return a path or a refusal code (`cannot-save`, `awaiting-approval`, `cannot-publish`), and each caller words its own row.
+  - Ownership's `chooseWritePath` is now a thin wrapper that keeps its existing messages, so ownership behaves the same.
+  - `ActiveRead` (`pm/dependencies.ts`) carries `processActions` from the same read, so removal decides from the read it edits.
+  - `saveProcessModel` (`executor.ts`) now takes `processActions` (required).
+    - Can publish after edit: saved with `DoSubmitForApproval: false`, then `publishNow`.
+    - Can only submit: saved with `DoSubmitForApproval: true`, then `publishNow`.
+    - Neither: stage `Refused`, nothing sent. The `RemoveReferences` row reads "Not saved: It is published, and cannot be republished by this account: … Its references to the targets remain."
+  - `publishRevisionEdit` is gone from `DeleteGateway`, the fake tenant and the save.
+  - `approvalsEnabled` now only means permission to edit a revision awaiting approval and publish over it.
+  - A save that won't be published no longer re-reads.
+- **Checkpoints, ported** (every `notPorted('checkpoints')` stub is implemented):
+  - `names.ts`: `isRealName`, `selectDisplayName`, `resolveCollateralName`.
+  - `ledger.ts`: `tenantStateSnapshot`, a copy of each index entry with `groupExists` normalised.
+  - `tenant/state.ts`: `Collateral` carries `originalGroupExists` (true for `NotInBaseline`). `compareTenantState` takes a null baseline or index and returns nothing, as the script does. `CollateralChange` is now an alias of `Collateral`.
+  - `archive/plan.ts`: `findVariationMasters` returns `NameVariationMatch` with `baseName` and `targetGroupId`, and returns nothing for a null index. Archive callers are unaffected, because the new fields are extra.
+  - `collateral.ts`:
+    - `variationWarning` (master at risk first, then same group, then name) and `variationWarningLines`;
+    - `collateralLines`;
+    - `collateralAcceptanceRows`, plus `collateralFailureRows` for a stopped gate and for the post-delete checkpoint;
+    - `restoreCollateral`.
+  - Also new in `collateral.ts`, for the delete and unwind phases to call:
+    - `newCollateral`: the diff, less anything an earlier checkpoint raised.
+    - `decideCollateral`: the gate. Approved in advance gives `Accepted` rows ("accepted in advance on the preview"). A gate answering yes gives `Accepted` rows ("accepted at the on-screen confirmation"). No gate, or a no, stops with a `Failed` row per change ("…; run stopped before anything was deleted"). Each answer comes with the screen's lines.
+  - `CollateralGate` and `ACCEPTANCE_AUTHORITY` moved into `collateral.ts`. `executor.ts` and `bulkDelete.ts` re-export them, so the names callers use haven't changed.
+  - `collateralGateway`'s restore now passes `isFatal`. Without it, a dead session during a reversal's restore read as a refused restore. I found this while porting; there's a test for it.
+- **Hard stop on `PlannedIncomplete`** (from the phase 4 review): `incompletePlanStop(plan)` in `bulkDelete.ts` returns the stop message, or null. The message names every unread process by name, id and status. There's no override parameter. `runBulkDelete` is still the unwind phase's stub, so it calls this from there.
+
+**Results-file operations.** None new. This is the first phase to write `Collateral`/`Accepted`, `Collateral`/`Failed` and `ReverseCollateral`, all of them the script's operations.
+
+**Tests.** 495 tests: 454 pass, 0 fail, 41 skipped (was 476 / 422 / 54). That's 19 new tests and 13 turned on, so +32 passing.
+- **Turned on (13):** the 7 checkpoint tests in `collateral.test.ts`, 2 in `names.test.ts`, 2 in `ledger.test.ts`, 1 in `bulkDelete.test.ts` and 1 in `executor.test.ts`. They all passed against the port with no assertion changes. I only updated their stale "DIFFERS" comments.
+- **New in `claims.test.ts` (1):** R11's exact shape, a Link claimed on the target and an Input held by the related process, comes out `MatchAcrossCategories` and nothing gates. It fails against the phase 4 code; I checked.
+- **`removal.test.ts` (+6 net):**
+  - The approvals-routed save tests are replaced by: publish-direct; submit-then-publish; the approvals flag no longer picks the route; can't republish is refused with nothing sent, and so is a read with no `processActions`; awaiting approval only with the override; a draft in progress is saved only.
+  - New: a holder this account can't republish fails its row unsaved, and verification still finds its references.
+  - "Skipping verification reads each holder once" now checks a published holder (2 reads) and a draft (1 read).
+- **New `checkpoints.test.ts` (12):**
+  - the checkpoint doesn't re-raise; no gate stops; no and yes at the gate; approval in advance;
+  - nothing changed, no rows;
+  - restore into the home group, and its failure with status;
+  - re-archive, and its refusal;
+  - move and disappearance not acted on;
+  - a dead session during the reversal's restore ends the run;
+  - the variation warning text;
+  - write-path rules, including the version fallback;
+  - the incomplete-plan stop.
+- **Still skipped:** delete 1, unwind 40.
+
+Typecheck and production build are clean. I didn't run `Tests/Run-AllTests.ps1`, because the PowerShell is frozen and unchanged. For the same reason there's no `$script:ScriptVersion` bump.
+
+**End-to-end, offline.** I rebuilt against the mock and ran `drive-delete.mjs`. It gave the same plan as phase 4 (Elsewhere's ProcessLink, and the archived holder's Input found by the scan), `PlannedIncomplete` with the preview reason, and no PUT or POST.
+
+**Deferred, and why.**
+
+- **No checkpoint runs on the tenant yet.** The checkpoints sit between mutating phases, and their callers are `deletePlanTargets` (delete phase) and `runBulkDelete` (unwind phase). This phase ports what they call and tests it on its own. The restore and archive writes a reversal makes stay off the proxy allowlist for the same reason as phase 3's hold writes.
+- **Bulk Archive's collateral still reports "does not reverse collateral yet"** (`archive/run.ts`). `restoreCollateral` could serve it now, but it needs the restore proxy operation, which waits for the unwind. Worth a small task once that lands.
+
+**Decisions Cowork should check.**
+
+- **The removal now follows ownership's rule for a draft in progress: saved, not published.** The script published any holder whose version was above 0.x, so a holder at 2.1 in progress had someone's draft published along with the removal. Now that holder is saved and left unpublished, and its published 2.0 still holds the reference. If the tenant refuses the delete because of that, the unwind puts things back. If it doesn't, the published version keeps a dangling link until someone publishes. I took the shared rule because that's what the review asked for, but this one deserves a look on the live test. The alternative is to fail such a holder before saving, like the other refusals.
+- **A revision awaiting approval is edited only when `approvalsEnabled` is on** (default on for removal, as in the script, and never for ownership). With it on, the removal saves and publishes over the pending revision. That's the only meaning the flag has left, as the review said. It hasn't been measured on an edit, only on archive.
+- **`writeStateOf` falls back to the version** when a model has no `ProcessRevisionStateId`: a major version above 0 counts as published. The active read always sends the field. The fallback is for the fake's minimal models and anything else, so it keeps the script's rule rather than refusing.
+- **A refusal is a `Failed` row, not `Skipped`.** The reference stays, so the delete that follows can't succeed for that target. Verification also lists the holder, so the run stops at the verification gate before any delete.
+- **A pure move isn't reversed, and the row gives a different reason from the script.** The script said "no trustworthy move endpoint". The app has one, but it publishes a new major version of a published process (S2), and doing that to a process nobody asked to touch is a second unasked-for change. The row says that instead.
+- **One stop message for both gated checkpoints:** "run stopped before anything was deleted". This is true of both the hold checkpoint and the archive-pass checkpoint. The script worded them slightly differently.
+
+---
+
 ## W5 phase 4. Reference removal
 
 Commit `aecbc40` on `claude/web-w5-4-references`, branched from `claude/main` after PR #64. I stopped after this PR, as the task asks.

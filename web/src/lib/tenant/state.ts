@@ -90,6 +90,11 @@ export interface Collateral {
   wasArchived: boolean | null;
   isArchivedNow: boolean | null;
   originalGroupId: number | null;
+  /**
+   * The baseline's `groupExists`, so a reversal knows the group it would restore into is
+   * gone before it asks. True for NotInBaseline, which has no baseline to say otherwise.
+   */
+  originalGroupExists: boolean;
   currentGroupId: number | null;
 }
 
@@ -102,11 +107,13 @@ export interface Collateral {
  * changed cannot be known, only that the run touched it.
  */
 export function compareTenantState(
-  baseline: ProcessIndex,
-  after: ProcessIndex,
+  baseline: ProcessIndex | null,
+  after: ProcessIndex | null,
   expected: readonly string[],
   observed: readonly string[] = [],
 ): Collateral[] {
+  // No before-state or no after-state is nothing to compare, as in the script.
+  if (!baseline || !after) return [];
   const expectedKeys = new Set(expected.map((id) => id.toLowerCase()));
   const out: Collateral[] = [];
 
@@ -122,6 +129,7 @@ export function compareTenantState(
         wasArchived: before.isArchived,
         isArchivedNow: null,
         originalGroupId: before.groupId,
+        originalGroupExists: before.groupExists !== false,
         currentGroupId: null,
       });
       continue;
@@ -142,6 +150,7 @@ export function compareTenantState(
       wasArchived: before.isArchived,
       isArchivedNow: now.isArchived,
       originalGroupId: before.groupId,
+      originalGroupExists: before.groupExists !== false,
       currentGroupId: now.groupId,
     });
   }
@@ -159,6 +168,7 @@ export function compareTenantState(
       wasArchived: null,
       isArchivedNow: now?.isArchived ?? null,
       originalGroupId: null,
+      originalGroupExists: true,
       currentGroupId: now?.groupId ?? null,
     });
   }

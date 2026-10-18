@@ -8,13 +8,17 @@
  * rule inside `resultRow` (exec/report.ts).
  */
 
-import { notPorted } from './phases.ts';
+import { UNKNOWN_NAME } from '../exec/report.ts';
 
-export { UNKNOWN_NAME } from '../exec/report.ts';
+export { UNKNOWN_NAME };
 
 /** Whether a label carries information: not empty, not the marker, not the id. Port of `Test-NpmNameIsReal`. */
 export function isRealName(name: string, uniqueId?: string): boolean {
-  return notPorted('checkpoints');
+  if (!name) return false;
+  if (name === UNKNOWN_NAME) return false;
+  // Ids compare case-insensitively everywhere else in the engine, as PowerShell's -eq does.
+  if (uniqueId && name.toLowerCase() === uniqueId.toLowerCase()) return false;
+  return true;
 }
 
 /**
@@ -23,7 +27,11 @@ export function isRealName(name: string, uniqueId?: string): boolean {
  * contest, since it is longer than most real names. Port of `Select-NpmDisplayName`.
  */
 export function selectDisplayName(rows: ReadonlyArray<{ name: string }>, uniqueId: string): string {
-  return notPorted('checkpoints');
+  let best = '';
+  for (const row of rows) {
+    if (isRealName(row.name, uniqueId) && row.name.length > best.length) best = row.name;
+  }
+  return best || UNKNOWN_NAME;
 }
 
 /**
@@ -50,5 +58,10 @@ export function resolveCollateralName(
   uniqueId: string,
   fallback?: string,
 ): string {
-  return notPorted('checkpoints');
+  const looked = nameLookup?.get(uniqueId.toLowerCase())?.name;
+  if (looked) return looked;
+  if (fallback && isRealName(fallback, uniqueId)) return fallback;
+  // Not in the baseline, not in the index, and named by no claim. Say so, rather than
+  // printing the id where a name goes.
+  return UNKNOWN_NAME;
 }

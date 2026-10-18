@@ -17,7 +17,6 @@ import type { DependencyClaim, HolderWorkItem, Reconciliation } from './claims.t
 import type { CollateralChange } from './collateral.ts';
 import type { GroupRef } from './gateway.ts';
 import { nodeInt, nodeString, type DeleteIndex, type ProcessModel } from './model.ts';
-import { notPorted } from './phases.ts';
 import type { ReferenceSite } from './references.ts';
 import { readGroupExists } from '../select/archived.ts';
 import type { IndexEntry } from '../tenant/state.ts';
@@ -141,7 +140,15 @@ export function processStateSnapshot(
  * baseline.
  */
 export function tenantStateSnapshot<E extends IndexEntry>(index: ReadonlyMap<string, E> | null): Map<string, E> {
-  return notPorted('checkpoints');
+  const baseline = new Map<string, E>();
+  if (!index) return baseline;
+  for (const entry of index.values()) {
+    if (!entry.uniqueId) continue;
+    // A copy of each entry too: a later read that patched an entry in place would
+    // otherwise change the before-state it is compared against.
+    baseline.set(entry.uniqueId.toLowerCase(), { ...entry, groupExists: readGroupExists(entry.groupExists).exists });
+  }
+  return baseline;
 }
 
 /** Records that the Hold phase restored this process, which the unwind keys off. Port of `Set-ProcessSnapshotRestored`. */

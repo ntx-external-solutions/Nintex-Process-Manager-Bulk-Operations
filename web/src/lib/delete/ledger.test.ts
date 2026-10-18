@@ -17,7 +17,6 @@ import {
   type PlanLedgerRow,
 } from './ledger.ts';
 import type { ProcessModel } from './model.ts';
-import { PHASE } from './phases.ts';
 import { findProcessReferenceSites } from './references.ts';
 import { readFixture } from './testing/fixtures.ts';
 import { mockIndex, orphanedGroupIndex } from './testing/index.ts';
@@ -80,7 +79,7 @@ test('a file that is not a plan reads as no plan', () => {
 const TARGET = 'aaaa0000-0000-0000-0000-00000000000a';
 const MASTER = 'bbbb0000-0000-0000-0000-00000000000b';
 
-test('the baseline covers the whole tenant', { skip: PHASE.checkpoints }, () => {
+test('the baseline covers the whole tenant', () => {
   const before = mockIndex([
     { uniqueId: TARGET, numericId: 1, name: 'Order Handling (AU)', isArchived: true, groupId: 493 },
     { uniqueId: MASTER, numericId: 2, name: 'Order Handling', isArchived: false, groupId: 493 },
@@ -112,7 +111,7 @@ test('the pre-Hold snapshot records whether the home group still exists', () => 
   );
 });
 
-test('the tenant baseline carries the flag too', { skip: PHASE.checkpoints }, () => {
+test('the tenant baseline carries the flag too', () => {
   // So a collateral unwind can see it as well.
   const baseline = tenantStateSnapshot(orphanedGroupIndex());
   assert.equal(baseline.get('aaaaaaaa-0000-0000-0000-000000000002')?.groupExists, false, 'the tenant baseline carries the flag');

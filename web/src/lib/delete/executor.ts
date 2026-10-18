@@ -22,12 +22,14 @@ import { archiveOne, failureOf, type ArchiveOptions } from '../archive/outcome.t
 import { resultRow, type ResultRow } from '../exec/report.ts';
 import { defaultIsFatal } from '../exec/runner.ts';
 import { buildUpdateEnvelope } from '../pm/processes.ts';
+import type { ProcessActions } from '../pm/types.ts';
+import { chooseWritePath, isWritePath, writeStateOf, type WriteRefusal } from '../pm/writePath.ts';
 import type { ProcessIndex } from '../tenant/state.ts';
-import type { CollateralChange, CollateralGateway } from './collateral.ts';
+import type { CollateralGate, CollateralGateway } from './collateral.ts';
 import type { DeleteEventSink } from './events.ts';
 import type { DeleteGateway } from './gateway.ts';
 import type { DependencyPlan } from './ledger.ts';
-import { nodeInt, nodeString, type ProcessModel } from './model.ts';
+import { nodeInt, type ProcessModel } from './model.ts';
 import { resolveClaimName } from './names.ts';
 import { notPorted } from './phases.ts';
 import { findProcessReferenceSites, removeProcessReferences, type ReferenceSite } from './references.ts';
@@ -84,7 +86,8 @@ export async function restoreProcess(
   }
 }
 
-export type SaveStage = 'Save' | 'SavedUnpublished' | 'Publish' | 'Published';
+/** `Refused`: never sent, because the process says this account cannot write it as needed. */
+export type SaveStage = 'Refused' | 'Save' | 'SavedUnpublished' | 'Publish' | 'Published';
 
 export interface SaveOutcome {
   success: boolean;
@@ -95,7 +98,10 @@ export interface SaveOutcome {
 }
 
 export interface SaveModelOptions {
+  /** From the same read the model came from. Decides the publish route (pm/writePath.ts). */
+  processActions: Partial<ProcessActions> | null;
   changeDescription?: string | undefined;
+  /** Permission to edit a revision awaiting approval, and publish over it. Default false. */
   approvalsEnabled?: boolean | undefined;
   /** Default true: these edits publish a version the owner never asked for. */
   suppressChangeNotification?: boolean | undefined;
@@ -106,48 +112,62 @@ export interface SaveModelOptions {
 /** The script's change description for a reference removal, used when the run gives none. */
 export const REFERENCE_REMOVAL_DESCRIPTION = 'Automated dependency removal';
 
-/** Whether a `Version` such as "3.1" has a major version above 0: "0.x" was never published. */
-function isPublishedVersion(version: string): boolean {
-  if (!version.includes('.')) return false;
-  const major = Number(version.split('.')[0]);
-  return Number.isInteger(major) && major > 0;
-}
+const SAVE_REFUSALS: Record<WriteRefusal, string> = {
+  'cannot-save': 'This account cannot save changes to this process',
+  'awaiting-approval': 'It is awaiting approval, and this run is not allowed to override a pending approval',
+  'cannot-publish': 'It is published, and cannot be republished by this account: it can neither publish it nor submit it for approval',
+};
 
 /**
  * Saves a model (ProcessJson as a string: an object returns 200 and drops the edit), then
- * re-reads it and publishes the new revision when the process had been published. Port
- * of `Save-NpmProcessModel`.
+ * re-reads it for the new revision and publishes it. Port of `Save-NpmProcessModel`.
+ *
+ * DIFFERS: the route comes from the process (Cowork's review of phase 4). The script
+ * chose `DoSubmitForApproval` and the publish call from `-ApprovalsEnabled`, and decided
+ * whether to publish from the version number. Here `chooseWritePath` reads the revision
+ * state and `processActions`, as ownership does: a published process is saved with
+ * `DoSubmitForApproval` only when submitting is all this account may do, and is always
+ * published through `publishNow` (S2, W4). A process the account cannot republish is
+ * refused before anything is saved, rather than left as a draft that still holds the
+ * reference. `PublishProcessRevisionEdit` is not used: it was never measured from the
+ * web app, and one publish route is easier to trust than two.
  *
  * The script slept a second before the re-read; the ownership save (pm/ownership.ts) reads
  * straight after its save and matched the tenant in the W4 live test, so this does too.
  */
 export async function saveProcessModel(
-  gateway: Pick<DeleteGateway, 'saveModel' | 'readModel' | 'publishNow' | 'publishRevisionEdit'>,
+  gateway: Pick<DeleteGateway, 'saveModel' | 'readModel' | 'publishNow'>,
   processUniqueId: string,
   model: ProcessModel,
-  options: SaveModelOptions = {},
+  options: SaveModelOptions,
 ): Promise<SaveOutcome> {
   const isFatal = options.isFatal ?? defaultIsFatal;
   const description = options.changeDescription ?? REFERENCE_REMOVAL_DESCRIPTION;
-  const approvalsEnabled = options.approvalsEnabled ?? false;
   const failed = (stage: SaveStage, error: unknown): SaveOutcome => {
     if (isFatal(error)) throw error;
     const failure = failureOf(error);
     return { success: false, stage, error: failure.detail ?? failure.error, statusCode: failure.status };
   };
 
+  const path = chooseWritePath(writeStateOf(model, options.processActions), {
+    publish: 'match-state',
+    overridePendingApproval: options.approvalsEnabled ?? false,
+  });
+  if (!isWritePath(path)) return { success: false, stage: 'Refused', error: SAVE_REFUSALS[path.refused], statusCode: 0 };
+
   try {
     await gateway.saveModel(
       processUniqueId,
       buildUpdateEnvelope(model as Parameters<typeof buildUpdateEnvelope>[0], {
         changeDescription: description,
-        submitForApproval: approvalsEnabled,
+        submitForApproval: path === 'submit-then-publish',
         suppressChangeNotification: options.suppressChangeNotification ?? true,
       }),
     );
   } catch (error) {
     return failed('Save', error);
   }
+  if (path === 'save-only') return { success: true, stage: 'SavedUnpublished', error: null, statusCode: 200 };
 
   // Re-read for the revision id the save produced.
   let updated: ProcessModel | null = null;
@@ -158,12 +178,8 @@ export async function saveProcessModel(
     if (isFatal(error)) throw error;
   }
 
-  // The script read the version off the re-read alone, so a failed re-read reported a
-  // published process as never published and left its new draft unpublished. The model
-  // that was saved says as much about whether it had been published.
-  const version = nodeString(updated, 'Version') || nodeString(model, 'Version');
-  if (!isPublishedVersion(version)) return { success: true, stage: 'SavedUnpublished', error: null, statusCode: 200 };
-
+  // The script reported a failed re-read as SavedUnpublished and left the new draft
+  // unpublished. That draft is a published process's live version gone stale, so it fails.
   const revisionId = nodeInt(updated, 'ProcessRevisionEditId');
   if (revisionId === null) {
     return {
@@ -175,10 +191,9 @@ export async function saveProcessModel(
   }
 
   try {
-    // Both send the change description as the publish message: a tenant in "Publish Only
-    // mode" answers 400 without one (S2).
-    if (approvalsEnabled) await gateway.publishNow(processUniqueId, revisionId, description);
-    else await gateway.publishRevisionEdit(processUniqueId, revisionId, description);
+    // The change description is the publish message: a tenant in "Publish Only mode"
+    // answers 400 without one (S2).
+    await gateway.publishNow(processUniqueId, revisionId, description);
   } catch (error) {
     return failed('Publish', error);
   }
@@ -220,15 +235,17 @@ export async function removePlanReferences(
 
   // Read fresh for the edit, never from the plan: planning may be minutes old, and saving a
   // stale model would discard whatever changed since.
-  const readForEdit = async (uniqueId: string): Promise<{ model: ProcessModel | null; reason: string; status: number }> => {
+  const readForEdit = async (
+    uniqueId: string,
+  ): Promise<{ model: ProcessModel | null; processActions: Partial<ProcessActions> | null; reason: string; status: number }> => {
     try {
       const read = await gateway.readModel(uniqueId);
-      if (read.kind === 'model') return { model: read.model, reason: '', status: 0 };
-      return { model: null, reason: 'it is archived', status: 0 };
+      if (read.kind === 'model') return { model: read.model, processActions: read.processActions, reason: '', status: 0 };
+      return { model: null, processActions: null, reason: 'it is archived', status: 0 };
     } catch (error) {
       if (isFatal(error)) throw error;
       const failure = failureOf(error);
-      return { model: null, reason: failure.detail ?? failure.error, status: failure.status };
+      return { model: null, processActions: null, reason: failure.detail ?? failure.error, status: failure.status };
     }
   };
 
@@ -237,7 +254,7 @@ export async function removePlanReferences(
     options.onEvent?.({ kind: 'progress', label: 'Removing references', done: i + 1, total: workItems.length });
     const holderId = item.holderUniqueId;
     const name = nameOf(holderId);
-    const { model, reason, status } = await readForEdit(holderId);
+    const { model, processActions, reason, status } = await readForEdit(holderId);
     if (!model) {
       results.push(
         resultRow({
@@ -268,6 +285,7 @@ export async function removePlanReferences(
     }
 
     const save = await saveProcessModel(gateway, holderId, removal.cleaned, {
+      processActions,
       changeDescription: options.changeDescription,
       approvalsEnabled: options.approvalsEnabled ?? true,
       suppressChangeNotification: true,
@@ -279,7 +297,11 @@ export async function removePlanReferences(
         name,
         operation: 'RemoveReferences',
         status: save.success ? 'Success' : 'Failed',
-        message: save.success ? `Removed ${removal.referencesRemoved} reference(s), ${save.stage}` : `${save.stage} failed: ${save.error ?? ''}`.trimEnd(),
+        message: save.success
+          ? `Removed ${removal.referencesRemoved} reference(s), ${save.stage}`
+          : save.stage === 'Refused'
+            ? `Not saved: ${save.error ?? ''}. Its references to the targets remain.`
+            : `${save.stage} failed: ${save.error ?? ''}`.trimEnd(),
         statusCode: save.success ? null : save.statusCode,
       }),
     );
@@ -308,11 +330,7 @@ export async function removePlanReferences(
   return { results, verificationFailed };
 }
 
-/**
- * The collateral gate: true carries on to the delete, false stops before it. The script's
- * `-OnCollateral` scriptblock. No gate means stop.
- */
-export type CollateralGate = (collateral: readonly CollateralChange[], phase: string) => boolean | Promise<boolean>;
+export type { CollateralGate } from './collateral.ts';
 
 export interface TargetDeletionOptions extends EngineOptions {
   /** The whole tenant before the run. Without it neither checkpoint runs, as in the script. */
@@ -421,7 +439,9 @@ export function collateralGateway(gateway: DeleteGateway, options: EngineOptions
   };
   return {
     restore: async (uniqueId, groupId, destinationGroupExists) => {
-      const outcome = await restoreProcess(gateway, uniqueId, groupId, { destinationGroupExists });
+      // A dead session ends the reversal as it ends everything else, rather than reading
+      // as a refused restore.
+      const outcome = await restoreProcess(gateway, uniqueId, groupId, { destinationGroupExists, isFatal: options.isFatal });
       return { ok: outcome.ok, statusCode: outcome.statusCode > 0 ? outcome.statusCode : null };
     },
     archive: async (uniqueId, comment) => {

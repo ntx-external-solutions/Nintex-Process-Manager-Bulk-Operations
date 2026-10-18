@@ -70,41 +70,94 @@ function planFor(tenant: FakeTenant): DependencyPlan {
 }
 
 // ---------------------------------------------------------------- the save
+// The route comes from the process (Cowork's review of phase 4): the revision state and
+// processActions, through the rules ownership uses (pm/writePath.ts).
+
+const ADMIN = { CanSave: true, CanPublishAfterEdit: true, CanSubmitForApprovalAfterEdit: true };
+const SUBMIT_ONLY = { CanSave: true, CanPublishAfterEdit: false, CanSubmitForApprovalAfterEdit: true };
+const SAVE_ONLY = { CanSave: true, CanPublishAfterEdit: false, CanSubmitForApprovalAfterEdit: false };
 
 test('a never-published process is saved and not published', async () => {
   const tenant = tenantWith('0.2');
-  const outcome = await saveProcessModel(tenant, H, holderModel('0.2'));
+  const outcome = await saveProcessModel(tenant, H, holderModel('0.2'), { processActions: ADMIN });
   assert.deepEqual(outcome, { success: true, stage: 'SavedUnpublished', error: null, statusCode: 200 });
-  assert.equal(tenant.callsTo('publishNow').length + tenant.callsTo('publishRevisionEdit').length, 0, 'nothing is published');
+  assert.equal(tenant.callsTo('publishNow').length, 0, 'nothing is published');
   assert.equal(tenant.callsTo('saveModel')[0]?.envelope?.ChangeDescription, REFERENCE_REMOVAL_DESCRIPTION, "the script's description by default");
 });
 
-test('a published process is published again, by the route approvals call for, with the description as its message', async () => {
-  const off = tenantWith('2.0');
-  assert.equal((await saveProcessModel(off, H, holderModel('2.0'), { changeDescription: 'Run note' })).stage, 'Published');
-  const edit = off.callsTo('publishRevisionEdit')[0];
-  assert.equal(edit?.comment, 'Run note', 'approvals off: PublishProcessRevisionEdit, with the message');
-  assert.equal(edit?.revisionEditId, off.process(H)?.revisionEditId, 'the revision the save produced, read back');
-  assert.equal(off.callsTo('saveModel')[0]?.envelope?.DoSubmitForApproval, false);
+test('a process that can publish after an edit is saved without approval, then published with the description', async () => {
+  const tenant = tenantWith('2.0');
+  assert.equal((await saveProcessModel(tenant, H, holderModel('2.0'), { processActions: ADMIN, changeDescription: 'Run note' })).stage, 'Published');
+  assert.equal(tenant.callsTo('saveModel')[0]?.envelope?.DoSubmitForApproval, false, 'not submitted for approval');
+  const publish = tenant.callsTo('publishNow')[0];
+  assert.equal(publish?.comment, 'Run note', 'Publish now, with the message (S2)');
+  assert.equal(publish?.revisionEditId, tenant.process(H)?.revisionEditId, 'the revision the save produced, read back');
+});
 
-  const on = tenantWith('2.0');
-  await saveProcessModel(on, H, holderModel('2.0'), { changeDescription: 'Run note', approvalsEnabled: true });
-  assert.equal(on.callsTo('publishNow')[0]?.comment, 'Run note', 'approvals on: Publish now, with the message (S2)');
-  assert.equal(on.callsTo('saveModel')[0]?.envelope?.DoSubmitForApproval, true);
+test('a process that can only be submitted is saved for approval, then published the same way', async () => {
+  const tenant = tenantWith('2.0');
+  assert.equal((await saveProcessModel(tenant, H, holderModel('2.0'), { processActions: SUBMIT_ONLY })).stage, 'Published');
+  assert.equal(tenant.callsTo('saveModel')[0]?.envelope?.DoSubmitForApproval, true, 'submitted for approval');
+  assert.equal(tenant.callsTo('publishNow').length, 1, 'then published through the one route');
+});
+
+test('the approvals flag no longer picks the route', async () => {
+  // Phase 4 saved with DoSubmitForApproval = approvalsEnabled, defaulting to false here and
+  // true in its caller. Either value now gives the same write for the same process.
+  for (const approvalsEnabled of [true, false]) {
+    const tenant = tenantWith('2.0');
+    await saveProcessModel(tenant, H, holderModel('2.0'), { processActions: ADMIN, approvalsEnabled });
+    assert.equal(tenant.callsTo('saveModel')[0]?.envelope?.DoSubmitForApproval, false, `approvalsEnabled ${approvalsEnabled}`);
+    assert.equal(tenant.callsTo('publishNow').length, 1);
+  }
+});
+
+test('a published process this account cannot republish is refused before anything is saved', async () => {
+  const tenant = tenantWith('2.0');
+  const outcome = await saveProcessModel(tenant, H, holderModel('2.0'), { processActions: SAVE_ONLY });
+  assert.equal(outcome.success, false);
+  assert.equal(outcome.stage, 'Refused');
+  assert.match(outcome.error ?? '', /cannot be republished by this account/);
+  assert.equal(tenant.calls.filter((c) => c.op === 'saveModel' || c.op === 'publishNow').length, 0, 'nothing is sent');
+
+  const noActions = tenantWith('2.0');
+  const unknown = await saveProcessModel(noActions, H, holderModel('2.0'), { processActions: null });
+  assert.equal(unknown.stage, 'Refused', 'a read with no processActions grants nothing');
+  assert.equal(noActions.callsTo('saveModel').length, 0);
+});
+
+test('a revision awaiting approval is edited only with permission to override it', async () => {
+  const pending = (): ProcessModel => ({ ...holderModel('2.1'), ProcessRevisionStateId: 2 });
+  const tenant = tenantWith('2.1');
+  const refused = await saveProcessModel(tenant, H, pending(), { processActions: ADMIN, approvalsEnabled: false });
+  assert.equal(refused.stage, 'Refused');
+  assert.match(refused.error ?? '', /awaiting approval/);
+  assert.equal(tenant.callsTo('saveModel').length, 0);
+
+  const allowed = await saveProcessModel(tenant, H, pending(), { processActions: ADMIN, approvalsEnabled: true });
+  assert.equal(allowed.stage, 'Published', 'with the override, it is saved and published over the pending revision');
+});
+
+test('a draft in progress is saved and left unpublished, whatever its version', async () => {
+  // A draft may hold someone's unpublished edits, which are not ours to publish (W4's rule).
+  const tenant = tenantWith('2.1');
+  const outcome = await saveProcessModel(tenant, H, { ...holderModel('2.1'), ProcessRevisionStateId: 1 }, { processActions: ADMIN });
+  assert.equal(outcome.stage, 'SavedUnpublished');
+  assert.equal(tenant.callsTo('publishNow').length, 0);
 });
 
 test('a refused save and a refused publish say which stage failed, with the status', async () => {
   const tenant = tenantWith('2.0');
   tenant.fail = (call) => (call.op === 'saveModel' ? { status: 400, message: 'Bad model' } : null);
-  const save = await saveProcessModel(tenant, H, holderModel('2.0'));
+  const save = await saveProcessModel(tenant, H, holderModel('2.0'), { processActions: ADMIN });
   assert.equal(save.success, false);
   assert.equal(save.stage, 'Save');
   assert.equal(save.statusCode, 400);
   assert.match(save.error ?? '', /Bad model/);
-  assert.equal(tenant.callsTo('publishRevisionEdit').length, 0, 'nothing is published after a refused save');
+  assert.equal(tenant.callsTo('publishNow').length, 0, 'nothing is published after a refused save');
 
-  tenant.fail = (call) => (call.op === 'publishRevisionEdit' ? { status: 409, message: 'Locked' } : null);
-  const publish = await saveProcessModel(tenant, H, holderModel('2.0'));
+  tenant.fail = (call) => (call.op === 'publishNow' ? { status: 409, message: 'Locked' } : null);
+  const publish = await saveProcessModel(tenant, H, holderModel('2.0'), { processActions: ADMIN });
   assert.equal(publish.stage, 'Publish');
   assert.equal(publish.statusCode, 409);
 });
@@ -113,7 +166,7 @@ test('a re-read that fails does not pass a published process off as never publis
   // The script read the version off the re-read alone and reported SavedUnpublished.
   const tenant = tenantWith('2.0');
   tenant.fail = (call) => (call.op === 'readModel' ? { status: 503, message: 'Unavailable' } : null);
-  const outcome = await saveProcessModel(tenant, H, holderModel('2.0'));
+  const outcome = await saveProcessModel(tenant, H, holderModel('2.0'), { processActions: ADMIN });
   assert.equal(outcome.success, false, 'the draft was left unpublished, so it failed');
   assert.equal(outcome.stage, 'Publish');
   assert.match(outcome.error ?? '', /could not be read back/);
@@ -122,7 +175,7 @@ test('a re-read that fails does not pass a published process off as never publis
 test('a dead session during the save ends the run', async () => {
   const tenant = tenantWith('2.0');
   tenant.fail = (call) => (call.op === 'saveModel' ? { status: 401 } : null);
-  await assert.rejects(saveProcessModel(tenant, H, holderModel('2.0'), { isFatal: fatalOn401 }));
+  await assert.rejects(saveProcessModel(tenant, H, holderModel('2.0'), { processActions: ADMIN, isFatal: fatalOn401 }));
 });
 
 // ---------------------------------------------------------------- the removal
@@ -137,12 +190,26 @@ test('the removal reads fresh, saves once, carries the run description, and veri
   assert.equal(run.results[0]?.name, 'Holder');
   assert.match(run.results[0]?.message ?? '', /Removed 2 reference\(s\), Published/);
   assert.equal(tenant.callsTo('saveModel')[0]?.envelope?.ChangeDescription, 'Retiring old processes');
-  assert.equal(tenant.callsTo('publishNow')[0]?.comment, 'Retiring old processes', 'approvals default on for the engine, as in the script');
+  assert.equal(tenant.callsTo('publishNow')[0]?.comment, 'Retiring old processes', 'published through the one route, with the run description');
   assert.equal(run.verificationFailed.length, 0);
 
   const after = tenant.modelOf(H);
   assert.equal(findProcessReferenceSites(after, [T]).length, 0, 'nothing to the target survives');
   assert.deepEqual(after?.['LinkedStakeholders'], { LinkedStakeholder: [{ Id: 9 }] }, 'LinkedStakeholders is sent back untouched');
+});
+
+test('a holder this account cannot republish keeps its references and fails its row, unsaved', async () => {
+  const tenant = new FakeTenant({
+    processes: [
+      { uniqueId: H, name: 'Holder', model: holderModel('2.0'), processActions: SAVE_ONLY },
+      { uniqueId: T, name: 'Target' },
+    ],
+  });
+  const run = await removePlanReferences(tenant, planFor(tenant));
+  assert.equal(run.results[0]?.status, 'Failed');
+  assert.match(run.results[0]?.message ?? '', /^Not saved: .*cannot be republished by this account.*references to the targets remain/);
+  assert.equal(tenant.callsTo('saveModel').length, 0, 'nothing is saved');
+  assert.equal(run.verificationFailed.length, 1, 'and verification still finds the references');
 });
 
 test('a holder with nothing left to remove is skipped, and saved never', async () => {
@@ -176,9 +243,14 @@ test('a save the tenant answers but drops is caught by verification', async () =
 });
 
 test('skipping verification reads each holder once', async () => {
-  const tenant = tenantWith('0.1');
-  await removePlanReferences(tenant, planFor(tenant), { skipVerification: true });
-  assert.equal(tenant.callsTo('readModel', H).length, 2, 'the read for the edit and the save\'s re-read, nothing more');
+  const published = tenantWith('2.0');
+  await removePlanReferences(published, planFor(published), { skipVerification: true });
+  assert.equal(published.callsTo('readModel', H).length, 2, 'the read for the edit and the save\'s re-read, nothing more');
+
+  // A save that will not be published has no revision to read back.
+  const draft = tenantWith('0.1');
+  await removePlanReferences(draft, planFor(draft), { skipVerification: true });
+  assert.equal(draft.callsTo('readModel', H).length, 1, 'only the read for the edit');
 });
 
 test('a dead session during the removal ends the run', async () => {

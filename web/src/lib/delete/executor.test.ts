@@ -742,7 +742,7 @@ test('an archived holder whose group still exists plans as it always did', async
   assert.equal(okPlan.orphanedHolders.length, 0, 'and is not named as orphaned');
 });
 
-test('a collateral archive with nowhere to go is reported, not retried', { skip: PHASE.checkpoints }, async () => {
+test('a collateral archive with nowhere to go is reported, not retried', async () => {
   const tenant = orphanTenant(atRest());
   const change: CollateralChange = {
     uniqueId: ORPHAN,

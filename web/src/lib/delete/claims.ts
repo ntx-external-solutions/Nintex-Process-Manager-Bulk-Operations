@@ -187,15 +187,21 @@ export function groupSitesByHolder(sites: ReadonlyArray<ReferenceSite | null>): 
  * because the API labels some references by the wrong category, and finding more than the
  * API claims removes everything found. A pair that falls short is an over-claim when
  * anything was located, and blocks when nothing was.
+ *
+ * The pair's located total is every planned site between the two, in either direction,
+ * any category, child sites included. Summing the per-category counts missed an Input
+ * held by the related process, because those counts are scoped to the queried side: on
+ * Cowork's live check after phase 4, two pairs (a Link claimed on the target, an Input
+ * held by the related process) still blocked for that reason.
  */
 export function reconcileDependencies(input: ReconciliationInput): Reconciliation[] {
   const rows = reconcileByCategory(input);
   if (input.bothSidesDeleted === true || !rows.some((r) => r.status === 'Mismatch')) return rows;
 
   const pairClaimed = rows.reduce((n, r) => n + r.claimed, 0);
-  const pairLocated = rows.reduce((n, r) => n + r.expected, 0);
+  const pairLocated = sitesBetween(input).length;
   const counts = (pick: (r: Reconciliation) => number) => rows.map((r) => `${r.category} ${pick(r)}`).join(', ');
-  const across = `Across the pair: claimed ${counts((r) => r.claimed)}; located ${counts((r) => r.expected)}.`;
+  const across = `Across the pair: claimed ${counts((r) => r.claimed)}; located ${counts((r) => r.expected)}; ${pairLocated} site(s) between them in all.`;
 
   return rows.map((row) => {
     if (row.status !== 'Mismatch') return row;
@@ -210,12 +216,18 @@ export function reconcileDependencies(input: ReconciliationInput): Reconciliatio
   });
 }
 
+/** Every site between the pair, whichever of the two holds it. */
+function sitesBetween(input: ReconciliationInput): ReconciliationInput['sites'] {
+  const { queriedUniqueId: q, relatedUniqueId: r } = input;
+  return input.sites.filter(
+    (s) => (sameId(s.holderUniqueId, q) && sameId(s.targetUniqueId, r)) || (sameId(s.holderUniqueId, r) && sameId(s.targetUniqueId, q)),
+  );
+}
+
 function reconcileByCategory(input: ReconciliationInput): Reconciliation[] {
   const { queriedUniqueId: q, relatedUniqueId: r } = input;
   const pairClaims = input.claims.filter((c) => sameId(c.queriedUniqueId, q) && sameId(c.relatedUniqueId, r));
-  const pairSites = input.sites.filter(
-    (s) => (sameId(s.holderUniqueId, q) && sameId(s.targetUniqueId, r)) || (sameId(s.holderUniqueId, r) && sameId(s.targetUniqueId, q)),
-  );
+  const pairSites = sitesBetween(input);
 
   return (['Link', 'Input', 'Output'] as const).map((category): Reconciliation => {
     const claimed = pairClaims.filter((c) => c.category === category).length;

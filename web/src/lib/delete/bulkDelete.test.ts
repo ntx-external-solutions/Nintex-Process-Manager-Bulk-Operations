@@ -152,7 +152,7 @@ test('a run with no orphaned target says nothing about orphans', { skip: PHASE.u
 
 // ---------------------------------------------------------------- a collateral process no source can name
 
-test('a collateral name comes from the index, then the listing, then says it is unavailable', { skip: PHASE.checkpoints }, () => {
+test('a collateral name comes from the index, then the listing, then says it is unavailable', () => {
   const ghost = 'ffff1111-0000-0000-0000-000000000001';
   const fromIndex = new Map([[ghost.toLowerCase(), { name: 'From the index' }]]);
   assert.equal(resolveCollateralName(fromIndex, ghost, 'From the group listing'), 'From the index', 'the index name still wins over the group listing');

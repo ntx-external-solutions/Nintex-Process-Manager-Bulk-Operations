@@ -9,7 +9,6 @@ import assert from 'node:assert/strict';
 
 import { resultRow } from '../exec/report.ts';
 import { isRealName, selectDisplayName, UNKNOWN_NAME } from './names.ts';
-import { PHASE } from './phases.ts';
 
 // Synthetic: the id of a process absent from the baseline, the index and every claim.
 const GHOST = 'ffff0000-0000-0000-0000-0000000000ff';
@@ -23,14 +22,14 @@ test('a name is used as-is, and a missing one is said in words', () => {
   assert.match(UNKNOWN_NAME, /not in any process list/, 'and the marker says why there is no name');
 });
 
-test('a label is real only when it carries information', { skip: PHASE.checkpoints }, () => {
+test('a label is real only when it carries information', () => {
   assert.equal(isRealName('Real Name', GHOST), true, 'a real name carries information');
   assert.equal(isRealName('', GHOST), false, 'an empty one does not');
   assert.equal(isRealName(GHOST, GHOST), false, 'nor does the id');
   assert.equal(isRealName(UNKNOWN_NAME, GHOST), false, 'nor does the marker itself');
 });
 
-test('the fullest real name wins, and the marker never does', { skip: PHASE.checkpoints }, () => {
+test('the fullest real name wins, and the marker never does', () => {
   // Longest wins, because the group listing truncates a variation to its master.
   assert.equal(
     selectDisplayName([{ name: 'Order Handling' }, { name: 'Order Handling :: Partner' }], GHOST),

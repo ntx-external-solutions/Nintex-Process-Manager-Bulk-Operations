@@ -22,7 +22,6 @@ import {
   type CollateralGateway,
   type VariationMasterHit,
 } from './collateral.ts';
-import { PHASE } from './phases.ts';
 import { mockIndex, orphanedGroupIndex } from './testing/index.ts';
 
 const targets = (...ids: string[]) => ids.map((uniqueId) => ({ uniqueId, name: '' }));
@@ -127,9 +126,8 @@ test('a variation whose master is not a target is flagged, with the master descr
   assert.equal(hits[0]?.relativeGroupId, 100, 'the master group is carried too');
 });
 
-// DIFFERS: findVariationMasters returns no base name. Find-VariationMaster's BaseName is
-// the text before the separator; the checkpoints phase adds it (VariationMasterHit).
-test('the base name is the text before the separator', { skip: PHASE.checkpoints }, () => {
+// Find-VariationMaster's BaseName, which findVariationMasters returns since phase 5.
+test('the base name is the text before the separator', () => {
   const hits = findVariationMasters(varIndex(), targets(VAR_A)) as Array<Partial<VariationMasterHit>>;
   assert.equal(hits[0]?.baseName, 'Order Handling', 'the base name is the text before the separator');
 });
@@ -149,9 +147,9 @@ test('only a variation with a master outside the targets warns', () => {
   assert.equal(findVariationMasters(varIndex(), []).length, 0, 'no targets, no warnings');
 });
 
-// DIFFERS: findVariationMasters takes a ProcessIndex, never null, and reads it without a
-// guard. Find-VariationMaster returns nothing for a null index.
-test('a null index does not throw', { skip: PHASE.checkpoints }, () => {
+// Find-VariationMaster returns nothing for a null index, and so does findVariationMasters
+// since phase 5.
+test('a null index does not throw', () => {
   assert.equal(
     findVariationMasters(null as unknown as ProcessIndex, targets(VAR_A)).length,
     0,
@@ -202,9 +200,8 @@ test('one row per target and master pair', () => {
   assert.ok(multi.some((m) => m.relativeUniqueId === CAND_3), 'a master differing only by case is still found');
 });
 
-// DIFFERS: findVariationMasters does not carry the target's group, which the warning
-// orders by. Find-VariationMaster's TargetGroupId does.
-test('the target group is carried', { skip: PHASE.checkpoints }, () => {
+// The target's group, which the warning orders by (Find-VariationMaster's TargetGroupId).
+test('the target group is carried', () => {
   const multi = findVariationMasters(multiIndex(), targets(MULTI_A, MULTI_B)) as Array<Partial<VariationMasterHit>>;
   assert.equal(
     multi.find((m) => m.targetUniqueId === MULTI_A)?.targetGroupId,
@@ -213,9 +210,7 @@ test('the target group is carried', { skip: PHASE.checkpoints }, () => {
   );
 });
 
-test('the warning counts targets, and lists the master at risk first', { skip: PHASE.checkpoints }, () => {
-  // Same gap as above: the warning needs VariationMasterHit, which findVariationMasters
-  // does not yet return.
+test('the warning counts targets, and lists the master at risk first', () => {
   const multi = findVariationMasters(multiIndex(), targets(MULTI_A, MULTI_B)) as VariationMasterHit[];
   const warning = variationWarning(multi);
   assert.equal(warning?.targetCount, 2, 'the warning counts targets, not pairs');
@@ -263,7 +258,7 @@ test('a process the run met but the baseline never saw is reported as such', () 
   );
 });
 
-test('the reversal does not guess at a state it never recorded', { skip: PHASE.checkpoints }, async () => {
+test('the reversal does not guess at a state it never recorded', async () => {
   const untouchable: CollateralGateway = {
     restore: () => assert.fail('a process with no before-state must not be restored'),
     archive: () => assert.fail('a process with no before-state must not be archived'),
@@ -291,9 +286,9 @@ test('a collateral row is raised for the orphan that changed state', () => {
   assert.equal(collateral.length, 1, 'one process changed state');
 });
 
-// DIFFERS: tenant/state.ts's Collateral has no originalGroupExists. Compare-TenantState
-// carries the baseline's groupExists onto every row.
-test('a collateral row knows whether its group still exists', { skip: PHASE.checkpoints }, () => {
+// Compare-TenantState carries the baseline's groupExists onto every row, and so does
+// compareTenantState since phase 5.
+test('a collateral row knows whether its group still exists', () => {
   const collateral = compareTenantState(orphanedGroupIndex(), orphanAfter(), []) as Array<Partial<CollateralChange>>;
   assert.equal(
     collateral[0]?.originalGroupExists,
@@ -305,7 +300,7 @@ test('a collateral row knows whether its group still exists', { skip: PHASE.chec
 // ---------------------------------------------------------------- the collateral list, unnamed
 // A NotInBaseline row with no name prints the marker, not a GUID twice.
 
-test('an unnamed collateral row says so, and prints its id once', { skip: PHASE.checkpoints }, () => {
+test('an unnamed collateral row says so, and prints its id once', () => {
   const ghostId = 'ffff0000-0000-0000-0000-0000000000ff';
   const ghostRow: CollateralChange = {
     uniqueId: ghostId,
