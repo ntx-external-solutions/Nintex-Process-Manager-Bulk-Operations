@@ -20,8 +20,12 @@ Maintained by the Cowork session. Claude Code reads this but does not edit it.
   the endpoints that now treat a redirect as a dead session. The dead-session path
   itself was not reproduced live (no way to kill a token from outside); it rests on the
   offline tests and `web/dev/drive-expired.mjs`.
-- Next for Cowork: test W4 (ownership) live, which needs a SCIM key from JB, then review
-  W5 phase by phase against the PowerShell.
+- W4 tested live (18 Oct): works, tenant matched. Fixes in F4 (archived process fails
+  instead of skipping; skipped rows lose their names).
+- W5 phase 1 reviewed and approved with notes (fake tenant's archived read is wrong;
+  move plan building into discovery so a read-only dry run is possible). Phase 2 next.
+- Next for Cowork: live dry run of W5 discovery against the demo tenant when phase 2
+  lands, compared with the script's R3 numbers.
 - Spikes S1 to S3 and the variation test are in `API_ARCHITECTURE.md`. One lasting change
   on the tenant: "SOC 2 Submission Review" and its Partner variation are published at 3.0.
 - Restricting sign-in to known Process Manager hosts is deferred by JB.
