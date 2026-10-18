@@ -144,7 +144,7 @@ first.
 
 ## W3. Bulk Move
 
-Status: Ready (after W2b)
+Status: Done (5ebca76)
 
 `ReorderTreeNodes`, one node per call, `NodeType` from the item's `itemType`. Destination
 picker from the same tree. Reuse PGM's `groupPlan.ts` checks (no cycles, not into its

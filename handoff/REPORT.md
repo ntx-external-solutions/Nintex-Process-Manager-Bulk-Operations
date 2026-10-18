@@ -6,6 +6,84 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## W3. Bulk Move
+
+Commit `5ebca76` on `claude/web-w3-move`, stacked on W2b.
+
+**What changed.**
+
+- `move/select.ts`: `resolveMoveSelection` picks the fewest, highest nodes. A fully
+  checked group moves as one node. A checked group with exceptions inside is opened and
+  its included children considered one by one. A checked process moves on its own.
+  Shortcuts, document groups and unmeasured types are excluded with the reason.
+  `destinationOf` builds the destination with its ancestry (document groups are refused).
+  `destinationProblem` holds PGM's checks: never into itself or its own subtree, never a
+  process at the top level, and no call for something already there.
+- `move/plan.ts`: `buildMovePlan` pre-flights each individually moved process with
+  `ValidateProcessAction` (action 11). `classifyValidation` sorts each into `clean`,
+  `republish` (prompt), `draft` (prompt mentioning "outstanding changes"), `refused`
+  (Blocked, with the tenant's words) or `unknown` (the pre-flight couldn't be read). It
+  reads `variationSetData` for any process the tree marks with a set id and lists every
+  sibling. Viewer counts come from one `GetTotalSpecifiedGroupRoleAndUserViewers` call
+  for both ends of every move (advisory; failure is reported, not a gate).
+- `move/run.ts`: `runMoves` sends one node per call, journaled, and passes `nodeType`
+  through. `settleMoves` settles each from fresh reads of the destination and source
+  levels, and gives each variation sibling its own row from the listing.
+- Proxy: `node.move` (write) takes one node GUID, a movable `nodeType` (`group`,
+  `process`, `inprogress-process`, `vanillaprocess`), and parents that are each one GUID
+  or null. It refuses a shortcut, a document group, a node as its own parent, a process
+  at the top level, and any extra field. `process.validateMove` and `groups.viewers`
+  (up to 200 numeric ids) are reads.
+- `select/resolve.ts`: the level-reading loop is now `readUntilResolved`, shared by
+  Archive and Move.
+- UI: `/move` with `DestinationPicker` (groups only, top level allowed for groups).
+  `components/ResultsSummary.tsx` and `components/SessionGate.tsx` are now shared by
+  Archive and Move.
+
+**The preview, per S2.** "Would move" lists groups ("No process revision changes"),
+never-published processes ("minor version bump") and published ones ("A new major
+version will be published", with the tenant's message). **"Tick to move"** lists
+processes whose draft would go live, and any whose pre-flight couldn't be read. These
+are unticked by default, each with the tenant's message. The confirmation button counts
+the republishes. Variation siblings are named under the process they move with.
+
+**Results-file operations.** `UpdateLocation`, the script's Mode 3 name, with
+`ObjectType` `Process` or `ProcessGroup`. Statuses: `Success`, `Preview`, `Skipped`
+(already there, not ticked, not attempted), `Blocked` (refused, in the pre-flight or by a
+4xx), `Failed`, `Unverified`. One row per variation sibling that moved with a process.
+
+**Tests.** 239 tests, 239 pass (19 new). Covered: whole group vs per-child resolution,
+the three destination checks, document-group destinations refused, every pre-flight
+classification, drafts set aside and only sent when ticked, refused and unreadable
+pre-flights, siblings named from the set, one viewer call for both ends, one call per
+node with the type passed through, `success: false`, 4xx and a dead session, and the
+final read in both directions with sibling rows. The allowlist tests cover every refusal
+listed above.
+
+**End-to-end, offline.** Against the mock: moving a group, a published process and a
+process with an open draft into another group sent two `ReorderTreeNodes` calls (one
+node each, `NodeType` passed through). The published process was flagged and counted as
+republished. The draft was left unticked and recorded as Skipped with the tenant's
+message.
+
+**Decisions Cowork should check.**
+
+- **"Draft goes live" is detected by the words "outstanding changes"** in the
+  pre-flight message, as the task describes. If the tenant words it differently in
+  another language or version, those processes would land in "Would move" as ordinary
+  republishes, still flagged and counted, but ticked. A field that says so would be
+  better if one exists.
+- **The variation set is read only for processes the tree marks with a
+  `variationSetId`**, the same trigger as Archive.
+- A group moved whole is never pre-flighted, because the task and S2 say a group move
+  changes no revision. Groups have no `ValidateProcessAction` equivalent with a
+  destination (S2).
+- Viewer "before" for a group is the group's own count and for a process its group's,
+  as PGM did. "After" is the destination's count. Both are the product's numbers.
+- No link for group rows: the group URL format isn't recorded.
+
+---
+
 ## W2b. Folder cleanup after Archive
 
 Commit `3026aa3` on `claude/web-w2b-cleanup`, stacked on W2.
