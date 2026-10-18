@@ -6,7 +6,9 @@ import {
   ARCHIVED_LIST_TYPE,
   ARCHIVED_PAGE_SIZE,
   groupArchived,
+  groupsNeedingPaths,
   loadArchived,
+  loadGroupPaths,
   ORPHANED_BUCKET,
   readGroupExists,
   toArchivedProcess,
@@ -114,4 +116,20 @@ test('a page that keeps coming back full stops at the cap', async () => {
     { maxPages: 3 },
   );
   assert.equal(calls, 3);
+});
+
+test('paths are read once per live group, and a failed or empty one falls back', async () => {
+  const asked: string[] = [];
+  const processes = rows();
+  const ids = groupsNeedingPaths(processes);
+  // Orphans have no group to ask about.
+  assert.deepEqual(ids.sort(), ['g-ap', 'g-fin']);
+  const paths = await loadGroupPaths([...ids, 'g-ap'], async (id) => {
+    asked.push(id);
+    if (id === 'g-fin') throw new Error('HTTP 500');
+    return ['Finance', 'Accounts Payable'];
+  });
+  assert.deepEqual(asked.sort(), ['g-ap', 'g-fin']);
+  const view = groupArchived(processes, (id) => paths.get(id) ?? null);
+  assert.deepEqual(view.buckets.map((b) => b.label), ['Finance', 'Finance / Accounts Payable', 'Group no longer exists']);
 });

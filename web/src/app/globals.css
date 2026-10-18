@@ -631,3 +631,7 @@ label.inline {
 label.inline input[type='checkbox'] {
   margin-top: 0.3rem;
 }
+
+.error-text {
+  color: #c0392b;
+}

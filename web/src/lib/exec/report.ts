@@ -18,7 +18,7 @@
 
 import { toCsv } from '../csv/parse.ts';
 
-export type ObjectType = 'Process' | 'Group' | 'Document';
+export type ObjectType = 'Process' | 'ProcessGroup' | 'Document';
 
 export interface ResultRow {
   objectType: ObjectType;

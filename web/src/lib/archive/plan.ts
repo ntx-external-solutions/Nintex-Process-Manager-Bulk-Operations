@@ -8,7 +8,7 @@
 
 import { resultRow, type ResultRow } from '../exec/report.ts';
 import type { VariationSet } from '../pm/processes.ts';
-import type { ExcludedItem, ResolvedProcess } from '../select/resolve.ts';
+import type { CoveredGroup, ExcludedItem, ResolvedProcess } from '../select/resolve.ts';
 import { indexEntry, type ProcessIndex } from '../tenant/state.ts';
 
 export interface ArchiveTarget {
@@ -47,6 +47,8 @@ export interface VariationMatch {
 
 export interface ArchivePlan {
   targets: ArchiveTarget[];
+  /** Groups the selection covers, parents first: the candidates for cleanup afterwards. */
+  groups: CoveredGroup[];
   /** Rows for processes the plan will not touch, so they are not lost from the results. */
   skipped: ResultRow[];
   excluded: ExcludedItem[];
@@ -146,7 +148,11 @@ function dedupeMatches(matches: readonly VariationMatch[]): VariationMatch[] {
 }
 
 export function buildArchivePlan(
-  resolved: { processes: readonly ResolvedProcess[]; excluded: readonly ExcludedItem[] },
+  resolved: {
+    processes: readonly ResolvedProcess[];
+    excluded: readonly ExcludedItem[];
+    groups?: readonly CoveredGroup[];
+  },
   index: ProcessIndex,
   variationSets: ReadonlyMap<string, VariationSet> = new Map(),
   unreadVariationSets: ReadonlyMap<string, string> = new Map(),
@@ -199,6 +205,7 @@ export function buildArchivePlan(
 
   return {
     targets,
+    groups: [...(resolved.groups ?? [])],
     skipped,
     excluded: [...resolved.excluded],
     variations,

@@ -149,3 +149,90 @@ export async function getGroupViewerCounts(
   });
   return response.data ?? [];
 }
+
+/**
+ * Delete one group.
+ *
+ * Measured in spike S1 (API_ARCHITECTURE.md): the server **deletes a group that holds
+ * archived processes**, with no prompt and no refusal, and those processes become orphans
+ * that cannot be restored to it. It **refuses a group holding any document**, archived or
+ * not, with 409 `AssociatedContents` naming each document. `ValidateGroupAction` says
+ * nothing either way. So every check that matters is the caller's (lib/cleanup/plan.ts).
+ */
+export function deleteGroup(ctx: PmContext, processGroupUniqueId: string): Promise<unknown> {
+  return pmRequest<unknown>(ctx, {
+    path: '/Process/Edit/DeleteGroup',
+    method: 'POST',
+    body: { processGroupUniqueId },
+    // A 409 is the tenant's answer, not a transient fault, and a dropped connection may
+    // have deleted the group. Neither is sent twice; the final read settles it.
+    retry: 'write',
+  });
+}
+
+/** The tenant's 409 when a group still holds content. */
+export interface AssociatedContents {
+  caption: string;
+  documents: string[];
+  processes: string[];
+}
+
+/**
+ * Read a DeleteGroup refusal: `errorCode: "AssociatedContents"`, a caption, and the
+ * blocking items in `additionalInfos`. Returns null for anything else.
+ */
+export function readAssociatedContents(bodyText: string | null): AssociatedContents | null {
+  if (!bodyText) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(bodyText);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null;
+  const record = parsed as Record<string, unknown>;
+  if (record['errorCode'] !== 'AssociatedContents') return null;
+  const infos = (record['additionalInfos'] ?? {}) as Record<string, unknown>;
+  const names = (value: unknown): string[] =>
+    Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
+  return {
+    caption: typeof record['caption'] === 'string' ? record['caption'] : 'Unable to Delete Group',
+    documents: names(infos['documents']),
+    processes: names(infos['processes']),
+  };
+}
+
+/**
+ * Titles of a group's ancestors and the group itself, top first, without the tenant.
+ *
+ * The breadcrumb endpoint returns the chain root first (the tenant) and the group last
+ * (spike S3). Its item shape was recorded only loosely, so the title is taken from
+ * whichever of the usual fields carries one. A deleted group's chain is sometimes empty,
+ * which comes back as an empty path rather than a guess.
+ */
+export async function getGroupBreadcrumb(ctx: PmContext, groupUniqueId: string): Promise<string[]> {
+  const response = await pmRequest<unknown>(ctx, {
+    path: '/bff/navigation/api/v1/breadcrumb',
+    query: { type: 'ProcessGroup', id: groupUniqueId },
+  });
+  return breadcrumbTitles(response);
+}
+
+export function breadcrumbTitles(response: unknown): string[] {
+  let items: unknown = response;
+  if (!Array.isArray(items) && typeof items === 'object' && items !== null) {
+    const record = items as Record<string, unknown>;
+    items = record['items'] ?? record['breadcrumbs'] ?? record['data'] ?? record['breadcrumb'] ?? [];
+  }
+  if (!Array.isArray(items)) return [];
+  const titles = items
+    .map((item) => {
+      if (typeof item !== 'object' || item === null) return '';
+      const record = item as Record<string, unknown>;
+      const title = record['name'] ?? record['title'] ?? record['Name'] ?? record['Title'] ?? record['text'];
+      return typeof title === 'string' ? title : '';
+    })
+    .filter((title) => title !== '');
+  // The first entry is the tenant itself, which no group path in this app includes.
+  return titles.slice(1);
+}

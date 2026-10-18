@@ -10,16 +10,17 @@
  * Lifted from process-group-manager, whose allowlist has no archive or delete operation
  * and treats that as a structural safety property. This app needs both. Each write
  * arrives with the task that uses it (archive in W2, delete in W5), and each takes
- * exactly one process id, checked here on the server: the id must be a single GUID,
+ * exactly one process or group id, checked here on the server: the id must be a single GUID,
  * and a body carrying any field the operation does not name is refused outright, so
  * the proxy can never be asked to act on a list.
  */
 
 import type { PmContext } from './client.ts';
-import { getChildGroups } from './groups.ts';
+import { deleteGroup, getChildGroups, getGroupBreadcrumb } from './groups.ts';
 import {
   archiveProcess,
   getArchiveState,
+  getGroupDocuments,
   getProcess,
   getVariationSet,
   listProcesses,
@@ -29,6 +30,15 @@ import type { ProcessRevisionStateId } from './types.ts';
 
 export type Operation =
   | { op: 'groups.tree'; parentUniqueId: string | null }
+  /** Titles from the top level down to this group. */
+  | { op: 'group.breadcrumb'; groupUniqueId: string }
+  /** Documents in one group, which block its deletion. */
+  | { op: 'group.documents'; groupUniqueId: string }
+  /**
+   * Delete one group. The server does not refuse a group holding archived processes
+   * (spike S1), so the checks are the caller's; this only ever names one group.
+   */
+  | { op: 'group.delete'; groupUniqueId: string }
   | { op: 'process.summary'; processUniqueId: string }
   | { op: 'processes.list'; page: number; listType: number }
   /** The variation set a process belongs to, and every sibling in it. */
@@ -53,6 +63,9 @@ export type OperationName = Operation['op'];
 
 export const OPERATION_NAMES: readonly OperationName[] = [
   'groups.tree',
+  'group.breadcrumb',
+  'group.documents',
+  'group.delete',
   'process.summary',
   'processes.list',
   'process.variationSet',
@@ -65,7 +78,11 @@ export const OPERATION_NAMES: readonly OperationName[] = [
  * Operations that change something on the tenant, asserted in tests, so adding a write
  * is a visible decision rather than a side effect of adding a case to the switch below.
  */
-export const WRITE_OPERATIONS: readonly OperationName[] = ['process.archive', 'process.publishNow'];
+export const WRITE_OPERATIONS: readonly OperationName[] = [
+  'process.archive',
+  'process.publishNow',
+  'group.delete',
+];
 
 /**
  * Compact view of a process: everything a planner needs and nothing else. Returning
@@ -87,6 +104,16 @@ export async function execute(ctx: PmContext, operation: Operation): Promise<unk
   switch (operation.op) {
     case 'groups.tree':
       return getChildGroups(ctx, operation.parentUniqueId);
+
+    case 'group.breadcrumb':
+      return getGroupBreadcrumb(ctx, operation.groupUniqueId);
+
+    case 'group.documents':
+      return getGroupDocuments(ctx, operation.groupUniqueId);
+
+    case 'group.delete':
+      await deleteGroup(ctx, operation.groupUniqueId);
+      return { deleted: true };
 
     case 'process.summary':
       return summarise(ctx, operation.processUniqueId);
@@ -156,6 +183,14 @@ export function parseOperation(input: unknown): ParseResult {
         return { ok: false, error: `${op}: "parentUniqueId" must be a string or null.` };
       }
       return { ok: true, operation: { op, parentUniqueId } };
+    }
+
+    case 'group.breadcrumb':
+    case 'group.documents':
+    case 'group.delete': {
+      const groupUniqueId = singleId(body, op, 'groupUniqueId', ['groupUniqueId']);
+      if (typeof groupUniqueId !== 'string') return groupUniqueId;
+      return { ok: true, operation: { op, groupUniqueId } };
     }
 
     case 'process.summary': {
@@ -241,13 +276,23 @@ function singleProcessId(
   op: string,
   allowed: readonly string[],
 ): string | { ok: false; error: string } {
+  return singleId(body, op, 'processUniqueId', allowed);
+}
+
+/** The same rule for whichever field names the one object. */
+function singleId(
+  body: Record<string, unknown>,
+  op: string,
+  field: string,
+  allowed: readonly string[],
+): string | { ok: false; error: string } {
   const extra = Object.keys(body).filter((key) => key !== 'op' && !allowed.includes(key));
   if (extra.length > 0) {
     return { ok: false, error: `${op}: unexpected field${extra.length === 1 ? '' : 's'} ${extra.map((k) => `"${k}"`).join(', ')}.` };
   }
-  const value = body['processUniqueId'];
+  const value = body[field];
   if (typeof value !== 'string' || !GUID.test(value)) {
-    return { ok: false, error: `${op}: "processUniqueId" must be exactly one process id.` };
+    return { ok: false, error: `${op}: "${field}" must be exactly one id.` };
   }
   return value;
 }

@@ -46,13 +46,22 @@ import {
   type SessionInfo,
 } from '@/lib/ui/gateway.ts';
 import { TreeBrowser, useBrowseTree } from '../components/TreeBrowser.tsx';
+import { CleanupPanel } from './CleanupPanel.tsx';
+import type { ProcessIndex } from '@/lib/tenant/state.ts';
 
 type Stage =
   | { kind: 'select' }
   | { kind: 'planning'; progress: string }
   | { kind: 'plan'; plan: ArchivePlan }
   | { kind: 'running'; plan: ArchivePlan; progress: string }
-  | { kind: 'done'; rows: ResultRow[]; warning: string | null };
+  | {
+      kind: 'done';
+      plan: ArchivePlan;
+      rows: ResultRow[];
+      warning: string | null;
+      /** The final read, or null when it failed. Cleanup needs it. */
+      after: ProcessIndex | null;
+    };
 
 const NEEDS_ATTENTION: ReadonlySet<string> = new Set(['Blocked', 'Failed', 'Pending', 'Unverified', 'Unreversed']);
 
@@ -205,8 +214,9 @@ function ArchiveFlow({ session, onSignedOut }: { session: SessionInfo; onSignedO
       setStage({ kind: 'running', plan, progress: 'Reading the process lists to confirm every outcome…' });
       let rows = draft;
       let warning = controls.stoppedReason();
+      let after: ProcessIndex | null = null;
       try {
-        const after = await loadProcessIndex(gateway.processesList);
+        after = await loadProcessIndex(gateway.processesList);
         rows = [
           ...settleFromFinalRead(draft, after),
           ...collateralRows(
@@ -225,7 +235,7 @@ function ArchiveFlow({ session, onSignedOut }: { session: SessionInfo; onSignedO
 
       journal.discard();
       setInterrupted([]);
-      setStage({ kind: 'done', rows, warning });
+      setStage({ kind: 'done', plan, rows, warning, after });
     } catch (cause) {
       fail(cause);
       setStage({ kind: 'plan', plan });
@@ -325,7 +335,28 @@ function ArchiveFlow({ session, onSignedOut }: { session: SessionInfo; onSignedO
       )}
 
       {stage.kind === 'done' && (
-        <ResultsView rows={stage.rows} warning={stage.warning} siteUrl={session.siteUrl} onStartOver={startOver} />
+        <>
+          <ResultsView rows={stage.rows} warning={stage.warning} siteUrl={session.siteUrl} onStartOver={startOver} />
+          {stage.after !== null && !stage.warning ? (
+            <CleanupPanel
+              tenant={session.tenant}
+              groups={stage.plan.groups}
+              index={stage.after}
+              onError={handleError}
+              onRows={(extra) => setStage({ ...stage, rows: [...stage.rows, ...extra] })}
+            />
+          ) : (
+            stage.plan.groups.length > 0 && (
+              <div className="panel">
+                <h2>4. Delete the groups this left empty</h2>
+                <p>
+                  Not offered, because the run did not finish cleanly or could not be re-read. Archive
+                  again to get a confirmed result first.
+                </p>
+              </div>
+            )
+          )}
+        </>
       )}
     </main>
   );
@@ -523,7 +554,7 @@ function ResultsView({
   siteUrl: string;
   onStartOver: () => void;
 }) {
-  const counts = countByStatus(rows, ARCHIVE_STATUSES);
+  const counts = countByStatus(rows, [...ARCHIVE_STATUSES, 'Orphaned']);
   const attention = rows.filter((r) => NEEDS_ATTENTION.has(r.status));
   const blocked = rows.filter((r) => r.status === 'Blocked');
 

@@ -25,6 +25,18 @@ export interface ResolvedProcess {
   variationSetId: number | null;
 }
 
+/** A group the selection covers: checked itself, or inside a checked group. */
+export interface CoveredGroup {
+  uniqueId: string;
+  id: number;
+  title: string;
+  parentUniqueId: string | null;
+  /** Titles of the groups above it, top first. */
+  path: string[];
+  /** 0 at the top level. */
+  depth: number;
+}
+
 export interface ExcludedItem {
   uniqueId: string;
   title: string;
@@ -34,7 +46,13 @@ export interface ExcludedItem {
 }
 
 export type Resolution =
-  | { status: 'complete'; processes: ResolvedProcess[]; excluded: ExcludedItem[] }
+  | {
+      status: 'complete';
+      processes: ResolvedProcess[];
+      excluded: ExcludedItem[];
+      /** Parents before children. Folder cleanup after Archive picks from these. */
+      groups: CoveredGroup[];
+    }
   /** Group ids whose children must be read before the selection can be resolved. */
   | { status: 'incomplete'; unloaded: string[] };
 
@@ -58,12 +76,24 @@ export function resolveSelection(tree: BrowseTree, selection: Selection): Resolu
   const processes: ResolvedProcess[] = [];
   const excluded: ExcludedItem[] = [];
   const unloaded: string[] = [];
+  const groups: CoveredGroup[] = [];
   /** First placement of each process, so a second appearance can say where the first was. */
   const seen = new Map<string, string[]>();
 
   const visit = (node: BrowseNode): void => {
     if (node.kind === 'group') {
       if (!includesAnythingBelow(tree, selection, node)) return;
+      if (effectiveMark(tree, selection, node) === 'include') {
+        const path = groupPathOf(tree, node);
+        groups.push({
+          uniqueId: node.uniqueId,
+          id: node.id,
+          title: node.title,
+          parentUniqueId: node.parentUniqueId,
+          path,
+          depth: path.length,
+        });
+      }
       if (!node.childrenLoaded) {
         // Even when the server says hasChild is false: that flag has not been shown to
         // count processes as well as subgroups, and reading one empty level is cheap.
@@ -130,7 +160,7 @@ export function resolveSelection(tree: BrowseTree, selection: Selection): Resolu
   for (const root of childrenOf(tree, null)) visit(root);
 
   if (unloaded.length > 0) return { status: 'incomplete', unloaded };
-  return { status: 'complete', processes, excluded };
+  return { status: 'complete', processes, excluded, groups };
 }
 
 /** A pathological depth guard. Each pass loads at least one more level. */

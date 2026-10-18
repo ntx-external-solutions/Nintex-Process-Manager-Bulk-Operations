@@ -15,9 +15,9 @@
  *    the view says how many rows did not report it, so "no orphans" is never claimed by
  *    a listing that could not have shown any.
  *
- * Which listing fields give the original group's full path is spike S3. Until it
- * answers, a bucket is labelled with the group's path from the tree when the tree has
- * been read that far, and with the listing's `groupName` otherwise.
+ * Rows carry only the immediate group (spike S3), so a bucket's label comes from the
+ * breadcrumb endpoint (`loadGroupPaths`), one call per distinct group, falling back to
+ * the listing's `groupName` when the path cannot be read.
  */
 
 import type { ProcessListItem, ProcessListPage } from '../pm/processes.ts';
@@ -167,4 +167,47 @@ export async function loadArchived(
   }
 
   return [...byId.values()];
+}
+
+/**
+ * Full paths for the groups the archived view shows, one breadcrumb call per distinct
+ * group (spike S3: 47 groups in about 4 seconds). A group whose path cannot be read, or
+ * comes back empty (as a deleted group's sometimes does), is left out and keeps the
+ * listing's own `groupName` as its label.
+ */
+export async function loadGroupPaths(
+  groupUniqueIds: readonly string[],
+  breadcrumb: (groupUniqueId: string) => Promise<string[]>,
+  options: { concurrency?: number; isFatal?: (error: unknown) => string | null } = {},
+): Promise<Map<string, string[]>> {
+  const concurrency = Math.max(1, options.concurrency ?? 4);
+  const unique = [...new Set(groupUniqueIds)];
+  const paths = new Map<string, string[]>();
+
+  for (let i = 0; i < unique.length; i += concurrency) {
+    const batch = unique.slice(i, i + concurrency);
+    await Promise.all(
+      batch.map(async (id) => {
+        try {
+          const path = await breadcrumb(id);
+          if (path.length > 0) paths.set(id, path);
+        } catch (error) {
+          if (options.isFatal?.(error)) throw error;
+        }
+      }),
+    );
+  }
+
+  return paths;
+}
+
+/** The live groups an archived view needs paths for. Orphans have no group to name. */
+export function groupsNeedingPaths(processes: readonly ArchivedProcess[]): string[] {
+  return [
+    ...new Set(
+      processes
+        .filter((p) => p.groupExists && p.groupUniqueId !== null)
+        .map((p) => p.groupUniqueId as string),
+    ),
+  ];
 }

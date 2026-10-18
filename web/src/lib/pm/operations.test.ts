@@ -92,13 +92,31 @@ test('there is no way to name a URL', () => {
   }
 });
 
-test('the only writes are archive and the approval override', () => {
+test('the only writes are archive, the approval override and deleting a group', () => {
   // Adding a write has to be a decision made here, not a side effect of a new case.
-  assert.deepEqual([...WRITE_OPERATIONS].sort(), ['process.archive', 'process.publishNow']);
+  assert.deepEqual([...WRITE_OPERATIONS].sort(), ['group.delete', 'process.archive', 'process.publishNow']);
+});
+
+test('each group operation accepts exactly one group id and nothing else', () => {
+  for (const op of ['group.delete', 'group.documents', 'group.breadcrumb']) {
+    assert.ok(parseOperation({ op, groupUniqueId: PROCESS }).ok, op);
+    for (const bad of [[PROCESS], `${PROCESS},${PROCESS}`, 'not-a-guid', null]) {
+      assert.equal(parseOperation({ op, groupUniqueId: bad }).ok, false, `${op} ${JSON.stringify(bad)}`);
+    }
+    assert.equal(parseOperation({ op, groupUniqueId: PROCESS, groupUniqueIds: [PROCESS] }).ok, false);
+    assert.equal(parseOperation({ op, groupUniqueId: PROCESS, includeSubgroups: true }).ok, false);
+  }
+});
+
+test('deleting a group posts only its id', async () => {
+  const h = harness([undefined]);
+  assert.deepEqual(await execute(h.ctx, { op: 'group.delete', groupUniqueId: PROCESS }), { deleted: true });
+  assert.match(h.calls[0]!.url, /\/Process\/Edit\/DeleteGroup$/);
+  assert.equal(h.calls[0]!.body, `{"processGroupUniqueId":"${PROCESS}"}`);
 });
 
 test('no delete, restore, move or update operation can be named yet', () => {
-  for (const op of ['process.delete', 'process.restore', 'process.update', 'groups.delete', 'groups.move', 'process.publish']) {
+  for (const op of ['process.delete', 'process.restore', 'process.update', 'groups.delete', 'groups.move', 'group.move', 'process.publish']) {
     const result = parseOperation({ op, processUniqueId: PROCESS, uniqueId: PROCESS });
     assert.equal(result.ok, false, op);
   }
