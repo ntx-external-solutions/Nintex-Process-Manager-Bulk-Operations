@@ -59,12 +59,21 @@ export interface ArchivePlan {
 
 export const VARIATION_SEPARATOR = '::';
 
+/** A name match, with what the delete engine's warning orders by (delete/collateral.ts). */
+export interface NameVariationMatch extends VariationMatch {
+  /** The target's name before the separator. */
+  baseName: string;
+  /** So a master in the target's own group can be listed first. */
+  targetGroupId: number | null;
+}
+
 /** Ported from `Find-VariationMaster`. Names are not unique, so every match is reported. */
 export function findVariationMasters(
-  index: ProcessIndex,
+  index: ProcessIndex | null,
   targets: readonly { uniqueId: string; name: string }[],
   separator: string = VARIATION_SEPARATOR,
-): VariationMatch[] {
+): NameVariationMatch[] {
+  if (!index) return [];
   const targetIds = new Set(targets.map((t) => t.uniqueId.toLowerCase()));
   const byName = new Map<string, Array<{ uniqueId: string; name: string; groupId: number | null; isArchived: boolean }>>();
   for (const entry of index.values()) {
@@ -75,9 +84,10 @@ export function findVariationMasters(
     byName.set(key, list);
   }
 
-  const found: VariationMatch[] = [];
+  const found: NameVariationMatch[] = [];
   for (const target of targets) {
-    const name = indexEntry(index, target.uniqueId)?.name || target.name;
+    const entry = indexEntry(index, target.uniqueId);
+    const name = entry?.name || target.name;
     const at = name.indexOf(separator);
     if (at < 1) continue;
     const base = name.slice(0, at).trim();
@@ -94,6 +104,8 @@ export function findVariationMasters(
         relativeGroupId: master.groupId,
         relativeIsArchived: master.isArchived,
         signal: 'name',
+        baseName: base,
+        targetGroupId: entry?.groupId ?? null,
       });
     }
   }

@@ -25,7 +25,7 @@ import { buildUpdateEnvelope } from '../pm/processes.ts';
 import type { ProcessActions } from '../pm/types.ts';
 import { chooseWritePath, isWritePath, writeStateOf, type WriteRefusal } from '../pm/writePath.ts';
 import type { ProcessIndex } from '../tenant/state.ts';
-import type { CollateralChange, CollateralGateway } from './collateral.ts';
+import type { CollateralGate, CollateralGateway } from './collateral.ts';
 import type { DeleteEventSink } from './events.ts';
 import type { DeleteGateway } from './gateway.ts';
 import type { DependencyPlan } from './ledger.ts';
@@ -330,11 +330,7 @@ export async function removePlanReferences(
   return { results, verificationFailed };
 }
 
-/**
- * The collateral gate: true carries on to the delete, false stops before it. The script's
- * `-OnCollateral` scriptblock. No gate means stop.
- */
-export type CollateralGate = (collateral: readonly CollateralChange[], phase: string) => boolean | Promise<boolean>;
+export type { CollateralGate } from './collateral.ts';
 
 export interface TargetDeletionOptions extends EngineOptions {
   /** The whole tenant before the run. Without it neither checkpoint runs, as in the script. */
@@ -443,7 +439,9 @@ export function collateralGateway(gateway: DeleteGateway, options: EngineOptions
   };
   return {
     restore: async (uniqueId, groupId, destinationGroupExists) => {
-      const outcome = await restoreProcess(gateway, uniqueId, groupId, { destinationGroupExists });
+      // A dead session ends the reversal as it ends everything else, rather than reading
+      // as a refused restore.
+      const outcome = await restoreProcess(gateway, uniqueId, groupId, { destinationGroupExists, isFatal: options.isFatal });
       return { ok: outcome.ok, statusCode: outcome.statusCode > 0 ? outcome.statusCode : null };
     },
     archive: async (uniqueId, comment) => {

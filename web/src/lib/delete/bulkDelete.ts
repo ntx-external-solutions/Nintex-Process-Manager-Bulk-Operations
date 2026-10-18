@@ -22,7 +22,7 @@
  * answers the way `-Force` did, by stopping.
  */
 
-import type { ResultRow } from '../exec/report.ts';
+import { UNKNOWN_NAME, type ResultRow } from '../exec/report.ts';
 import type { Reconciliation } from './claims.ts';
 import type { VariationWarning } from './collateral.ts';
 import type { DeleteEventSink } from './events.ts';
@@ -63,15 +63,7 @@ export interface DeleteDecisions {
   confirmDelete?: Decision<number> | undefined;
 }
 
-/**
- * Who let a collateral change through, for its `Accepted` row. The file distinguishes an
- * approval given in advance, on the preview, from one given at the gate with the list on
- * screen, as the script's distinguishes `-AcceptCollateral` from a typed YES.
- */
-export const ACCEPTANCE_AUTHORITY = {
-  inAdvance: 'accepted in advance on the preview',
-  atGate: 'accepted at the on-screen confirmation',
-} as const;
+export { ACCEPTANCE_AUTHORITY } from './collateral.ts';
 
 export interface BulkDeleteOptions extends EngineOptions {
   siteUrl: string;
@@ -95,6 +87,25 @@ export interface BulkDeleteOptions extends EngineOptions {
   decisions?: DeleteDecisions | undefined;
   onEvent?: DeleteEventSink | undefined;
   now?: (() => Date) | undefined;
+}
+
+/**
+ * Why a real run must not start on this plan, or null when it may. A `PlannedIncomplete`
+ * plan stops the run with no override (Cowork's review of phase 4): an unread scan batch
+ * means an archived holder's Input or Output to a target is unknown, and deleting past it
+ * is how a reference is left dangling. The message names every unread process.
+ * `runBulkDelete` (ported with the unwind) calls this before its first change.
+ */
+export function incompletePlanStop(plan: Pick<DependencyPlan, 'status' | 'unreadByScan' | 'incompleteReasons'>): string | null {
+  if (plan.status !== 'PlannedIncomplete') return null;
+  const parts = ['This plan is incomplete, so the run stops before changing anything.'];
+  parts.push(...(plan.incompleteReasons ?? ['It was built as a preview, which does not restore archived processes.']));
+  const unread = plan.unreadByScan ?? [];
+  if (unread.length > 0) {
+    const named = unread.map((u) => `${u.name || UNKNOWN_NAME} (${u.uniqueId}${u.status > 0 ? `, HTTP ${u.status}` : ''})`);
+    parts.push(`Not read: ${named.join('; ')}.`, 'Build the plan again once they can be read.');
+  }
+  return parts.join(' ');
 }
 
 export interface BulkDeleteRun {
