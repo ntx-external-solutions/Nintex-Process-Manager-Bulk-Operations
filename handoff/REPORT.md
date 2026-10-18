@@ -6,6 +6,77 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## W2b. Folder cleanup after Archive
+
+Commit `3026aa3` on `claude/web-w2b-cleanup`, stacked on W2.
+
+**What changed.**
+
+- `select/resolve.ts`: a complete resolution now also returns `groups`, every group the
+  selection covers (checked itself or inside a checked group), with path and depth. The
+  archive plan carries them as the cleanup candidates.
+- `cleanup/plan.ts`: `planCleanup` decides deepest first. A group is **kept** if it
+  still holds an active process, a shortcut, a document group or an unmeasured item; if
+  it holds a subgroup that is kept (including one the selection didn't cover); if it
+  holds any document; or if its contents or documents couldn't be read. Otherwise it is
+  deleted, carrying the archived processes that will lose it.
+- `cleanup/facts.ts`: `gatherFacts` reads each candidate's tree level and documents.
+  Archived processes come from the archive run's final index, filtered by
+  `groupUniqueId`.
+- `cleanup/run.ts`: `runCleanup` deletes one at a time, deepest first, and **re-reads
+  each group just before its delete**. Children this run already deleted are ignored, so
+  a parent isn't blocked by a stale entry. `settleCleanup` settles every group row from
+  a fresh read of the parent level, the same rule as archive.
+- `pm/groups.ts`: `deleteGroup`, `readAssociatedContents` (parses the 409),
+  `getGroupBreadcrumb` / `breadcrumbTitles`. `pm/processes.ts`: `getGroupDocuments`
+  (`ListType=All`, `ProcessGroupId`).
+- Proxy: `group.delete` (write), `group.documents` and `group.breadcrumb` (reads), each
+  taking exactly one group GUID and no other field. `WRITE_OPERATIONS` is now archive,
+  publishNow and group.delete.
+- `select/archived.ts`: `loadGroupPaths` and `groupsNeedingPaths` for breadcrumb bucket
+  labels. **Not wired to a screen yet**, because the archived view's only consumer is
+  Bulk Delete (W6). The helper and the read are tested.
+- `/archive`: step 4 appears under the results only when the run finished cleanly and
+  the final read succeeded. It checks, shows what would be deleted with every archived
+  process that becomes unrestorable, needs its own checkbox, and appends its rows to the
+  same results file.
+
+**Results-file operations.** `DeleteGroup` rows with `ObjectType: ProcessGroup` (the
+script's spelling, from `Remove-HoldingGroup`): `Success` (deleted), `Skipped` (kept,
+message starts "Kept." with the reason), `Blocked` (409, naming the documents), `Failed`.
+**`GroupDeleted`/`Orphaned`**: one row per archived process a deleted group leaves
+without a home, so every process the run changed has a row. I changed the report's
+`ObjectType` from `Group` to `ProcessGroup` to match the script.
+
+**Tests.** 220 tests, 220 pass (23 new). The five cases the task names are all
+covered: a group that deletes, one kept for a document, one kept for an active process,
+a 409 from the tenant (Blocked, document names, sent once, no orphan rows), and nested
+groups deleted deepest first. Also covered: a kept subgroup keeps every ancestor, a
+shortcut keeps its group, unreadable facts keep the group, a group that gained an item
+since the preview is kept, a dead session stops the step, and the final read overrules
+the calls in both directions.
+
+**End-to-end, offline.** The same mock and headless Chrome run, extended: after the
+archive, Retired (emptied) was deleted, Forms was kept for its document, Payables for
+the process the tenant refused, and Finance because its subgroups were kept. One
+`DeleteGroup` was sent.
+
+**Decisions Cowork should check.**
+
+- **The breadcrumb response shape was not recorded** beyond "root first, group last".
+  `breadcrumbTitles` accepts an array or `{items|breadcrumbs|data|breadcrumb}`, takes
+  `name`/`title`/`Name`/`Title`/`text`, and drops the first entry as the tenant. A
+  captured response would let me pin it.
+- `group.documents` uses `ListType=All`, from the task. The API notes only show
+  `ListType=Archived`. If `All` isn't valid, the read fails and every group is kept,
+  which is safe but would make cleanup useless. Worth one call to confirm.
+- A shortcut (`linked-process`) in a group keeps it. Nobody has measured what
+  `DeleteGroup` does to a shortcut, and deleting through one is the risk W1 avoided.
+- Cleanup isn't offered when the archive stopped early or its final read failed. The
+  candidates and orphan lists both come from that read.
+
+---
+
 ## W2. Bulk Archive
 
 Commits `2f9832a`, then two follow-ups for requirements added while W2 was in flight:

@@ -115,7 +115,7 @@ and a call that reports failure but took effect.
 
 ## W2b. Folder cleanup after Archive
 
-Status: Ready (after W2)
+Status: Done (3026aa3)
 
 After an archive run finishes and is re-read, offer to delete the groups it left behind.
 S1 measured the API: `DeleteGroup` deletes a group holding archived processes (they
