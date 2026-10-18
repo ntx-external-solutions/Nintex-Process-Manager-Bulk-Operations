@@ -13,8 +13,15 @@ Maintained by the Cowork session. Claude Code reads this but does not edit it.
 - R12 (live, 18 Oct evening) passed: Archive, folder cleanup and Move all matched the
   tenant. Fixes are in F2 (dead-session handling, picker layout, move result wording).
   All R12 test content was removed; tenant back to 13 top-level groups, 463 archived.
-- Next for Cowork: check W4 against the tenant when it lands, then review W5 phase by
-  phase against the PowerShell.
+- F2 verified live (18 Oct, after PR #55): the picker lays out correctly (radio 13px);
+  move results carry the version ("Published as 2.0.", "Now at 0.3, in progress and not
+  published."), matching the tenant; a plain published process was republished as the
+  preview said; an archive and cleanup under a valid session had no false sign-outs on
+  the endpoints that now treat a redirect as a dead session. The dead-session path
+  itself was not reproduced live (no way to kill a token from outside); it rests on the
+  offline tests and `web/dev/drive-expired.mjs`.
+- Next for Cowork: test W4 (ownership) live, which needs a SCIM key from JB, then review
+  W5 phase by phase against the PowerShell.
 - Spikes S1 to S3 and the variation test are in `API_ARCHITECTURE.md`. One lasting change
   on the tenant: "SOC 2 Submission Review" and its Partner variation are published at 3.0.
 - Restricting sign-in to known Process Manager hosts is deferred by JB.
