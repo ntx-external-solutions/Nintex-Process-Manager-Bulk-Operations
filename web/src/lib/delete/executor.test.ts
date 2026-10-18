@@ -168,7 +168,7 @@ test('both active: one save per holder, and nothing else in it is lost', async (
   assert.equal(dig(after, ...notePath), dig(holder, ...notePath), 'the orphaned note keeps its text');
 });
 
-test('both active: the target is deleted', { skip: PHASE.delete }, async () => {
+test('both active: the target is deleted', async () => {
   const { tenant, target } = capturedTenant();
   const index = await loadDeleteIndex(tenant);
   const p = await plan(tenant, { targetUniqueIds: [target.UniqueId], index, holdingGroupId: 999, allowRestore: true });

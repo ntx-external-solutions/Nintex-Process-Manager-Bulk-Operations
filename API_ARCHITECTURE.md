@@ -1361,7 +1361,7 @@ archive is `POST /bff/document/api/v1/documents/{id}/archive` with `{}` (204); p
 delete is `DELETE /bff/document/api/v1/documents/bulk` with `{"documentIds":[id]}` (200,
 `{"errors":[]}`).
 
-After deletion, the breadcrumb for the deleted group returned an empty chain. Group 832
+After deletion, the breadcrumb for the deleted group returned an empty chain. The R3 holding group
 (deleted after round 3) still resolves, so a deleted group's path is sometimes
 recoverable and sometimes not. Don't rely on it.
 
@@ -1397,7 +1397,7 @@ Full walk: 114 requests, about 18 seconds, skipping groups with `hasChild: false
 `suggested-process` 2. No `documentgroup`, `vanillaprocess` or `embeddedprocess`.
 
 **`linked-process` is a shortcut.** Each one carries the same `uniqueId` as a process
-homed in another group (for example "Example Process Name" is `inprogress-process` in its
+homed in another group (for example, one process is `inprogress-process` in its
 home and `linked-process` under two other groups). Acting on it acts on the home process.
 
 13 items carry a `variationSetId`, as `inprogress-process` or `process`.
@@ -1438,18 +1438,18 @@ variationSetData:
   IsVariationSetInDraftState
 ```
 
-Measured on set 38 ("SOC 2 Submission Review", variations Internal and Partner):
+Measured on one variation set with two variations, called A and B here:
 
-- **The tree shows one node per set.** The Partner sibling is not in
+- **The tree shows one node per set.** Sibling B is not in
   `GetChildProcessGroupTreeItems` at all. The active index lists it as
   `"<name> :: <variation>"` in the same group. Both records had the same home group;
   "each variation in its own group" (above) is not true of this set.
 - **Moving the node moves the whole set.** Both records changed home group, and
   `variationSetData.Group` followed.
-- **The move published an unpublished draft.** Internal was in progress at v1.1 over a
-  published version. `ValidateProcessAction` warned: "'SOC 2 Submission Review' which has
+- **The move published an unpublished draft.** A was in progress at v1.1 over a
+  published version. `ValidateProcessAction` warned: "'<process name>' which has
   outstanding changes, for this change to take effect all other outstanding changes will
-  also be published". After the move Internal was published at 2.0 and Partner went
+  also be published". After the move A was published at 2.0 and B went
   1.0 to 2.0. Moving back made both 3.0. The draft's edits are now live; that was not
   reversible from the API.
 
@@ -1467,7 +1467,7 @@ each returned `[]` first.
 ### Why links reconcile as "claimed 2, located 1" (18 Oct 2026)
 
 Measured on the W5 phase 2 dry run of the first 20 archived processes, which reproduced
-R11's 24 reconciliation mismatches. For the target "Carry out interviews" the dependency
+R11's 24 reconciliation mismatches. For one target the dependency
 check lists each of its four linked processes **twice** (8 entries, 4 distinct ids). The
 three holders' models were read in full: each references the target **exactly once**
 (`ProcessProcedures.ProcessLink[1].LinkedProcessUniqueId`), and the target references none

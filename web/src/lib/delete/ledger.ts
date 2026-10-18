@@ -302,6 +302,20 @@ export interface UnreadProcess {
   error: string;
 }
 
+/**
+ * A holder with an open draft over a published version, as planning read it. Removing its
+ * references would publish the draft, so the run refuses it unless the operator ticks it,
+ * and the targets it holds are left out of the delete (Cowork's review of W5 phase 5).
+ */
+export interface DraftHolder {
+  holderUniqueId: string;
+  name: string;
+  /** The draft's version, for example 2.1. */
+  version: string;
+  /** The targets it holds a reference to, which an unticked holder keeps from deletion. */
+  targetsBlocked: string[];
+}
+
 /** The plan file. Port of `New-DependencyPlan`'s object. */
 export interface DependencyPlan {
   schemaVersion: 1;
@@ -333,6 +347,11 @@ export interface DependencyPlan {
   unreadByScan?: UnreadProcess[];
   /** Why a `PlannedIncomplete` plan is incomplete, one sentence each. Absent: a preview. */
   incompleteReasons?: string[];
+  /**
+   * Holders with an open draft when the plan was read. The run decides again from its own
+   * read; this is what the preview asks the operator about. Absent in older plan files.
+   */
+  draftHolders?: DraftHolder[];
 }
 
 /** An empty `Draft` plan. Port of `New-DependencyPlan`. */

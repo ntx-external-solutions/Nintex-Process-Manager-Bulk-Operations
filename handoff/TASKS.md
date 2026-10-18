@@ -36,9 +36,9 @@ From your "Decisions Cowork should check" notes, using what the spikes recorded:
   ```json
   {"isChildren": false,
    "breadcrumbItems": [
-     {"id": "<tenant root uuid>", "parentId": null, "name": "Promapp Demo Ltd.",
+     {"id": "<tenant root uuid>", "parentId": null, "name": "<tenant name>",
       "position": 1, "type": "ProcessGroup", "url": "https://.../Process/Group/<uuid>", "version": null},
-     {"id": "<group uuid>", "parentId": null, "name": "Library & History Services",
+     {"id": "<group uuid>", "parentId": null, "name": "<group name>",
       "position": 2, "type": "ProcessGroup", "url": "...", "version": null}]}
   ```
 
@@ -250,8 +250,35 @@ results row (report: project doc `claude/bulk-ops-r12-2026-10-18.md`). Three fix
 
 ## W5. Bulk Delete engine
 
-Status: Ready. Phases 1 to 4 done and **reviewed by Cowork**; phase 5 (checkpoints, with
-the two fixes below) done in 1292481 and ac465d1; stopped for review before delete
+Status: Ready. Phases 1 to 5 done and **reviewed by Cowork**; phase 6 (delete, with the
+two phase 5 follow-ups) done in 69c657c; stopped for review before unwind
+
+### Cowork's review of phase 5 (18 Oct)
+
+Approved. Live dry run on R11's set after PR #66: **0 blocking mismatches**, 1 over-claim, 20
+double-counted links, 3 pairs `MatchAcrossCategories`, nothing unread by the scan. That is
+exactly what Cowork's raw-model check predicted (24 = 20 + 1 + 3; the 21st doubled pair
+now clears across categories, as it should).
+
+- **Small:** the summary doesn't say how many pairs reconciled across categories (your
+  report says a count line covers them; it isn't on the page). Add it.
+- **A holder with an open draft: refuse by default, opt in per holder.** Saving the
+  removal into the draft leaves the reference in the published version, so the delete
+  either fails or leaves a dangling link. Publishing silently puts someone else's draft
+  live, which S2 showed is easy to do by accident and can't be undone. So treat it like
+  Move's "Tick to move":
+  - in the plan, list holders with an open draft under their own heading, with the
+    target each one blocks;
+  - unticked (the default), the holder's row is Failed before any save, "has an
+    unpublished draft; removing the reference would publish it", and its targets are left
+    out of the delete with that reason;
+  - ticked, save and publish, and say in the row that the draft went live.
+  The live test will also measure whether the tenant refuses a delete when only the draft
+  is clean, in case "save the draft only" turns out to be enough.
+- **Editing over a revision awaiting approval:** fine as specified. It's unmeasured on an
+  edit, so it's on the live test list.
+- **`writeStateOf`'s version fallback, refusals as Failed rows that stop at verification,
+  not reversing a pure move, one stop message:** all agreed.
 
 ### Cowork's live check after phase 4 deployed (18 Oct)
 
@@ -264,7 +291,7 @@ Cause: `reconcileDependencies` counts Input/Output sites per category only where
 **queried** process is the holder (`claims.ts` line 223, the R2 scoping rule, which is right
 per category). The pair-level total is the sum of those per-category counts, so an Input
 held by the **related** process is never counted. In both pairs, the related process
-(`Create sales order :: AMER`, `Example Process Name`) holds `Inputs.Input[0]` from the
+(an archived variation record in one pair, an active process in the other) holds `Inputs.Input[0]` from the
 target, and the plan does have that site.
 
 Fix at the start of phase 5, with the publish-path fix below: the pair-level located total
@@ -318,7 +345,7 @@ nothing unread by the scan.
 ### Cowork's live check after phase 3 deployed (18 Oct)
 
 The dry run on R11's set shows exactly what it should: 21 double-counted, 3 mismatches, 11
-holders with no group (groups 227, 646, 647, 686, as R11 hit), 4 orphaned targets. Two
+holders with no group (in the same four deleted groups R11 hit), 4 orphaned targets. Two
 things for phase 4, both in `API_ARCHITECTURE.md`:
 
 - **Bug, fix first: the archived batch read takes at most 20 ids.** The tenant answers

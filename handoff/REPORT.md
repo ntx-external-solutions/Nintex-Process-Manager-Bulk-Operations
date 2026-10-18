@@ -6,6 +6,96 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## W5 phase 6. Delete
+
+Commit `69c657c` on `claude/web-w5-6-delete`, branched from `claude/main` after PR #66. I stopped after this PR, as the task asks.
+
+**What changed.**
+
+- **Reconciled-across-categories count (review follow-up).**
+  - The line was there, but it was a sentence below every other section, and it counted reconciliation rows, not pairs.
+  - `planSummaryLines` (`planner.ts`) now has a count line straight after the totals: "Reconciliation: N blocking mismatch(es), N claimed more than found, N link(s) counted twice, N pair(s) reconciled across categories".
+  - The detail line is now a heading, `PAIRS RECONCILED ACROSS CATEGORIES (N)`, and counts distinct pairs.
+  - On R11's set it should read 3 pairs.
+- **Holders with an open draft: refused by default, published only when ticked (review follow-up).**
+  - `pm/writePath.ts`:
+    - `WriteState` gains `publishedVersionExists`. `writeStateOf` sets it from `Version`, using Move's F1 rule: a major version of 1 or more; 0.x was never published.
+    - `chooseWritePath` takes `openDraft: 'save-only' | 'refuse' | 'publish'`. The default `save-only` is ownership's rule, so ownership is unchanged.
+    - New refusal `open-draft`. Ownership's message table has an entry for it, though ownership never reaches it.
+    - A 0.x process in progress is always save-only, since nothing live holds the reference. An unknown version counts as published.
+  - `saveProcessModel` (`executor.ts`):
+    - New option `publishOpenDraft`. It passes `refuse` unless that option is set.
+    - `SaveOutcome` gains `refusal` and `draftPublished`.
+  - `removePlanReferences`:
+    - New option `publishDrafts` (holder ids). The decision comes from the fresh read at edit time, not from the plan.
+    - Unticked: the holder's row is Failed before any save, with "Not saved: It has an unpublished draft; removing the reference would publish it. Its references remain, so the target it holds is left out of the delete. Tick it to publish the draft with the removal."
+    - Its targets are returned in the new `heldBack` list (target, holder, reason).
+    - Verification skips the refused holder, and checks other holders only for targets still being deleted. A known refusal doesn't stop the run.
+    - Ticked: the draft is saved and published, and the row ends "…, Published; its open draft went live with the removal".
+  - Plan: `DependencyPlan.draftHolders` (`DraftHolder`: holder, name, draft version, targets blocked). The planner builds it from the models it read.
+  - The summary lists these holders under `HOLDERS WITH AN UNPUBLISHED DRAFT (N)`, each with the targets it blocks.
+- **Delete phase ported.** `deletePlanTargets` (`executor.ts`) is a port of `Invoke-ProcessTargetDeletion`:
+  1. **Archive pass.** Each target is archived ('Pre-delete archive', `PRE_DELETE_ARCHIVE_COMMENT`) unless the run found it archived and didn't restore it, or it is held back. A failed archive is logged to the plan log with its reason, and the delete still goes ahead, as in the script.
+  2. **Checkpoint, if `tenantBaseline` is given.**
+     - It reads a fresh index (`loadProcessIndex` over `listProcesses`).
+     - Expected ids are the targets plus every ledger row with `restoredByThisRun`. Observed ids are `observedUniqueIds` plus `getObservedUniqueIds()`.
+     - It uses `newCollateral` with `plan.collateral` as already raised, then appends to `plan.collateral` and logs "COLLATERAL after archive phase: …".
+     - The gate is `decideCollateral` with `onCollateral`, and no gate means stop.
+     - On stop it returns the Failed rows ("…; after archiving targets, before deleting; run stopped before anything was deleted") and no Delete row. The script's orchestrator uses "no Delete row" to tell it stopped.
+     - On proceed it writes `Accepted` rows with `acceptanceAuthority`.
+  3. **Delete.** `deleteProcess(id, originalGroupUniqueId || null)` for each target.
+     - Success: the ledger row is marked `deleted` and the row reads "Deleted". Failure: "Delete failed (HTTP n)" with the status. GroupId is the original group.
+     - A held-back target gets a `Delete`/`Skipped` row, "Not deleted: <holder> has an unpublished draft; removing its reference would publish it".
+     - A dead session rethrows.
+  4. **Post-delete checkpoint.** It reads a fresh index, and collects observed ids at that point (W3). For anything new it writes `collateralFailureRows(…, 'detected after deletion')`, then `restoreCollateral` through `collateralGateway`, logged "COLLATERAL after delete phase".
+  - Events: the `archiving-targets`, `checking-collateral`, `deleting-targets`, `checking-collateral-after-delete` and `reversing-collateral` stages; progress counts; `collateral` and `collateralDecision`; a `log` event for each log line.
+
+**Results-file operations.** Two are new to the web app, both the script's: `Delete` (Success / Failed), and `Delete`/`Skipped` for a held-back target, which is new behaviour. `RemoveReferences` has new messages for the refused and the ticked draft holder.
+
+**Functions touched.** `chooseWritePath`, `writeStateOf` (`pm/writePath.ts`); ownership's `REFUSALS`; `saveProcessModel`, `removePlanReferences`, `deletePlanTargets` (`executor.ts`); `buildDeletePlan` (new `draftHoldersOf`) and `planSummaryLines` (`planner.ts`); `DependencyPlan` and the new `DraftHolder` (`ledger.ts`).
+
+**Tests.** 514 tests: 474 pass, 0 fail, 40 skipped (was 495 / 454 / 41). That's 19 new tests and 1 turned on, so +20 passing.
+- **Turned on (1):** "both active: the target is deleted" (`executor.test.ts`). It passed with no changes.
+- **`removal.test.ts`:** "a draft in progress is saved and left unpublished" is replaced by two tests:
+  - a draft over a published version is refused with nothing sent, and when ticked it is published with `draftPublished`;
+  - a 0.x draft is saved only.
+- **New `deletion.test.ts` (18):**
+  - archive-then-delete with the group sent and the ledger marked;
+  - a restored target is archived again;
+  - a refused delete is a Failed row with its status, and the ledger is not marked;
+  - a failed archive is logged and the delete still happens;
+  - a dead session rejects;
+  - collateral with no gate stops with no Delete row;
+  - accepted collateral gets Accepted rows with the given authority and is not raised again after the delete;
+  - an already-raised change is not asked about again;
+  - post-delete collateral is reported as Failed and put back;
+  - a process stranded by the delete is read after the delete (`NotInBaseline`);
+  - a failing holding-group listing is logged;
+  - a held-back target is neither archived nor deleted;
+  - the plan's draft-holder heading;
+  - unticked draft holder: Failed, nothing saved, target survives with a Skipped row;
+  - ticked draft holder: published, and the target is deleted;
+  - a draft opened after planning is still refused;
+  - the write path's draft rules;
+  - the across-categories count line.
+- **Still skipped:** unwind 40.
+
+Typecheck and production build are clean. The offline `drive-delete.mjs` dry run against the mock shows the new count line and sends no writes. I didn't run `Tests/Run-AllTests.ps1`, because the PowerShell is frozen and unchanged, so there's no `$script:ScriptVersion` bump.
+
+**Deliberate differences and things to check.**
+
+- **Draft detection reads the revision state, and the version only to rule out 0.x.** A draft opened since planning is refused at edit time even though the plan didn't list it, and a draft published since planning needs no tick. Only the run's own read counts.
+- **"Unknown version" counts as published.** That's the side that costs nothing if wrong: the row fails and the target survives.
+- **A held-back target isn't archived by the pre-delete pass.** It isn't being deleted, so archiving it would be a change with no purpose. If the run restored it, the unwind puts it back as usual.
+- **A failed holding-group read before the deletes is now logged.** The script dropped it silently at that checkpoint, though it printed one at the post-delete checkpoint.
+- **A failed pre-delete archive goes to the plan log** (and a `log` event), not only the console.
+- **Not done here, deferred to the unwind/orchestrator phase:**
+  - the tick UI itself. The delete page is still dry-run only, so there's nothing to tick yet. `runBulkDelete` will take the ticked holders as `publishDrafts` and pass `heldBack` to `deletePlanTargets`.
+  - adding delete-proxy writes to the allowlist. As before, they stay off until the unwind exists.
+- **For the live test:** whether the tenant refuses a delete when only the draft is clean (Cowork's note), and editing over a revision awaiting approval.
+
+---
+
 ## W5 phase 5. Checkpoints
 
 Commits `1292481` (the two fixes queued at the start of the phase) and `ac465d1` (checkpoints), on `claude/web-w5-5-checkpoints`, branched from `claude/main` after PR #65. I stopped after this PR, as the task asks.

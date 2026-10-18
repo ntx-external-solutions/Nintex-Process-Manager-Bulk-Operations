@@ -13,6 +13,7 @@
 
 import { failureOf } from '../archive/outcome.ts';
 import { defaultIsFatal } from '../exec/runner.ts';
+import { writeStateOf } from '../pm/writePath.ts';
 import { readGroupExists } from '../select/archived.ts';
 import { ACTIVE_LIST_TYPE, ARCHIVED_LIST_TYPE, INDEX_PAGE_SIZE } from '../tenant/state.ts';
 import {
@@ -22,6 +23,7 @@ import {
   reconcileDependencies,
   reconciliationGate,
   type DependencyClaim,
+  type HolderWorkItem,
   type Reconciliation,
 } from './claims.ts';
 import type { DeleteEventSink } from './events.ts';
@@ -31,6 +33,7 @@ import {
   ledgerToPlanRows,
   newDependencyPlan,
   type DependencyPlan,
+  type DraftHolder,
   type FailedTarget,
   type OrphanedHolder,
   type ParticipantRecord,
@@ -619,6 +622,7 @@ export async function buildDeletePlan(gateway: PlanningGateway, options: DeleteP
   plan.claims = allClaims;
   plan.sites = workSites;
   plan.workItems = groupSitesByHolder(workSites);
+  plan.draftHolders = draftHoldersOf(plan.workItems, ledger);
   plan.reconciliation = reconciliation;
   plan.status = 'Planned';
 
@@ -642,6 +646,28 @@ export async function buildDeletePlan(gateway: PlanningGateway, options: DeleteP
     plan.incompleteReasons = reasons;
   }
   return finish();
+}
+
+/**
+ * The holders whose model, as planning read it, is an open draft over a published version.
+ * An archived holder a preview did not restore has no model, so it is not listed; the run
+ * reads every holder again before it edits one.
+ */
+function draftHoldersOf(workItems: readonly HolderWorkItem[], ledger: ReadonlyMap<string, ParticipantRecord>): DraftHolder[] {
+  const drafts: DraftHolder[] = [];
+  for (const item of workItems) {
+    const record = ledger.get(item.holderUniqueId.toLowerCase());
+    if (!record?.model) continue;
+    const state = writeStateOf(record.model, null);
+    if (state.revisionStateId !== 1 || state.publishedVersionExists === false) continue;
+    drafts.push({
+      holderUniqueId: item.holderUniqueId,
+      name: record.name,
+      version: nodeString(record.model, 'Version'),
+      targetsBlocked: [...item.targetsAffected],
+    });
+  }
+  return drafts;
 }
 
 const PREVIEW_INCOMPLETE =
@@ -671,6 +697,19 @@ export function planSummaryLines(plan: DependencyPlan, index: DeleteIndex | null
   lines.push(`Targets to delete: ${plan.targetUniqueIds.length}`);
   lines.push(`Processes to edit: ${plan.workItems.length}`);
   lines.push(`Reference sites: ${plan.sites.length}`);
+
+  // One line with every reconciliation outcome, near the top: the across-categories count
+  // was only in a sentence below the other sections, counting rows rather than pairs, and
+  // Cowork's review of W5 phase 5 did not find it on the page.
+  const countGate = reconciliationGate(plan.reconciliation);
+  const pairsOf = (rows: readonly Reconciliation[]) =>
+    new Set(rows.map((r) => `${r.queriedUniqueId.toLowerCase()}|${r.relatedUniqueId.toLowerCase()}`)).size;
+  const acrossRows = plan.reconciliation.filter((r) => r.status === 'MatchAcrossCategories');
+  if (plan.reconciliation.length > 0) {
+    lines.push(
+      `Reconciliation: ${countGate.blocking.length} blocking mismatch(es), ${countGate.overClaims.length} claimed more than found, ${countGate.doubleCounted.length} link(s) counted twice, ${pairsOf(acrossRows)} pair(s) reconciled across categories`,
+    );
+  }
 
   const archived = plan.ledger.filter((r) => r.wasArchived);
   if (archived.length > 0) {
@@ -711,6 +750,18 @@ export function planSummaryLines(plan: DependencyPlan, index: DeleteIndex | null
     }
   }
 
+  const drafts = plan.draftHolders ?? [];
+  if (drafts.length > 0) {
+    lines.push(`HOLDERS WITH AN UNPUBLISHED DRAFT (${drafts.length}):`);
+    lines.push(
+      "Removing a reference publishes the holder, and with it the draft: someone else's unfinished changes, live, with no way back from here. Unticked, a holder is not edited and the targets it holds are left out of the delete. Tick a holder to publish its draft with the removal.",
+    );
+    for (const d of drafts) {
+      lines.push(`  ${d.name || planProcessName(plan, index, d.holderUniqueId)}  (${d.holderUniqueId})${d.version ? `, draft ${d.version}` : ''}`);
+      for (const t of d.targetsBlocked) lines.push(`      blocks ${planProcessName(plan, index, t)}  (${t})`);
+    }
+  }
+
   const groupSites = plan.sites.filter((s) => s.action === 'Report');
   if (groupSites.length > 0) {
     lines.push('Group links (reported, never removed automatically):');
@@ -735,14 +786,13 @@ export function planSummaryLines(plan: DependencyPlan, index: DeleteIndex | null
     lines.push(`${known.length} entr(ies) differ by the known child-reference asymmetry (warning, not a gate). See the open question in API_ARCHITECTURE.md.`);
   }
 
-  const across = plan.reconciliation.filter((r) => r.status === 'MatchAcrossCategories');
-  if (across.length > 0) {
+  if (acrossRows.length > 0) {
     lines.push(
-      `${across.length} entr(ies) disagree on the category but not on the total for their pair (the API labels some Input references as links). Not a gate; the per-category numbers are in the plan file.`,
+      `PAIRS RECONCILED ACROSS CATEGORIES (${pairsOf(acrossRows)}): they disagree on the category but not on the total for the pair (the API labels some Input references as links). Not a gate; the per-category numbers are in the plan file.`,
     );
   }
 
-  const gate = reconciliationGate(plan.reconciliation);
+  const gate = countGate;
   const doubled = gate.doubleCounted;
   const different = gate.blocking;
   const targets = new Set(plan.targetUniqueIds.map((t) => t.toLowerCase()));
