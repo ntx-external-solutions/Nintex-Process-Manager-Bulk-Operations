@@ -8,6 +8,28 @@ earlier task; don't start them.
 The R11 tasks for the PowerShell (old T1 and T2) are superseded. They're folded into W5.
 The PowerShell is frozen at v4.11: don't change it.
 
+## Changed since 18 Oct morning: spikes S1 to S3 are done
+
+Results are in `API_ARCHITECTURE.md`, "Spike results, 18 Oct 2026", and the spec is
+updated. What that means for the tasks:
+
+- **Answers to your W1 questions.** `linked-process` is a shortcut, confirmed: on the demo
+  tenant each one has the same `uniqueId` as a process homed in another group. Keeping it
+  unselectable is right. `suggested-process` exists (2 items) but nobody has measured what
+  it is, so keep it excluded. No `embeddedprocess`, `vanillaprocess` or `documentgroup`
+  items exist on the demo tenant. Bucket labels for archived groups should now use the
+  breadcrumb endpoint (S3); that's added to W2b, since W1 is done.
+- **W2:** every `Publish` call sends `PublishMessage` (the run's change description). A
+  tenant in "Publish Only mode" returns 400 without it. If W2 is already committed, do
+  this as a follow-up commit on the same branch.
+- **W2b is new** (folder cleanup after Archive), and Ready.
+- **W3** is Ready, with the revision rules S2 measured. Variations were tested later the
+  same day: a set moves as a unit, and moves publish open drafts. Both are in W3.
+- **W5:** `variationSetData` names a process's variation siblings before anything is
+  touched. Use it to put siblings in the plan up front; keep the snapshot comparison as
+  the backstop. `API_ARCHITECTURE.md` has the correction.
+- **W6:** S1 is answered; see the task.
+
 ---
 
 ## W0. Scaffold `web/` from process-group-manager
@@ -62,7 +84,7 @@ recorded fixture.
 
 ## W2. Bulk Archive
 
-Status: Ready
+Status: Done (2f9832a, 5f36abf, 6bbf48b)
 
 Port the archive path from `Nintex-BulkOperations.ps1` (`Invoke-BulkArchiveProcesses`)
 and `Set-NpmProcessArchived` in `NintexProcessDependencies.ps1`. Add `process.archive`
@@ -77,25 +99,78 @@ Must carry over, all covered in `API_ARCHITECTURE.md`:
   the tenant's status code and message, as `New-NpmArchiveOutcome` does.
 - A 400 is reported with the tenant's message and a link, and not retried.
 - Final status for every process comes from a fresh read at the end of the run.
-- The preview lists variation siblings of selected processes.
+- The preview lists variation siblings of selected processes, from `variationSetData`
+  (top level of `GET /Api/v1/Processes/{id}`, beside `processJson`):
+  `OtherVariedProcesses[].ProcessUniqueId`. Siblings aren't in the tree.
 - Results CSV with the script's columns.
+- Every `Publish` sends `PublishMessage` set to the change description (S2: 400 without
+  it on a tenant in "Publish Only mode").
 
-**Not in this task:** deleting groups afterwards. That waits on spike S1.
+**Not in this task:** deleting groups afterwards. That's W2b.
 
 **Done when:** offline tests cover each outcome, including a 200 that's still pending
 and a call that reports failure but took effect.
 
 ---
 
+## W2b. Folder cleanup after Archive
+
+Status: Ready (after W2)
+
+After an archive run finishes and is re-read, offer to delete the groups it left behind.
+S1 measured the API: `DeleteGroup` deletes a group holding archived processes (they
+become orphans, `groupExists: false`) and refuses a group holding any document with 409
+`AssociatedContents`, listing the documents in `additionalInfos.documents`. The server's
+validation gate says nothing. So the app does the checking:
+
+- Candidates are groups the selection covered that now hold no active process, deepest
+  first. Check each group's documents with
+  `/bff/document/api/v1/documents?...&ListType=All&ProcessGroupId=<uuid>` and the
+  archived listing; a group with documents is kept and reported, not attempted.
+- The warning lists, per group, every archived process that will no longer be restorable
+  to it. Separate explicit confirmation from the archive's.
+- Add `group.delete` to the allowlist taking exactly one group id. A 409 is reported with
+  the document names, never retried.
+- One results row per group: deleted, kept with reason, or failed.
+- Also: archived-view bucket labels use the breadcrumb path
+  (`/bff/navigation/api/v1/breadcrumb?type=ProcessGroup&id=<uuid>`, root first, the group
+  last), one call per distinct group. Add it to the allowlist as a read.
+
+**Done when:** offline tests cover a group that deletes, one kept for a document, one
+kept for an active process, a 409 from the tenant, and nested groups deleted deepest
+first.
+
+---
+
 ## W3. Bulk Move
 
-Status: Queued (group moves can go once W1 is done; process moves wait on spike S2)
+Status: Ready (after W2b)
 
 `ReorderTreeNodes`, one node per call, `NodeType` from the item's `itemType`. Destination
 picker from the same tree. Reuse PGM's `groupPlan.ts` checks (no cycles, not into its
-own subtree, not into a document group). Pre-flight `ValidateProcessAction` with action
-type 11 for processes. Show viewer deltas from `GetTotalSpecifiedGroupRoleAndUserViewers`
-in the preview.
+own subtree, not into a document group). Show viewer deltas from
+`GetTotalSpecifiedGroupRoleAndUserViewers` in the preview.
+
+S2 measured the revision effects, and the preview must show them:
+
+- A group move changes no process revision. When a whole group is selected, move the
+  group, not its processes one by one.
+- An in-progress process gets a minor version bump.
+- **A published process gets a new major version published.** Pre-flight each
+  individually selected process with
+  `ValidateProcessAction?processUniqueId=<id>&actionType=11&processGroupUniqueId=<dest>&isShortcut=false`.
+  When it returns `isPrompt: true`, show its title and message in the preview and count
+  those processes in the confirmation.
+- **Drafts go live.** Moving a process that has a published version publishes it, and
+  if it has an open draft, the draft is published too (measured on a real variation,
+  v1.1 draft became published 2.0). `ValidateProcessAction` says so in its message
+  ("has outstanding changes ... will also be published"). Put these processes in their
+  own section of the preview, unselected by default, with the tenant's message.
+- **A variation set moves as one.** The tree shows one node per set; moving it moves
+  every variation (siblings are not in the tree at all). Read `variationSetData` from
+  `GET /Api/v1/Processes/{id}` (top level, beside `processJson`) and list every sibling
+  in `OtherVariedProcesses` in the preview as moving too.
+- `linked-process` items can't be moved here. List them as excluded with the reason.
 
 ---
 
@@ -125,6 +200,10 @@ equivalence is checked as you go. Includes, as new behavior:
   holding group, read there, and re-archived before `Remove-HoldingGroup`, with its own
   results operation.
 
+Variation siblings come from `variationSetData.OtherVariedProcesses` at planning time,
+so the preview can name them before the run; the R3 collateral checkpoints stay as the
+backstop.
+
 The plan ledger goes in IndexedDB. The plan file is downloadable and can be re-uploaded
 to resume or unwind.
 
@@ -132,8 +211,10 @@ to resume or unwind.
 
 ## W6. Bulk Delete UI, and folder cleanup
 
-Status: Queued (after W5 and spike S1)
+Status: Queued (after W5)
 
 Both entry points (tree and archived view), delete-by-group target resolution, the
 collateral confirmation on screen, and the optional "delete now-empty groups" step,
-deepest first, offered only for groups the run actually emptied.
+deepest first, offered only for groups the run actually emptied. Reuse W2b's group
+cleanup. After a delete, a group can still hold archived documents, which block deletion
+(S1), so those groups are kept and reported.

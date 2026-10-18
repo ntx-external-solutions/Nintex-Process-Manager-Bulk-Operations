@@ -88,13 +88,19 @@ One component used by all three operations:
 - Tri-state checkboxes. Checking a group means "everything under it as of planning time",
   not a snapshot of what was expanded. The planner walks the full subtree.
 - Document groups are shown but not selectable for Archive or Delete.
+- `linked-process` items are shortcuts: same `uniqueId` as a process homed in another
+  group (measured, S2). They're shown but never selectable, and never resolve into a
+  plan, or selecting a group would act on a process homed somewhere nobody selected.
 - The plan screen shows the resolved list (every process, with its path) before anything
   is written. Dry run is the default and applying is a separate, explicit action.
 
 Bulk Delete also needs the **archived view**: the paginated archived listing
 (`/Bff/Process/api/v1/processes`, archived list type), grouped by original group path,
 with a separate bucket for processes whose group no longer exists (`groupExists: false`).
-On the demo tenant that bucket is large: 177 of 467 archived processes when measured.
+On the demo tenant that bucket is large: 178 of 465 archived processes when measured.
+Rows carry only the immediate group, so paths come from
+`/bff/navigation/api/v1/breadcrumb?type=ProcessGroup&id=<uuid>`, one call per distinct
+group (S3: 47 groups, about 4 seconds).
 
 ## Bulk Archive
 
@@ -115,26 +121,28 @@ On the demo tenant that bucket is large: 177 of 467 archived processes when meas
 - Process variations are coupled (R3). Show the operator any variation siblings of
   selected processes in the preview.
 
-**Step 3, "delete the left-behind folders": this needs a spike before we promise it.**
-Two problems:
+**Step 3, "delete the left-behind folders".** Spike S1 settled what the API does:
 
-1. **Archived processes still count as group content.** In the UI, a group holding
-   archived processes or documents can't be deleted ("Unable to Delete Group ... has
-   associated content", items marked "(archived)"). So right after an archive, the
-   folders are not actually empty. What `POST /Process/Edit/DeleteGroup` does in that
-   case through the API is unknown. PGM's notes say the confirmation is client-side only,
-   so the API may allow it.
-2. **If the API does allow it, that's how orphans are made.** An archived process whose
-   group is deleted can't be restored anywhere, and orphaned processes are exactly what
-   blocked R11's delete (the T2 problem below). 177 orphans already exist on the demo
-   tenant.
+- `DeleteGroup` **deletes a group that holds archived processes**, with no prompt and no
+  refusal. The processes survive as orphans (`groupExists: false`) and can't be restored
+  to that group again, exactly the warning you described.
+- It **refuses** a group holding documents, archived or not: HTTP 409,
+  `AssociatedContents`, naming each document.
+- The server's validation gate says nothing either way.
 
-Recommendation: don't offer folder deletion after Archive in v1. Offer it after Bulk
-Delete has purged the processes, when the groups really are empty, deepest subgroup
-first. If the spike shows the API deletes non-empty groups and you still want it after
-Archive, it ships behind a warning that names the processes that will become
-unrestorable. Documents block group deletion too, so groups holding documents are
-reported, not deleted.
+So step 3 ships as you asked for it, with the app doing the checking the server doesn't:
+
+- Offered only after the archive run has finished and been re-read.
+- Candidate groups are the ones the selection fully emptied of active processes,
+  deepest first. A group with any active process left, or any document, is listed as
+  kept, with the reason.
+- The warning names every archived process in each group that would become unrestorable
+  to it. It needs its own explicit confirmation, separate from the archive's.
+- One results row per group: deleted, kept (and why), or failed with the tenant's 409
+  detail.
+
+Orphans are what blocked R11's delete, so W5's handling of orphaned holders (old T2) is
+what keeps this from making Bulk Delete harder later.
 
 ## Bulk Delete
 
@@ -174,18 +182,31 @@ the PowerShell:
 ## Bulk Move
 
 `POST /Process/Edit/ReorderTreeNodes`, with `NodeType` passed straight through from the
-tree item's `itemType`. Moves don't touch a process revision, so nothing republishes and
-nobody is notified.
+tree item's `itemType`. Spike S2 measured what a move costs:
 
-- One node per call, even though the endpoint takes an array, so each move is journaled
-  and attributable. PGM made the same call for the same reason.
-- Pre-flight with `ValidateProcessAction` (action type 11) for processes. Reuse PGM's
-  cycle and document-group checks for groups.
-- Show the viewer delta (`GetTotalSpecifiedGroupRoleAndUserViewers`, source and
-  destination) in the preview, since moving changes who can see a process.
-- **Spike first:** PGM only moved groups. Moving a single process was seen once in a HAR,
-  for an in-progress process. Published processes, linked processes and variations are
-  untested.
+| Moving | Effect |
+|---|---|
+| A group | Reparented. Nothing inside it gets a new revision. |
+| An in-progress process | Moved, with a minor version bump. |
+| A published process | Moved, and **a new major version is published** (1.0 to 2.0). |
+
+So the preview has to say, per process, what will happen. A published process selected
+on its own will be republished, which may notify its stakeholders (not measured). Rules:
+
+- Selecting a whole group moves the group, not each process in it. That's the cheap,
+  revision-free path, and the resolver should prefer it.
+- For each individually selected process, call `ValidateProcessAction` (action type 11,
+  destination group, `isShortcut=false`). When it returns `isPrompt`, show its message in
+  the preview ("Publish New Version?") and count those processes in the confirmation.
+- One node per call, journaled, as PGM does.
+- A process with an open draft gets that draft published by the move (measured on a
+  real variation set). Those go in their own preview section, unselected by default.
+- A variation set moves as one: the tree shows one node, and its siblings (listed in
+  `variationSetData`, not in the tree) move with it. The preview names them.
+- `linked-process` (shortcut) items aren't movable here.
+- Show the viewer delta (`GetTotalSpecifiedGroupRoleAndUserViewers`) for source and
+  destination.
+- Reuse PGM's cycle and document-group checks for group moves.
 
 ## Bulk Update Ownership
 
@@ -200,17 +221,19 @@ Two things the script does that the web version should not copy without a decisi
   "save only" vs "match current state" choice.
 - It sends `SuppressChangeNotification: false`, so every row notifies stakeholders. Default
   it to true, as PGM does.
+- On a tenant in "Publish Only mode", `Publish` needs a `PublishMessage` or it returns 400
+  (measured). Send the run's change description as `PublishMessage` on every publish.
 
-## Spikes before building
+## Spikes (run 18 Oct 2026)
 
-| # | Question | Blocks |
+| # | Question | Answer |
 |---|---|---|
-| S1 | What does `DeleteGroup` do through the API on a group holding archived processes, and one holding archived documents? | Folder deletion in Archive and Delete |
-| S2 | Does `ReorderTreeNodes` move a single published process, a linked process, and a variation? | Bulk Move of processes |
-| S3 | Which archived-list fields give the original group path, so the archived view can be grouped without a lookup per row? | Archived view |
+| S1 | Does `DeleteGroup` delete a group holding archived content? | Archived processes: yes, and they become orphans. Documents: no, 409 `AssociatedContents`. |
+| S2 | Does `ReorderTreeNodes` move single processes? | Yes. Never-published in-progress gets a minor bump; anything with a published version is republished, open drafts included. Groups move with no revision change. A variation set moves as one. |
+| S3 | Where does the archived view get group paths? | Rows have the immediate group only; the breadcrumb endpoint gives the full chain per group. |
 
-Each is a few calls against the demo tenant. The Cowork session runs them and records the
-answers in `API_ARCHITECTURE.md`.
+Details are in `API_ARCHITECTURE.md`, "Spike results, 18 Oct 2026". All three were run
+from a browser session; the breadcrumb call still needs a bearer-token check.
 
 ## What happens to the PowerShell
 
@@ -229,5 +252,6 @@ Confirmed by JB, 18 Oct 2026:
 
 Made by Cowork, not yet revisited:
 
-4. **No folder deletion right after Archive in v1**, pending spike S1.
+4. **Folder deletion after Archive ships**, behind its own warning and confirmation,
+   now that S1 shows the API allows it. (Was "not in v1, pending S1".)
 5. **PowerShell frozen at v4.11**, with T1 and T2 implemented only in TypeScript.

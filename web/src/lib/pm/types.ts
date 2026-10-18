@@ -115,6 +115,11 @@ export interface ProcessUpdateEnvelope {
 export interface PublishRequest {
   ProcessRevisionEditId: string;
   IsPublishNow: boolean;
+  /**
+   * Required by a tenant in "Publish Only mode", which answers 400 "A message must be
+   * added when publishing" without it (spike S2). `Message` is not accepted.
+   */
+  PublishMessage: string;
 }
 
 /** Server-driven confirmation gate returned by Validate*Action. */

@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 
 import type { PmContext } from './client.ts';
 import { getChildGroups } from './groups.ts';
-import { getLatestRevision, publishProcess } from './processes.ts';
+import { getArchiveState, getLatestRevision, getVariationSet, publishProcess } from './processes.ts';
 
 interface Call {
   url: string;
@@ -99,8 +99,11 @@ test('getChildGroups parses a real tree response', async () => {
 test('publishProcess sends the revision id as a string', async () => {
   // processJson carries it as a number; this endpoint wants a string.
   const h = harness([{ actionUrl: '/tenant/Process/00000001' }]);
-  await publishProcess(h.ctx, '00000001-0000-4000-8000-000000000001', 9182);
-  assert.equal(h.calls[0]!.body, '{"ProcessRevisionEditId":"9182","IsPublishNow":true}');
+  await publishProcess(h.ctx, '00000001-0000-4000-8000-000000000001', 9182, 'Bulk archive');
+  assert.equal(
+    h.calls[0]!.body,
+    '{"ProcessRevisionEditId":"9182","IsPublishNow":true,"PublishMessage":"Bulk archive"}',
+  );
 });
 
 test('getLatestRevision reads the cheap concurrency check', async () => {
@@ -108,4 +111,94 @@ test('getLatestRevision reads the cheap concurrency check', async () => {
   const result = await getLatestRevision(h.ctx, '00000001-0000-4000-8000-000000000001');
   assert.equal(result.latestProcessRevisionEditId, 9174);
   assert.match(h.calls[0]!.url, /\/bff\/Process\/api\/v1\/processes\/00000001.*\/revisions\/latest$/);
+});
+
+// ---------------------------------------------------------------- archive state
+
+function answering(status: number, body: unknown) {
+  return harnessWith(async () =>
+    new Response(body === undefined ? null : JSON.stringify(body), {
+      status,
+      headers: { 'content-type': 'application/json' },
+    }),
+  );
+}
+
+function harnessWith(respond: () => Promise<Response>) {
+  const ctx: PmContext = {
+    baseUrl: 'https://demo.promapp.com',
+    tenant: 'tenant',
+    token: 'tok',
+    fetch: (async () => respond()) as unknown as typeof fetch,
+    sleep: async () => {},
+  };
+  return ctx;
+}
+
+const ARCHIVED_ID = '00000001-0000-4000-8000-000000000001';
+
+test('getArchiveState reads isArchived and the revision off the model', async () => {
+  const state = await getArchiveState(
+    answering(200, { processJson: { isArchived: false, ProcessRevisionEditId: 10133 }, processActions: {} }),
+    ARCHIVED_ID,
+  );
+  assert.deepEqual(state, { found: true, isArchived: false, revisionEditId: 10133 });
+});
+
+test('getArchiveState falls back to the envelope, and matches the field case-insensitively', async () => {
+  const state = await getArchiveState(
+    answering(200, { IsArchived: true, processJson: { ProcessRevisionEditId: 7 } }),
+    ARCHIVED_ID,
+  );
+  assert.deepEqual(state, { found: true, isArchived: true, revisionEditId: 7 });
+});
+
+test('getArchiveState reports an absent field as null, not false', async () => {
+  const state = await getArchiveState(answering(200, { processJson: { ProcessRevisionEditId: 7 } }), ARCHIVED_ID);
+  assert.equal(state.isArchived, null);
+});
+
+test('getArchiveState treats a 404 as having left the active side', async () => {
+  assert.deepEqual(await getArchiveState(answering(404, { message: 'Not found' }), ARCHIVED_ID), {
+    found: false,
+    isArchived: null,
+    revisionEditId: null,
+  });
+});
+
+test('getArchiveState lets any other failure through', async () => {
+  await assert.rejects(getArchiveState(answering(400, { message: 'Bad' }), ARCHIVED_ID), /returned 400/);
+});
+
+// ---------------------------------------------------------------- variation sets
+
+test('getVariationSet reads the set beside processJson, siblings included', async () => {
+  const set = await getVariationSet(
+    answering(200, {
+      processJson: { Name: 'Review' },
+      variationSetData: {
+        Id: 38,
+        Name: 'Review',
+        VariationGroupId: 1,
+        Type: 1,
+        Group: { Id: 12, Name: 'Security', UniqueId: 'g-sec' },
+        VariedProcess: { ProcessUniqueId: 'v-internal', VariationName: 'Internal', IsArchived: false },
+        OtherVariedProcesses: [{ ProcessUniqueId: 'v-partner', VariationName: 'Partner', IsArchived: false }],
+        IsVariationSetInDraftState: false,
+      },
+    }),
+    ARCHIVED_ID,
+  );
+  assert.deepEqual(set, {
+    id: 38,
+    name: 'Review',
+    group: { id: 12, name: 'Security', uniqueId: 'g-sec' },
+    self: { uniqueId: 'v-internal', variationName: 'Internal', isArchived: false },
+    others: [{ uniqueId: 'v-partner', variationName: 'Partner', isArchived: false }],
+  });
+});
+
+test('getVariationSet is null for a process in no set', async () => {
+  assert.equal(await getVariationSet(answering(200, { processJson: {} }), ARCHIVED_ID), null);
+  assert.equal(await getVariationSet(answering(200, { processJson: {}, variationSetData: null }), ARCHIVED_ID), null);
 });

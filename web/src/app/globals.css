@@ -598,3 +598,36 @@ a.button {
   margin: 0;
   font-weight: 400;
 }
+
+/* ----------------------------------------------------------------- plan view */
+
+table.plan {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+table.plan th,
+table.plan td {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.35rem 0.5rem 0.35rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+table.plan th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+label.inline {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  font-weight: 400;
+  margin-top: 0.85rem;
+}
+
+label.inline input[type='checkbox'] {
+  margin-top: 0.3rem;
+}

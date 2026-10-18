@@ -19,7 +19,7 @@ import { NextResponse } from 'next/server';
 import { readCookie } from '@/lib/auth/cookie.ts';
 import { SESSION_COOKIE, unseal } from '@/lib/auth/session.ts';
 import type { PmContext } from '@/lib/pm/client.ts';
-import { isPmError } from '@/lib/pm/client.ts';
+import { isPmError, tenantMessage } from '@/lib/pm/client.ts';
 import { execute, parseOperation } from '@/lib/pm/operations.ts';
 import { isScimError } from '@/lib/pm/scim.ts';
 
@@ -70,9 +70,15 @@ export async function POST(request: Request): Promise<NextResponse> {
     }
 
     if (isPmError(error)) {
-      // A 401 from Process Manager means our token died mid-run; tell the client to
-      // stop and re-authenticate rather than hammering through the rest of a plan.
-      if (error.status === 401 || error.status === 403) {
+      // A 401 means our token died mid-run; tell the client to stop and re-authenticate
+      // rather than hammering through the rest of a plan.
+      //
+      // PGM treated 403 the same way. This app does not: a 403 from a write is far more
+      // likely to be the tenant refusing one process to this user than a dead session,
+      // and signing the operator out over one process would stop a bulk archive that
+      // should carry on and report it. The process is reported with its status code
+      // instead.
+      if (error.status === 401) {
         return NextResponse.json(
           { error: 'Process Manager rejected the session. Sign in again.', signedOut: true },
           { status: 401 },
@@ -82,6 +88,8 @@ export async function POST(request: Request): Promise<NextResponse> {
         {
           error: error.message,
           status: error.status,
+          // The tenant's own words, for a results file an administrator has to act on.
+          message: tenantMessage(error.bodyText),
           // Useful for diagnosis and safe: it is the tenant's own response.
           detail: error.bodyText.slice(0, 2_000),
         },

@@ -209,3 +209,46 @@ async function safeText(response: Response): Promise<string> {
     return '';
   }
 }
+
+/** Long enough for any reason a tenant gives; short enough that an HTML error page cannot flood a results cell. */
+export const TENANT_MESSAGE_MAX_LENGTH = 500;
+
+/**
+ * The tenant's own words for a failed request, not the status line.
+ *
+ * Ported from the script's `Get-NpmErrorDetail`. A 400 from ArchiveProcess is the tenant
+ * refusing on the process's own data (a deleted linked document, a disabled owner), and
+ * the reason an administrator needs is in the response body. Where the body is JSON the
+ * human-readable field is pulled out, because the envelope is what would otherwise end
+ * up in a CSV cell. ASP.NET problem details and the Promapp handlers each use a
+ * different field, so the first one carrying text wins.
+ *
+ * Returns null when there is nothing to say.
+ */
+export function tenantMessage(bodyText: string): string | null {
+  const raw = bodyText.trim();
+  if (raw === '') return null;
+
+  let text = raw;
+  if (raw.startsWith('{') || raw.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (typeof parsed === 'object' && parsed !== null) {
+        const record = parsed as Record<string, unknown>;
+        for (const field of ['message', 'Message', 'error', 'errorMessage', 'title', 'detail']) {
+          const value = record[field];
+          if (typeof value === 'string' && value.trim() !== '') {
+            text = value.trim();
+            break;
+          }
+        }
+      }
+    } catch {
+      // Not JSON after all. The raw text is still better than nothing.
+    }
+  }
+
+  return text.length > TENANT_MESSAGE_MAX_LENGTH
+    ? `${text.slice(0, TENANT_MESSAGE_MAX_LENGTH).trimEnd()}...`
+    : text;
+}

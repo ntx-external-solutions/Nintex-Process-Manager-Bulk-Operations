@@ -6,6 +6,101 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## W2. Bulk Archive
+
+Commits `2f9832a`, then two follow-ups for requirements added while W2 was in flight:
+`5f36abf` (`PublishMessage` on every publish) and `6bbf48b` (siblings from
+`variationSetData`). All on `claude/web-w2-archive`, stacked on W1. `c8bda99` and
+`2745a6f` commit Cowork's spike results and variation findings as written.
+
+**What changed.**
+
+- Proxy: `process.archive` (id plus comment), `process.publishNow` (id, revision,
+  `publishMessage`) and a read, `process.archiveState`. `WRITE_OPERATIONS` is exactly the
+  first two. All three go through `singleProcessId`: the id must be one GUID, and **a
+  body with any field the operation doesn't name is refused**, so a second id can't ride
+  along under another key.
+- `pm/processes.ts`: `archiveProcess` (write retry policy, so 5xx isn't resent),
+  `getArchiveState` (isArchived from the model, then the envelope, case-insensitive;
+  absent reads as null; 404 is `found: false`). `publishProcess` now always sends
+  `PublishMessage`.
+- `pm/client.ts`: `tenantMessage`, a port of `Get-NpmErrorDetail` (first text field of
+  message/Message/error/errorMessage/title/detail, capped at 500).
+- Proxy route: errors carry `status` and `message` (the tenant's words). **A 403 is no
+  longer treated as a dead session**; see below.
+- `archive/outcome.ts`: `archiveOne`, a branch-for-branch port of
+  `Set-NpmProcessArchived`. Same outcome names (`Archived`, `PendingApproval`,
+  `Overridden`, `Refused`, `Failed`) and messages, same status mapping, with "no
+  response" instead of "HTTP 0".
+- `archive/plan.ts`: `buildArchivePlan`, `findVariationSiblings` (every
+  `variationSetData.OtherVariedProcesses` entry that isn't a target, read at planning
+  time for each target the tree marks with a `variationSetId`), `findVariationMasters`
+  (the script's name heuristic, still run alongside), `previewRows`. A set that can't be
+  read is listed in the preview as unread, not silently skipped.
+- Proxy read `process.variationSet` (one id) and `pm/processes.ts` `getVariationSet`.
+- `archive/run.ts`: `runArchive`, `settleFromFinalRead`, `collateralRows`,
+  `manualReviewCsvRows`, `processLink`.
+- `tenant/state.ts`: `loadProcessIndex` and `compareTenantState`, ported from
+  `Get-NpmProcessIndex` and `Compare-TenantState`. W5 will reuse both.
+- `/archive` page: select, preview (downloadable), one change description, the approval
+  override checkbox (on by default), variation acceptance, a confirm step, cancel
+  between batches, results with counts, a needs-attention table linking each process,
+  results CSV, and the manual review CSV.
+- `/api/auth` GET now returns `siteUrl` so a refusal can link to the process.
+
+**Results-file operations and statuses.** `Archive`, `VariationWarning` and `Select`
+(a shortcut or other excluded item, Skipped with the reason) are new, plus
+**`Collateral`/`Unreversed`**. Statuses follow the script's vocabulary plus `Accepted`
+(as the script uses it) and `Unreversed`.
+
+**Tests.** 197 tests, 197 pass (55 new). `outcome.test.ts` covers every branch of the
+port, including the two the task names: **a 200 that's still pending** (overridden with
+the post-archive revision, or reported Pending when the override is withheld or fails),
+and in `run.test.ts`, **a call that reports failure but took effect**, which the final
+read settles as Success. Allowlist tests cover one id only, no second id under another
+key, and the exact request bodies.
+
+**End-to-end, offline.** I ran the built app against a local mock Process Manager
+(not a tenant) and drove it through headless Chrome: sign in, check a group, preview,
+apply. The plan resolved the subgroup and left out the unselected group. The pending
+process was overridden with the post-archive revision as a string. The 400 came out
+Blocked with the tenant's message. The 500 that still took effect came out Success. Each
+archive was sent exactly once. The mock and driver are in my scratchpad, not the repo;
+say if you want them committed as a dev tool.
+
+**Deviations from the script, and why.**
+
+- **The final read checks every sent row, not just successes.** The script only
+  re-checked rows the calls called successful, but the API notes record failed calls
+  that took effect, and the spec says every final status comes from a fresh read.
+- **Collateral is reported, not reversed.** The script restores unwanted archives
+  (`Restore-CollateralState`). That needs a restore operation, which isn't in W2's
+  allowlist. Collateral rows say so and point to Process Manager. Given that S-results
+  and R-rounds place the coupling on delete rather than archive, I expect these to be
+  rare. W5 adds restore anyway, and archive can use it then.
+- **The baseline is re-read just before the first write**, not reused from the preview,
+  so another operator's edits between preview and apply aren't blamed on this run, and
+  a target archived meanwhile is skipped rather than sent.
+- **403 is a refusal, not a sign-out.** PGM signed the operator out on 401 or 403. For a
+  bulk archive, a 403 on one process is much more likely to be a permission refusal than
+  a dead token, and signing out would stop the run. **Cowork: worth checking what an
+  expired token returns on this tenant.** If it's 403, I'll treat N consecutive 403s as
+  fatal.
+- **Variation warnings use two signals**: `variationSetData` siblings, plus the
+  script's name heuristic. Both need explicit acceptance on screen before Apply is
+  enabled. The set is read only for targets the tree marks with a `variationSetId`.
+  Reading every target's full process document would cost one GET each, and the tree
+  marked all 13 variation records Cowork found. If a variation can turn up without a set
+  id, that trigger needs widening.
+- **Resume is by re-planning.** If the tab dies mid-run, the journal stays in
+  sessionStorage and the page says how many archives are in doubt on the next visit.
+  Re-planning lists anything already archived as skipped, which is naturally idempotent
+  for archive. There's no plan-file upload for archive.
+- The manual review CSV gains a `Link` column. The spec asked for the tenant's message
+  and a link.
+
+---
+
 ## W1. Tree browser with processes, and the archived view
 
 Commit `7e97808` on `claude/web-w1-tree` (stacked on W0's branch).

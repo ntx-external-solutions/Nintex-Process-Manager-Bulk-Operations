@@ -3,9 +3,12 @@
 The web replacement for the PowerShell script in the repository root. The design is
 in [`handoff/SPEC-WEB.md`](../handoff/SPEC-WEB.md).
 
-Status: the foundation (W0). Sign-in, the proxy and a landing page work. The proxy's
-allowlist is read-only, and the four operation tiles are disabled until the tasks that
-build them land.
+Status: Bulk Archive works (W2). The tree browser and archived view are built (W1).
+Delete, Move and Update Ownership are disabled tiles until the tasks that build them
+land.
+
+The proxy can write two things, both naming exactly one process: `process.archive` and
+`process.publishNow` (the approval override). Everything else it does is a read.
 
 ## Where the foundation came from
 
@@ -16,7 +19,7 @@ at commit `429b6403e28b37bb1572241291954fc3311b2a81`, then cut down and adapted:
 | Kept from PGM | Changed here |
 |---|---|
 | `lib/auth/*`, `app/api/auth/route.ts` | Cookie renamed to `npmbo_session` so the two apps can share `localhost`. |
-| `app/api/pm/route.ts`, `lib/pm/operations.ts` | Allowlist cut to `groups.tree`, `process.summary` and `processes.list`. `WRITE_OPERATIONS` is empty and a test holds it there. |
+| `app/api/pm/route.ts`, `lib/pm/operations.ts` | Allowlist rebuilt for this app. Writes are listed in `WRITE_OPERATIONS` and a test holds the list. A 403 is passed through as a refusal rather than signing the operator out. |
 | `lib/pm/client.ts`, `types.ts`, `scim.ts` | Unchanged apart from test fixtures. |
 | `lib/pm/groups.ts` | Group create and rename removed. Tree read, `ValidateGroupAction`, `ReorderTreeNodes` and viewer counts kept for later tasks. |
 | `lib/pm/processes.ts` | Shortcut editing, the process PUT and the CSV report removed. |

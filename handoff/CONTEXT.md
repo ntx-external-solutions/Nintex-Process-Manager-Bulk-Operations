@@ -2,15 +2,21 @@
 
 Maintained by the Cowork session. Claude Code reads this but does not edit it.
 
-## Where things stand (18 Oct 2026)
+## Where things stand (18 Oct 2026, afternoon)
 
-- Code: v4.11 at `3454d69` on `claude/main`.
-- Last live test: R11, `-Mode 5 -Source CSV -Force -AcceptCollateral` over the first 20
-  archived processes in the demo tenant.
-- Direction changed 18 Oct: the product becomes a web app on Vercel (see `SPEC-WEB.md`).
-  The PowerShell is frozen at v4.11 and kept as the reference for the delete engine.
-- Next: W0 to W2 in `TASKS.md`. In parallel, Cowork runs spikes S1 to S3 against the
-  demo tenant.
+- Product is now a web app on Vercel (`SPEC-WEB.md`). PowerShell frozen at v4.11.
+- W0 and W1 are done (Claude Code, committed locally on stacked branches). W2 in progress.
+- Spikes S1 to S3 are done; results in `API_ARCHITECTURE.md`. Headlines: `DeleteGroup`
+  deletes groups holding archived processes (orphaning them) but refuses groups holding
+  documents; moving a published process publishes a new major version; archived rows
+  need the breadcrumb endpoint for paths.
+- No test debris left: both spike processes were permanently deleted (JB approved) and
+  no spike groups remain.
+- Variation move test (JB approved republishing) left one lasting change: "SOC 2
+  Submission Review" in Security had an open v1.1 draft; it is now published at 3.0, and
+  its Partner variation is at 3.0 too.
+- JB confirmed live sign-in works against the tenant (W0's open check).
+- Restricting sign-in to known Process Manager hosts is deferred by JB; not a v1 task.
 
 ## What R11 confirmed working
 

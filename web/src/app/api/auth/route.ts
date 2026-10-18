@@ -19,8 +19,11 @@ export const dynamic = 'force-dynamic';
  * Report who is signed in.
  *
  * The session cookie is httpOnly by design, so a page cannot tell whether it holds a
- * live session without asking. Deliberately returns identity only — never the token,
- * and never the base URL, both of which stay sealed inside the cookie.
+ * live session without asking. Never returns the token.
+ *
+ * PGM also withheld the base URL. This app returns the site address (origin and tenant,
+ * the same thing the operator typed to sign in) because a refused archive has to be
+ * reported with a link to the process, and the link needs it. It is not a credential.
  */
 export async function GET(request: Request): Promise<NextResponse> {
   const secret = process.env['AUTH_SECRET'];
@@ -34,6 +37,7 @@ export async function GET(request: Request): Promise<NextResponse> {
   return NextResponse.json({
     signedIn: true,
     tenant: session.tenant,
+    siteUrl: `${session.baseUrl}/${session.tenant}`,
     username: session.username,
     expiresAt: session.expiresAt,
   });

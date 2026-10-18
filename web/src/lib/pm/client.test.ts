@@ -1,7 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { backoffMs, buildUrl, isPmError, pmRequest, type PmContext } from './client.ts';
+import {
+  backoffMs,
+  buildUrl,
+  isPmError,
+  pmRequest,
+  TENANT_MESSAGE_MAX_LENGTH,
+  tenantMessage,
+  type PmContext,
+} from './client.ts';
 
 interface Call {
   url: string;
@@ -198,4 +206,28 @@ test('honours a Retry-After header', async () => {
   const s = stub([json({}, 429, { 'retry-after': '2' }), json({ ok: true })]);
   await pmRequest(ctx(s.fetchImpl), { path: '/x' });
   assert.deepEqual(slept, [2_000]);
+});
+
+// ---------------------------------------------------------------- tenant message
+
+test('the tenant message is pulled out of a JSON body', () => {
+  assert.equal(tenantMessage('{"message":"The process owner is a disabled user"}'), 'The process owner is a disabled user');
+  assert.equal(tenantMessage('{"Message":"Linked document no longer exists"}'), 'Linked document no longer exists');
+  assert.equal(tenantMessage('{"type":"x","title":"Bad Request","status":400}'), 'Bad Request');
+});
+
+test('the first field that carries text wins', () => {
+  assert.equal(tenantMessage('{"message":"  ","error":"Refused"}'), 'Refused');
+});
+
+test('a body that is not JSON is returned as text, and nothing is null', () => {
+  assert.equal(tenantMessage('Server busy'), 'Server busy');
+  assert.equal(tenantMessage('{not json'), '{not json');
+  assert.equal(tenantMessage('   '), null);
+});
+
+test('a long body is capped so one HTML page cannot flood a results cell', () => {
+  const text = tenantMessage('x'.repeat(5_000)) ?? '';
+  assert.equal(text.length, TENANT_MESSAGE_MAX_LENGTH + 3);
+  assert.ok(text.endsWith('...'));
 });
