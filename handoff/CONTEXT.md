@@ -10,8 +10,11 @@ Maintained by the Cowork session. Claude Code reads this but does not edit it.
   cleanup, W3 Bulk Move (PRs #50 to #52). 239 offline tests pass.
 - Handed over: F1 (small fixes), W4 Bulk Update Ownership, W5 Bulk Delete engine (one PR
   per phase). W6 waits on W5.
-- Next for Cowork: live round R12 on the deployed app (Archive, folder cleanup, Move)
-  using `ZZ Spike` test content only, plus measuring what an expired token returns.
+- R12 (live, 18 Oct evening) passed: Archive, folder cleanup and Move all matched the
+  tenant. Fixes are in F2 (dead-session handling, picker layout, move result wording).
+  All R12 test content was removed; tenant back to 13 top-level groups, 463 archived.
+- Next for Cowork: check W4 against the tenant when it lands, then review W5 phase by
+  phase against the PowerShell.
 - Spikes S1 to S3 and the variation test are in `API_ARCHITECTURE.md`. One lasting change
   on the tenant: "SOC 2 Submission Review" and its Partner variation are published at 3.0.
 - Restricting sign-in to known Process Manager hosts is deferred by JB.
