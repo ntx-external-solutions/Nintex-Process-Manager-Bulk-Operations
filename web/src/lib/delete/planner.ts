@@ -422,6 +422,49 @@ export async function buildDeletePlan(gateway: PlanningGateway, options: DeleteP
     return record;
   };
 
+  /**
+   * Un-archives one participant so it can be read and edited: in place when its group
+   * exists, holders surviving the run; into the holding group when that group is gone,
+   * to be archived where it sits on the way out (old T2). Returns the orphan record when
+   * even the holding group refused it.
+   */
+  const restoreForReading = async (
+    record: ParticipantRecord,
+    holdingGroup: number,
+    why: string,
+  ): Promise<'restored' | 'failed' | OrphanedHolder> => {
+    const parked = record.originalGroupId !== null && !record.originalGroupExists;
+    const groupId = parked ? holdingGroup : (record.originalGroupId ?? holdingGroup);
+    if (parked) options.onEvent?.({ kind: 'holderHeld', uniqueId: record.uniqueId, name: record.name, originalGroupId: record.originalGroupId });
+
+    const restored = await restoreProcess(gateway, record.uniqueId, groupId, { isFatal });
+    if (restored.ok) {
+      record.restoredByThisRun = true;
+      record.parkedInHoldingGroup = parked;
+      // Read again next time: the cached copy is the archived one.
+      cache.delete(record.uniqueId.toLowerCase());
+      restoredTotal++;
+      log(
+        parked
+          ? `Held ${record.uniqueId} (${record.name}) in the holding group ${why}; its own group ${record.originalGroupId} no longer exists`
+          : `Restored ${record.uniqueId} (${record.name}) to group ${groupId} ${why}`,
+      );
+      return 'restored';
+    }
+    if (parked) {
+      // The holding group was the fallback. Refused there too, it cannot be read
+      // anywhere, and a target it points at cannot be deleted safely.
+      return {
+        uniqueId: record.uniqueId,
+        name: record.name,
+        originalGroupId: record.originalGroupId,
+        reason: `its group no longer exists and it could not be held in the holding group either (HTTP ${restored.statusCode})`,
+      };
+    }
+    log(`FAILED to restore ${record.uniqueId} (${record.name}); its Input/Output edges stay hidden`);
+    return 'failed';
+  };
+
   // ---- Pass loop: discover, restore, re-discover until the set is stable ----
   for (let pass = 1; pass <= maxPasses; pass++) {
     allClaims = [];
@@ -487,43 +530,9 @@ export async function buildDeletePlan(gateway: PlanningGateway, options: DeleteP
       for (const candidate of candidates) {
         const record = ledger.get(candidate.toLowerCase());
         if (!record || !record.wasArchived || record.restoredByThisRun) continue;
-
-        // In place: holders survive the run, so parking them would strand them.
-        let groupId = record.originalGroupId ?? holdingGroupId;
-        // A holder whose own group was deleted has nowhere to go back to. It takes the
-        // answer orphaned targets already get: held in the holding group, read there, and
-        // archived where it sits on the way out (old T2).
-        const parked = record.originalGroupId !== null && !record.originalGroupExists;
-        if (parked) {
-          groupId = holdingGroupId;
-          options.onEvent?.({ kind: 'holderHeld', uniqueId: record.uniqueId, name: record.name, originalGroupId: record.originalGroupId });
-        }
-
-        const restored = await restoreProcess(gateway, record.uniqueId, groupId, { isFatal });
-        if (restored.ok) {
-          record.restoredByThisRun = true;
-          record.parkedInHoldingGroup = parked;
-          // Read again on the next pass: the cached copy is the archived one.
-          cache.delete(record.uniqueId.toLowerCase());
-          restoredThisPass++;
-          restoredTotal++;
-          log(
-            parked
-              ? `Held ${record.uniqueId} (${record.name}) in the holding group for discovery; its own group ${record.originalGroupId} no longer exists`
-              : `Restored ${record.uniqueId} (${record.name}) to group ${groupId} for discovery`,
-          );
-        } else if (parked) {
-          // The holding group was the fallback. Refused there too, it cannot be read
-          // anywhere, and a target it points at cannot be deleted safely.
-          orphanedHolders.push({
-            uniqueId: record.uniqueId,
-            name: record.name,
-            originalGroupId: record.originalGroupId,
-            reason: `its group no longer exists and it could not be held in the holding group either (HTTP ${restored.statusCode})`,
-          });
-        } else {
-          log(`FAILED to restore ${record.uniqueId} (${record.name}); its Input/Output edges stay hidden`);
-        }
+        const outcome = await restoreForReading(record, holdingGroupId, 'for discovery');
+        if (outcome === 'restored') restoredThisPass++;
+        if (typeof outcome === 'object') orphanedHolders.push(outcome);
       }
     }
 
@@ -557,10 +566,28 @@ export async function buildDeletePlan(gateway: PlanningGateway, options: DeleteP
       `Input/Output scan could not read ${scan.unread.length} process(es); any Input or Output reference they hold to a target is unknown`,
     );
   }
+  const scanFound: ParticipantRecord[] = [];
   for (const site of blindSites) {
     if (!ledger.has(site.holderUniqueId.toLowerCase())) {
-      await addLedgerEntry(site.holderUniqueId);
+      const record = await addLedgerEntry(site.holderUniqueId);
+      if (record) scanFound.push(record);
       log(`Archive scan found holder ${site.holderUniqueId} that the dependency API never reported`);
+    }
+  }
+  // DIFFERS: the script recorded these and never restored them, so a real run could not
+  // edit the very reference the scan exists to find, and verification stopped the run
+  // (found by the offline run in W5 phase 7; no live run had reached removal). They are
+  // restored like any archived holder, and the unwind archives them again.
+  if (allowRestore && holdingGroupId !== null) {
+    for (const record of scanFound) {
+      if (!record.wasArchived || record.restoredByThisRun) continue;
+      const outcome = await restoreForReading(record, holdingGroupId, 'so its hidden reference can be removed');
+      if (typeof outcome === 'object') {
+        plan.orphanedHolders = [...plan.orphanedHolders, outcome];
+        plan.status = 'Blocked';
+        log(`BLOCKED: holder ${outcome.uniqueId} (${outcome.name}) holds a hidden reference to a target and cannot be restored because ${outcome.reason}.`);
+        return finish();
+      }
     }
   }
 

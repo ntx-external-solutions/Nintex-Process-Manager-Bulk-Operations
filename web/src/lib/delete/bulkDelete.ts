@@ -196,354 +196,370 @@ export async function runBulkDelete(gateway: DeleteGateway, options: BulkDeleteO
     return { results: rows, plan: lastSaved };
   };
 
-  // ---- Gather ----
-  emit({ kind: 'stage', stage: 'gathering' });
-  let index = await loadDeleteIndex(gateway);
-  let raw: string[];
-  if (options.source.kind === 'ids') {
-    raw = [...options.source.ids];
-  } else if (options.source.kind === 'archived') {
-    raw = [...index.values()].filter((e) => e.isArchived).map((e) => e.uniqueId);
-  } else {
-    const csv = targetsFromCsv(options.source.text);
-    raw = csv.ids;
-    if (csv.idColumnMissing) emit({ kind: 'csvNoIdColumn', rowCount: csv.rowCount, headers: csv.headers, accepted: CSV_ID_COLUMNS });
-  }
-  if (raw.length === 0) {
-    emit({ kind: 'noTargets', reason: 'No processes to delete' });
-    return { results, plan: null };
-  }
-  const resolved = resolveTargetIds(raw, index);
-  for (const id of resolved.unknown) {
-    results.push(resultRow({ objectId: id, operation: 'Resolve', status: 'Failed', message: 'Process not found in active or archived lists' }));
-  }
-  let targets = resolved.uniqueIds;
-  if (targets.length === 0) {
-    emit({ kind: 'noTargets', reason: 'No resolvable processes to delete' });
-    return { results, plan: null };
-  }
-  const nameOf = (id: string) => index.get(id.toLowerCase())?.name ?? '';
+  const addRow = (row: ResultRow) => {
+    results.push(row);
+  };
 
-  // ---- Snapshot: before anything moves ----
-  emit({ kind: 'stage', stage: 'snapshot' });
-  const groupUniqueIds = new Map<string, string>();
   try {
-    for (const g of await gateway.listGroups()) groupUniqueIds.set(String(g.id), g.uniqueId);
-  } catch (error) {
-    if (isFatal(error)) throw error;
-    // The plan still records numeric group ids.
-  }
-  const snapshot = processStateSnapshot(index, targets, groupUniqueIds);
-  const tenantBaseline = tenantStateSnapshot(index);
+    // ---- Gather ----
+    emit({ kind: 'stage', stage: 'gathering' });
+    let index = await loadDeleteIndex(gateway);
+    let raw: string[];
+    if (options.source.kind === 'ids') {
+      raw = [...options.source.ids];
+    } else if (options.source.kind === 'archived') {
+      raw = [...index.values()].filter((e) => e.isArchived).map((e) => e.uniqueId);
+    } else {
+      const csv = targetsFromCsv(options.source.text);
+      raw = csv.ids;
+      if (csv.idColumnMissing) emit({ kind: 'csvNoIdColumn', rowCount: csv.rowCount, headers: csv.headers, accepted: CSV_ID_COLUMNS });
+    }
+    if (raw.length === 0) {
+      emit({ kind: 'noTargets', reason: 'No processes to delete' });
+      return { results, plan: null };
+    }
+    const resolved = resolveTargetIds(raw, index);
+    for (const id of resolved.unknown) {
+      results.push(resultRow({ objectId: id, operation: 'Resolve', status: 'Failed', message: 'Process not found in active or archived lists' }));
+    }
+    let targets = resolved.uniqueIds;
+    if (targets.length === 0) {
+      emit({ kind: 'noTargets', reason: 'No resolvable processes to delete' });
+      return { results, plan: null };
+    }
+    const nameOf = (id: string) => index.get(id.toLowerCase())?.name ?? '';
 
-  // ---- The variation pre-flight, before any change ----
-  const warning = variationWarning(findVariationMasters(index, targets.map((id) => ({ uniqueId: id, name: nameOf(id) }))));
-  if (warning) {
-    emit({ kind: 'variationWarning', warning });
-    const proceed = acceptCollateral || dryRun || (decisions.variation ? (await decisions.variation(warning)) === true : false);
-    if (!dryRun) {
-      for (const target of warning.targets) {
-        for (const m of target.masters) {
-          results.push(
-            resultRow({
-              objectId: m.relativeUniqueId,
-              name: m.relativeName,
-              operation: 'VariationWarning',
-              status: proceed ? 'Accepted' : 'Failed',
-              message: `Master of target '${target.targetName}' and not itself a target; ${proceed ? `risk ${acceptanceAuthority}` : 'run stopped before any change'}`,
-              groupId: m.relativeGroupId,
-            }),
-          );
+    // ---- Snapshot: before anything moves ----
+    emit({ kind: 'stage', stage: 'snapshot' });
+    const groupUniqueIds = new Map<string, string>();
+    try {
+      for (const g of await gateway.listGroups()) groupUniqueIds.set(String(g.id), g.uniqueId);
+    } catch (error) {
+      if (isFatal(error)) throw error;
+      // The plan still records numeric group ids.
+    }
+    const snapshot = processStateSnapshot(index, targets, groupUniqueIds);
+    const tenantBaseline = tenantStateSnapshot(index);
+
+    // ---- The variation pre-flight, before any change ----
+    const warning = variationWarning(findVariationMasters(index, targets.map((id) => ({ uniqueId: id, name: nameOf(id) }))));
+    if (warning) {
+      emit({ kind: 'variationWarning', warning });
+      const proceed = acceptCollateral || dryRun || (decisions.variation ? (await decisions.variation(warning)) === true : false);
+      if (!dryRun) {
+        for (const target of warning.targets) {
+          for (const m of target.masters) {
+            results.push(
+              resultRow({
+                objectId: m.relativeUniqueId,
+                name: m.relativeName,
+                operation: 'VariationWarning',
+                status: proceed ? 'Accepted' : 'Failed',
+                message: `Master of target '${target.targetName}' and not itself a target; ${proceed ? `risk ${acceptanceAuthority}` : 'run stopped before any change'}`,
+                groupId: m.relativeGroupId,
+              }),
+            );
+          }
         }
       }
+      if (!proceed) {
+        stop('A target looks like a variation whose master is not a target. Nothing has been changed.');
+        return finish();
+      }
     }
-    if (!proceed) {
-      stop('A target looks like a variation whose master is not a target. Nothing has been changed.');
-      return finish();
-    }
-  }
 
-  const orphans = findOrphanedGroupProcesses(index, targets);
-  if (orphans.length > 0) emit({ kind: 'orphanedTargets', orphans, totalTargets: targets.length, holdingGroupName });
-  emit({ kind: 'groupExistsCoverage', coverage: groupExistsCoverage(index) });
+    const orphans = findOrphanedGroupProcesses(index, targets);
+    if (orphans.length > 0) emit({ kind: 'orphanedTargets', orphans, totalTargets: targets.length, holdingGroupName });
+    emit({ kind: 'groupExistsCoverage', coverage: groupExistsCoverage(index) });
 
-  // ---- Hold: a real run makes the holding group, then restores archived targets into it ----
-  let tempGroup: GroupRef | null = null;
-  const holdLog: string[] = [];
-  let holdCollateral: CollateralChange[] = [];
-  const cleanup = async (plan: Pick<DependencyPlan, 'collateral'>) => {
-    if (!tempGroup) return;
-    emit({ kind: 'stage', stage: 'cleanup' });
-    results.push(
-      ...(await removeHoldingGroup(
+    // ---- Hold: a real run makes the holding group, then restores archived targets into it ----
+    let tempGroup: GroupRef | null = null;
+    const holdLog: string[] = [];
+    let holdCollateral: CollateralChange[] = [];
+    const cleanup = async (plan: DependencyPlan) => {
+      if (!tempGroup) return;
+      emit({ kind: 'stage', stage: 'cleanup' });
+      const rows = await removeHoldingGroup(
         gateway,
         tempGroup,
         { groupName: holdingGroupName, targetUniqueIds: targets, reportedUniqueIds: plan.collateral.map((c) => c.uniqueId), nameLookup: tenantBaseline },
         isFatal,
-      )),
-    );
-  };
-  const unwind = async (plan: DependencyPlan) => {
-    results.push(...(await restorePlanState(gateway, plan, { ...engine, probe, persist: () => save(plan), onEvent: options.onEvent })));
-  };
-  const probe = newRelocationProbe();
+      );
+      results.push(...rows);
+      plan.holdingGroupRemoved = rows.some((r) => r.operation === 'Cleanup' && r.status === 'Success');
+      await save(plan);
+    };
+    const unwind = async (plan: DependencyPlan) => {
+      await restorePlanState(gateway, plan, { ...engine, onRow: addRow, probe, persist: () => save(plan), onEvent: options.onEvent });
+    };
+    const probe = newRelocationProbe();
 
-  if (!dryRun) {
-    emit({ kind: 'stage', stage: 'holding-group' });
-    // DIFFERS: made for every real run, not only one with archived targets. A holder
-    // whose group is gone can only be read from the holding group, and the script
-    // blocked on one whenever every target was active. An empty group is deleted at
-    // cleanup.
-    try {
-      tempGroup = await gateway.createGroup(holdingGroupName, null);
-    } catch (error) {
-      if (isFatal(error)) throw error;
-      stop(`Could not create the holding group (${failureOf(error).error}). Nothing has been changed.`);
-      return { results, plan: null };
-    }
-    const archivedTargets = targets.filter((id) => index.get(id.toLowerCase())?.isArchived === true);
-    const preliminary = newDependencyPlan(options.siteUrl, targets, now());
-    preliminary.status = 'Holding';
-    preliminary.holdingGroup = tempGroup;
-    preliminary.ledger = snapshotToPlanLedger(snapshot);
-    runLedger = preliminary.ledger;
-    holdLog.push(`Holding group '${holdingGroupName}' created: id ${tempGroup.id}, uniqueId ${tempGroup.uniqueId}`);
-    holdLog.push(`About to restore ${archivedTargets.length} archived target(s) into the holding group`);
-    preliminary.log = [...holdLog];
-    // B4: on record before the first call that changes a process.
-    await save(preliminary);
-
-    const failedHolds: string[] = [];
-    for (const [i, target] of archivedTargets.entries()) {
-      emit({ kind: 'progress', label: 'Restoring archived targets into the holding group', done: i + 1, total: archivedTargets.length });
-      const outcome = await restoreProcess(gateway, target, tempGroup.id, { isFatal });
-      if (outcome.ok) {
-        markSnapshotRestored(snapshot, target, tempGroup.id);
-      } else {
-        failedHolds.push(target);
-        const stuckGroup = index.get(target.toLowerCase())?.groupId ?? null;
-        holdLog.push(`FAILED to restore target ${target} into the holding group (HTTP ${outcome.statusCode})`);
-        results.push(
-          resultRow({
-            objectId: target,
-            name: nameOf(target),
-            operation: 'Hold',
-            status: 'Failed',
-            message: `Could not restore into the holding group (HTTP ${outcome.statusCode}); still archived in group ${stuckGroup ?? 'unknown'}`,
-            groupId: stuckGroup,
-            statusCode: outcome.statusCode,
-          }),
-        );
-      }
-      preliminary.ledger = snapshotToPlanLedger(snapshot);
-      runLedger = preliminary.ledger;
-      preliminary.log = [...holdLog];
-      await save(preliminary);
-    }
-
-    if (failedHolds.length > 0) {
-      if (options.allowUnheldTargets) {
-        for (const id of failedHolds) holdLog.push(`UNCHECKED DELETE allowed by allowUnheldTargets: ${id}`);
-      } else {
-        // Never checked, so never deleted: archiving hides the Input and Output rows a
-        // dangling reference would be found by.
-        const excluded = new Set(failedHolds.map((id) => id.toLowerCase()));
-        for (const id of failedHolds) {
-          results.push(
-            resultRow({
-              objectId: id,
-              name: nameOf(id),
-              operation: 'Delete',
-              status: 'Skipped',
-              message: 'NOT deleted: could not be restored out of the archive, so its Input/Output references were never checked',
-            }),
-          );
-          holdLog.push(`Excluded ${id} from the delete set: Hold failed, references unchecked`);
-        }
-        targets = targets.filter((id) => !excluded.has(id.toLowerCase()));
-        if (targets.length === 0) {
-          stop('No target could be restored out of the archive, so nothing will be deleted.');
-          preliminary.status = 'AbortedNoHeldTargets';
-          preliminary.log = [...holdLog];
-          await save(preliminary);
-          await cleanup(preliminary);
-          return finish();
-        }
-      }
-    }
-
-    // ---- Checkpoint after the Hold ----
-    index = await loadDeleteIndex(gateway);
-    if (archivedTargets.length > 0) {
-      emit({ kind: 'stage', stage: 'checking-collateral' });
-      let heldNow: string[] = [];
+    if (!dryRun) {
+      emit({ kind: 'stage', stage: 'holding-group' });
+      // DIFFERS: made for every real run, not only one with archived targets. A holder
+      // whose group is gone can only be read from the holding group, and the script
+      // blocked on one whenever every target was active. An empty group is deleted at
+      // cleanup.
       try {
-        heldNow = (await gateway.groupProcesses(tempGroup)).map((p) => p.processUniqueId).filter(Boolean);
+        tempGroup = await gateway.createGroup(holdingGroupName, null);
       } catch (error) {
         if (isFatal(error)) throw error;
+        stop(`Could not create the holding group (${failureOf(error).error}). Nothing has been changed.`);
+        return { results, plan: null };
       }
-      holdCollateral = newCollateral({ baseline: tenantBaseline, fresh: index, expected: targets, observed: heldNow });
-      runCollateral.push(...holdCollateral);
-      if (holdCollateral.length > 0) {
-        const phase = 'after holding archived targets';
-        emit({ kind: 'collateral', phase, collateral: holdCollateral });
-        const decision = await decideCollateral(holdCollateral, phase, { gate: decisions.collateral, acceptCollateral });
-        emit({ kind: 'collateralDecision', phase, accepted: decision.proceed, authority: decision.proceed ? acceptanceAuthority : null, count: holdCollateral.length });
-        results.push(...decision.rows);
-        if (!decision.proceed) {
-          stop('Processes that were not targets changed when the archived targets were restored. Nothing has been deleted.');
-          const aborted = newDependencyPlan(options.siteUrl, targets, now());
-          aborted.status = 'AbortedCollateral';
-          aborted.holdingGroup = tempGroup;
-          aborted.ledger = snapshotToPlanLedger(snapshot);
-          runLedger = aborted.ledger;
-          aborted.collateral = [...holdCollateral];
-          aborted.log = [...holdLog, ...holdCollateral.map((c) => `COLLATERAL after hold phase: ${c.uniqueId} (${c.name}) - ${c.change}`)];
-          await save(aborted);
-          await unwind(aborted);
-          emit({ kind: 'stage', stage: 'reversing-collateral' });
-          results.push(...(await restoreCollateral(collateralGateway(gateway, engine), holdCollateral)));
-          await cleanup(aborted);
-          return finish();
+      const archivedTargets = targets.filter((id) => index.get(id.toLowerCase())?.isArchived === true);
+      const preliminary = newDependencyPlan(options.siteUrl, targets, now());
+      preliminary.status = 'Holding';
+      preliminary.holdingGroup = tempGroup;
+      preliminary.ledger = snapshotToPlanLedger(snapshot);
+      runLedger = preliminary.ledger;
+      holdLog.push(`Holding group '${holdingGroupName}' created: id ${tempGroup.id}, uniqueId ${tempGroup.uniqueId}`);
+      holdLog.push(`About to restore ${archivedTargets.length} archived target(s) into the holding group`);
+      preliminary.log = [...holdLog];
+      // B4: on record before the first call that changes a process.
+      await save(preliminary);
+
+      const failedHolds: string[] = [];
+      for (const [i, target] of archivedTargets.entries()) {
+        emit({ kind: 'progress', label: 'Restoring archived targets into the holding group', done: i + 1, total: archivedTargets.length });
+        const outcome = await restoreProcess(gateway, target, tempGroup.id, { isFatal });
+        if (outcome.ok) {
+          markSnapshotRestored(snapshot, target, tempGroup.id);
+        } else {
+          failedHolds.push(target);
+          const stuckGroup = index.get(target.toLowerCase())?.groupId ?? null;
+          holdLog.push(`FAILED to restore target ${target} into the holding group (HTTP ${outcome.statusCode})`);
+          results.push(
+            resultRow({
+              objectId: target,
+              name: nameOf(target),
+              operation: 'Hold',
+              status: 'Failed',
+              message: `Could not restore into the holding group (HTTP ${outcome.statusCode}); still archived in group ${stuckGroup ?? 'unknown'}`,
+              groupId: stuckGroup,
+              statusCode: outcome.statusCode,
+            }),
+          );
+        }
+        preliminary.ledger = snapshotToPlanLedger(snapshot);
+        runLedger = preliminary.ledger;
+        preliminary.log = [...holdLog];
+        await save(preliminary);
+      }
+
+      if (failedHolds.length > 0) {
+        if (options.allowUnheldTargets) {
+          for (const id of failedHolds) holdLog.push(`UNCHECKED DELETE allowed by allowUnheldTargets: ${id}`);
+        } else {
+          // Never checked, so never deleted: archiving hides the Input and Output rows a
+          // dangling reference would be found by.
+          const excluded = new Set(failedHolds.map((id) => id.toLowerCase()));
+          for (const id of failedHolds) {
+            results.push(
+              resultRow({
+                objectId: id,
+                name: nameOf(id),
+                operation: 'Delete',
+                status: 'Skipped',
+                message: 'NOT deleted: could not be restored out of the archive, so its Input/Output references were never checked',
+              }),
+            );
+            holdLog.push(`Excluded ${id} from the delete set: Hold failed, references unchecked`);
+          }
+          targets = targets.filter((id) => !excluded.has(id.toLowerCase()));
+          if (targets.length === 0) {
+            stop('No target could be restored out of the archive, so nothing will be deleted.');
+            preliminary.status = 'AbortedNoHeldTargets';
+            preliminary.log = [...holdLog];
+            await save(preliminary);
+            await cleanup(preliminary);
+            return finish();
+          }
+        }
+      }
+
+      // ---- Checkpoint after the Hold ----
+      index = await loadDeleteIndex(gateway);
+      if (archivedTargets.length > 0) {
+        emit({ kind: 'stage', stage: 'checking-collateral' });
+        let heldNow: string[] = [];
+        try {
+          heldNow = (await gateway.groupProcesses(tempGroup)).map((p) => p.processUniqueId).filter(Boolean);
+        } catch (error) {
+          if (isFatal(error)) throw error;
+        }
+        holdCollateral = newCollateral({ baseline: tenantBaseline, fresh: index, expected: targets, observed: heldNow });
+        runCollateral.push(...holdCollateral);
+        if (holdCollateral.length > 0) {
+          const phase = 'after holding archived targets';
+          emit({ kind: 'collateral', phase, collateral: holdCollateral });
+          const decision = await decideCollateral(holdCollateral, phase, { gate: decisions.collateral, acceptCollateral });
+          emit({ kind: 'collateralDecision', phase, accepted: decision.proceed, authority: decision.proceed ? acceptanceAuthority : null, count: holdCollateral.length });
+          results.push(...decision.rows);
+          if (!decision.proceed) {
+            stop('Processes that were not targets changed when the archived targets were restored. Nothing has been deleted.');
+            const aborted = newDependencyPlan(options.siteUrl, targets, now());
+            aborted.status = 'AbortedCollateral';
+            aborted.holdingGroup = tempGroup;
+            aborted.ledger = snapshotToPlanLedger(snapshot);
+            runLedger = aborted.ledger;
+            aborted.collateral = [...holdCollateral];
+            aborted.log = [...holdLog, ...holdCollateral.map((c) => `COLLATERAL after hold phase: ${c.uniqueId} (${c.name}) - ${c.change}`)];
+            await save(aborted);
+            await unwind(aborted);
+            emit({ kind: 'stage', stage: 'reversing-collateral' });
+            results.push(...(await restoreCollateral(collateralGateway(gateway, engine), holdCollateral)));
+            await cleanup(aborted);
+            return finish();
+          }
         }
       }
     }
-  }
 
-  // ---- Plan ----
-  emit({ kind: 'stage', stage: 'building-plan' });
-  const plan = await buildDeletePlan(gateway, {
-    siteUrl: options.siteUrl,
-    targetUniqueIds: targets,
-    index,
-    holdingGroupId: tempGroup?.id ?? null,
-    allowRestore: !dryRun,
-    scanActiveForInputOutput: options.thoroughScan,
-    preHoldSnapshot: snapshot,
-    // A preview proceeds past nothing; a run asks.
-    onFailedTargets: dryRun ? () => false : decisions.failedTargets,
-    onEvent: options.onEvent,
-    isFatal,
-    now: now(),
-  });
-  plan.log = [...holdLog, ...plan.log];
-  plan.holdingGroup = tempGroup;
-  if (holdCollateral.length > 0) {
-    plan.collateral.push(...holdCollateral);
-    plan.log.push(...holdCollateral.map((c) => `COLLATERAL after hold phase (accepted): ${c.uniqueId} (${c.name}) - ${c.change}`));
-  }
-  runLedger = plan.ledger;
-
-  if (plan.status === 'Blocked') {
-    stop(`Planning was blocked. Nothing has been deleted. ${plan.log.at(-1) ?? ''}`.trim());
-    // The snapshot folded in, never assigned over: that is what lost eleven holders (R11).
-    plan.ledger = mergePlanLedger(plan.ledger, snapshot);
+    // ---- Plan ----
+    emit({ kind: 'stage', stage: 'building-plan' });
+    const plan = await buildDeletePlan(gateway, {
+      siteUrl: options.siteUrl,
+      targetUniqueIds: targets,
+      index,
+      holdingGroupId: tempGroup?.id ?? null,
+      allowRestore: !dryRun,
+      scanActiveForInputOutput: options.thoroughScan,
+      preHoldSnapshot: snapshot,
+      // A preview proceeds past nothing; a run asks.
+      onFailedTargets: dryRun ? () => false : decisions.failedTargets,
+      onEvent: options.onEvent,
+      isFatal,
+      now: now(),
+    });
+    plan.log = [...holdLog, ...plan.log];
+    plan.holdingGroup = tempGroup;
+    if (holdCollateral.length > 0) {
+      plan.collateral.push(...holdCollateral);
+      plan.log.push(...holdCollateral.map((c) => `COLLATERAL after hold phase (accepted): ${c.uniqueId} (${c.name}) - ${c.change}`));
+    }
     runLedger = plan.ledger;
+
+    if (plan.status === 'Blocked') {
+      stop(`Planning was blocked. Nothing has been deleted. ${plan.log.at(-1) ?? ''}`.trim());
+      // The snapshot folded in, never assigned over: that is what lost eleven holders (R11).
+      plan.ledger = mergePlanLedger(plan.ledger, snapshot);
+      runLedger = plan.ledger;
+      await save(plan);
+      if (dryRun) return { results, plan };
+      await unwind(plan);
+      await cleanup(plan);
+      return finish();
+    }
+
+    for (const failed of plan.failedTargets) {
+      results.push(
+        resultRow({
+          objectId: failed.uniqueId,
+          name: nameOf(failed.uniqueId),
+          operation: 'DependencyCheck',
+          status: 'Failed',
+          message: `Excluded from the run: HTTP ${failed.status} ${failed.error ?? ''}`.trimEnd(),
+          statusCode: failed.status,
+        }),
+      );
+    }
+    targets = [...plan.targetUniqueIds];
     await save(plan);
     if (dryRun) return { results, plan };
-    await unwind(plan);
-    await cleanup(plan);
-    return finish();
-  }
 
-  for (const failed of plan.failedTargets) {
-    results.push(
-      resultRow({
-        objectId: failed.uniqueId,
-        name: nameOf(failed.uniqueId),
-        operation: 'DependencyCheck',
-        status: 'Failed',
-        message: `Excluded from the run: HTTP ${failed.status} ${failed.error ?? ''}`.trimEnd(),
-        statusCode: failed.status,
-      }),
-    );
-  }
-  targets = [...plan.targetUniqueIds];
-  await save(plan);
-  if (dryRun) return { results, plan };
+    // Each stop from here is the same: put back what the run un-archived, then clean up.
+    const stopAndUnwind = async (reason: string): Promise<BulkDeleteRun> => {
+      stop(reason);
+      await save(plan);
+      await unwind(plan);
+      await cleanup(plan);
+      return finish();
+    };
 
-  // Each stop from here is the same: put back what the run un-archived, then clean up.
-  const stopAndUnwind = async (reason: string): Promise<BulkDeleteRun> => {
-    stop(reason);
-    await save(plan);
-    await unwind(plan);
-    await cleanup(plan);
-    return finish();
-  };
+    const incomplete = incompletePlanStop(plan);
+    if (incomplete) return stopAndUnwind(incomplete);
 
-  const incomplete = incompletePlanStop(plan);
-  if (incomplete) return stopAndUnwind(incomplete);
-
-  if (plan.unresolved.length > 0) {
-    const go = decisions.unresolved ? (await decisions.unresolved(plan.unresolved)) === true : false;
-    if (!go) return stopAndUnwind(`${plan.unresolved.length} participant(s) could not be resolved. Nothing has been deleted.`);
-  }
-  const gate = reconciliationGate(plan.reconciliation);
-  if (gate.blocking.length > 0) {
-    const go = decisions.mismatches ? (await decisions.mismatches(gate.blocking)) === true : false;
-    if (!go) return stopAndUnwind(`${gate.blocking.length} reconciliation mismatch(es). Nothing has been deleted.`);
-  }
-  if (gate.overClaims.length > 0) {
-    const go = decisions.overClaims ? (await decisions.overClaims(gate.overClaims)) === true : false;
-    if (!go) return stopAndUnwind(`${gate.overClaims.length} pair(s) claimed more than was found, and were not acknowledged. Nothing has been deleted.`);
-  }
-
-  // ---- Remove references ----
-  const drafts = plan.draftHolders ?? [];
-  const publishDrafts = drafts.length > 0 && decisions.publishDrafts ? await decisions.publishDrafts(drafts) : [];
-  const removal = await removePlanReferences(gateway, plan, {
-    ...engine,
-    changeDescription: options.changeDescription,
-    publishDrafts,
-    onEvent: options.onEvent,
-  });
-  results.push(...removal.results);
-  await save(plan);
-  if (removal.verificationFailed.length > 0) {
-    const go = decisions.verificationFailed ? (await decisions.verificationFailed(removal.verificationFailed)) === true : false;
-    if (!go) {
-      return stopAndUnwind(`Verification failed: references remain on ${removal.verificationFailed.length} process(es). Deleting now would leave them broken.`);
+    if (plan.unresolved.length > 0) {
+      const go = decisions.unresolved ? (await decisions.unresolved(plan.unresolved)) === true : false;
+      if (!go) return stopAndUnwind(`${plan.unresolved.length} participant(s) could not be resolved. Nothing has been deleted.`);
     }
-  }
+    const gate = reconciliationGate(plan.reconciliation);
+    if (gate.blocking.length > 0) {
+      const go = decisions.mismatches ? (await decisions.mismatches(gate.blocking)) === true : false;
+      if (!go) return stopAndUnwind(`${gate.blocking.length} reconciliation mismatch(es). Nothing has been deleted.`);
+    }
+    if (gate.overClaims.length > 0) {
+      const go = decisions.overClaims ? (await decisions.overClaims(gate.overClaims)) === true : false;
+      if (!go) return stopAndUnwind(`${gate.overClaims.length} pair(s) claimed more than was found, and were not acknowledged. Nothing has been deleted.`);
+    }
 
-  // ---- Delete ----
-  const toDelete = targets.length - new Set(removal.heldBack.map((h) => h.targetUniqueId.toLowerCase())).size;
-  const confirmed = decisions.confirmDelete ? (await decisions.confirmDelete(toDelete)) === true : true;
-  if (!confirmed) return stopAndUnwind('Deletion cancelled. Nothing has been deleted.');
-
-  const holdingGroupNow = tempGroup;
-  const deletion = await deletePlanTargets(gateway, plan, {
-    ...engine,
-    tenantBaseline,
-    onCollateral: acceptCollateral ? () => true : decisions.collateral,
-    acceptanceAuthority,
-    getObservedUniqueIds: holdingGroupNow
-      ? async () => (await gateway.groupProcesses(holdingGroupNow)).map((p) => p.processUniqueId).filter(Boolean)
-      : undefined,
-    heldBack: removal.heldBack,
-    onEvent: options.onEvent,
-  });
-  results.push(...deletion);
-  runCollateral.push(...plan.collateral);
-
-  if (!deletion.some((r) => r.operation === 'Delete')) {
-    // The archive pass moved something that was not a target, and nobody accepted it.
-    plan.status = 'AbortedCollateral';
-    stop('Processes that were not targets changed when the targets were archived. Nothing has been deleted.');
+    // ---- Remove references ----
+    const drafts = plan.draftHolders ?? [];
+    const publishDrafts = drafts.length > 0 && decisions.publishDrafts ? await decisions.publishDrafts(drafts) : [];
+    const removal = await removePlanReferences(gateway, plan, {
+      ...engine,
+      onRow: addRow,
+      changeDescription: options.changeDescription,
+      publishDrafts,
+      onEvent: options.onEvent,
+    });
     await save(plan);
-    await unwind(plan);
-    emit({ kind: 'stage', stage: 'reversing-collateral' });
-    results.push(...(await restoreCollateral(collateralGateway(gateway, engine), dedupeCollateral(plan.collateral))));
-    await cleanup(plan);
-    return finish();
-  }
+    if (removal.verificationFailed.length > 0) {
+      const go = decisions.verificationFailed ? (await decisions.verificationFailed(removal.verificationFailed)) === true : false;
+      if (!go) {
+        return stopAndUnwind(`Verification failed: references remain on ${removal.verificationFailed.length} process(es). Deleting now would leave them broken.`);
+      }
+    }
 
-  // ---- Put back what the run restored, then clean up ----
-  await unwind(plan);
-  await cleanup(plan);
-  plan.status = 'Completed';
-  await save(plan);
-  return finish();
+    // ---- Delete ----
+    const toDelete = targets.length - new Set(removal.heldBack.map((h) => h.targetUniqueId.toLowerCase())).size;
+    const confirmed = decisions.confirmDelete ? (await decisions.confirmDelete(toDelete)) === true : true;
+    if (!confirmed) return stopAndUnwind('Deletion cancelled. Nothing has been deleted.');
+
+    const holdingGroupNow = tempGroup;
+    const deletion = await deletePlanTargets(gateway, plan, {
+      ...engine,
+      tenantBaseline,
+      onCollateral: acceptCollateral ? () => true : decisions.collateral,
+      acceptanceAuthority,
+      getObservedUniqueIds: holdingGroupNow
+        ? async () => (await gateway.groupProcesses(holdingGroupNow)).map((p) => p.processUniqueId).filter(Boolean)
+        : undefined,
+      heldBack: removal.heldBack,
+      onRow: addRow,
+      onEvent: options.onEvent,
+    });
+    runCollateral.push(...plan.collateral);
+
+    if (!deletion.some((r) => r.operation === 'Delete')) {
+      // The archive pass moved something that was not a target, and nobody accepted it.
+      plan.status = 'AbortedCollateral';
+      stop('Processes that were not targets changed when the targets were archived. Nothing has been deleted.');
+      await save(plan);
+      await unwind(plan);
+      emit({ kind: 'stage', stage: 'reversing-collateral' });
+      results.push(...(await restoreCollateral(collateralGateway(gateway, engine), dedupeCollateral(plan.collateral))));
+      await cleanup(plan);
+      return finish();
+    }
+
+    // ---- Put back what the run restored, then clean up ----
+    await unwind(plan);
+    await cleanup(plan);
+    plan.status = 'Completed';
+    await save(plan);
+    return finish();
+  } catch (error) {
+    // A run that dies (a session that ends) can do nothing more against the tenant. Its
+    // saved plan carries the rows made so far, so the resumed unwind reports them too.
+    if (lastSaved) {
+      const saved: DependencyPlan = lastSaved;
+      saved.interruptedResults = [...results];
+      await options.planStore.save(saved).catch(() => undefined);
+    }
+    throw error;
+  }
 }
 
 /** One entry per process, first seen wins: the checkpoints and the plan can both carry one. */
@@ -590,24 +606,27 @@ export async function resumeUnwind(gateway: DeleteGateway, plan: DependencyPlan,
     }
   }
 
-  if (plan.holdingGroup) {
+  if (plan.holdingGroup && !plan.holdingGroupRemoved) {
     options.onEvent?.({ kind: 'stage', stage: 'cleanup' });
-    results.push(
-      ...(await removeHoldingGroup(
-        gateway,
-        plan.holdingGroup,
-        {
-          groupName: plan.holdingGroup.name || HOLDING_GROUP_NAME,
-          targetUniqueIds: plan.targetUniqueIds,
-          reportedUniqueIds: collateral.map((c) => c.uniqueId),
-        },
-        isFatal,
-      )),
+    const rows = await removeHoldingGroup(
+      gateway,
+      plan.holdingGroup,
+      {
+        groupName: plan.holdingGroup.name || HOLDING_GROUP_NAME,
+        targetUniqueIds: plan.targetUniqueIds,
+        reportedUniqueIds: collateral.map((c) => c.uniqueId),
+      },
+      isFatal,
     );
+    results.push(...rows);
+    plan.holdingGroupRemoved = rows.some((r) => r.operation === 'Cleanup' && r.status === 'Success');
   }
   plan.log.push(`Unwound from the saved plan on ${new Date().toISOString()}`);
   await save();
-  const rows = await resolveRunOutcome(gateway, collateral, plan.ledger, results, { onEvent: options.onEvent });
+  // The interrupted run's rows first: together they name every process the run changed.
+  const rows = await resolveRunOutcome(gateway, collateral, plan.ledger, [...(plan.interruptedResults ?? []), ...results], {
+    onEvent: options.onEvent,
+  });
   return { results: rows, plan };
 }
 

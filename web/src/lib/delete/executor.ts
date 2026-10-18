@@ -50,6 +50,24 @@ export interface EngineOptions {
   approvalsEnabled?: boolean | undefined;
   /** An error that ends the run (a dead session) is rethrown rather than reported. */
   isFatal?: ((error: unknown) => string | null) | undefined;
+  /**
+   * Each results row as it is made, not only in the array returned at the end: a run that
+   * dies part-way still knows every process it changed (old T1, found by the offline
+   * resume in W5 phase 7).
+   */
+  onRow?: ((row: ResultRow) => void) | undefined;
+}
+
+/** Rows that also go to `onRow` as each is added. */
+function reportingRows(onRow: ((row: ResultRow) => void) | undefined): ResultRow[] {
+  const rows: ResultRow[] = [];
+  if (!onRow) return rows;
+  const push = rows.push.bind(rows);
+  rows.push = (...items: ResultRow[]) => {
+    for (const item of items) onRow(item);
+    return push(...items);
+  };
+  return rows;
 }
 
 /** Why a restore did not happen. `MissingGroup`: never sent, because the group is known to be gone. */
@@ -272,7 +290,7 @@ export async function removePlanReferences(
   } = {},
 ): Promise<ReferenceRemovalRun> {
   const isFatal = options.isFatal ?? defaultIsFatal;
-  const results: ResultRow[] = [];
+  const results = reportingRows(options.onRow);
   const heldBack: HeldBackTarget[] = [];
   const ticked = new Set((options.publishDrafts ?? []).map((id) => id.toLowerCase()));
   const workItems = plan.workItems;
@@ -468,7 +486,7 @@ export async function deletePlanTargets(
   options: TargetDeletionOptions = {},
 ): Promise<ResultRow[]> {
   const isFatal = options.isFatal ?? defaultIsFatal;
-  const results: ResultRow[] = [];
+  const results = reportingRows(options.onRow);
   const targets = plan.targetUniqueIds;
   const recordOf = (uniqueId: string) => plan.ledger.find((r) => r.uniqueId.toLowerCase() === uniqueId.toLowerCase());
   const nameOf = (uniqueId: string) => recordOf(uniqueId)?.name || resolveClaimName(plan.claims, uniqueId);
@@ -529,7 +547,10 @@ export async function deletePlanTargets(
         count: collateral.length,
       });
       // An unwanted archive can be undone; a delete cannot. So no gate means stop.
-      if (!decision.proceed) return [...results, ...decision.rows];
+      if (!decision.proceed) {
+        results.push(...decision.rows);
+        return results;
+      }
       results.push(...collateralAcceptanceRows(collateral, PRE_DELETE_PHASE, authority));
     }
   }
@@ -703,7 +724,7 @@ export async function restorePlanState(
   options: RestorePlanStateOptions,
 ): Promise<ResultRow[]> {
   const isFatal = options.isFatal ?? defaultIsFatal;
-  const results: ResultRow[] = [];
+  const results = reportingRows(options.onRow);
   // The ledger, not the target list: holders as well as targets (old T1).
   const toRestore = plan.ledger.filter((e) => e.wasArchived && e.restoredByThisRun && !e.denormalized && !e.deleted);
   if (toRestore.length === 0) return results;

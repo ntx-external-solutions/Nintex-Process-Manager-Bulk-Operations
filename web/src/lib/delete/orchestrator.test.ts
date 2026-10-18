@@ -197,3 +197,57 @@ test('the summary counts a process raised by two producers once, and leaves acce
   assert.equal(summary.accepted, 1);
   assert.match(summary.lines.join('\n'), /THIS RUN CHANGED PROCESSES IT WAS NOT ASKED TO/);
 });
+
+// ---------------------------------------------------------------- the holder only the archive scan finds
+
+test('an archived holder only the archive scan finds is restored, edited, and archived again', async () => {
+  // Found by the offline run: the script recorded such a holder and never restored it, so
+  // its hidden Input could not be removed and verification stopped every run that had one.
+  const holderModel: ProcessModel = {
+    UniqueId: X1,
+    Name: 'Old intake',
+    Version: '1.0',
+    ProcessRevisionStateId: 3,
+    Inputs: { Input: [{ Id: 1, FromProcessUniqueId: T1 }] },
+  };
+  const tenant = scenario([
+    { uniqueId: T1, name: 'Raise invoice', groupId: HOME.id },
+    { uniqueId: X1, name: 'Old intake', archived: true, groupId: HOME.id, model: holderModel },
+  ]);
+  const { rows, plan } = await run(tenant);
+
+  assert.equal(tenant.callsTo('restore', X1)[0]?.groupId, HOME.id, 'restored in place, into its own group');
+  assert.equal(rowsOf(rows, 'RemoveReferences')[0]?.status, 'Success', 'its hidden reference is removed');
+  assert.deepEqual(tenant.deleted, [T1], 'so the target can be deleted');
+  assert.equal(tenant.isArchived(X1), true, 'and the holder is archived again');
+  assert.equal(rows.find((r) => r.objectId === X1 && r.operation === 'ReArchiveHolder')?.status, 'Success');
+  assert.equal(plan?.ledger.find((e) => e.uniqueId === X1)?.restoredByThisRun, true);
+});
+
+test('a run that dies keeps its rows in the plan, and the resumed unwind reports them with its own', async () => {
+  const holderModel: ProcessModel = {
+    UniqueId: X1,
+    Name: 'Old intake',
+    Version: '1.0',
+    ProcessRevisionStateId: 3,
+    Inputs: { Input: [{ Id: 1, FromProcessUniqueId: T1 }] },
+  };
+  const tenant = scenario([
+    { uniqueId: T1, name: 'Raise invoice', groupId: HOME.id },
+    { uniqueId: X1, name: 'Old intake', archived: true, groupId: HOME.id, model: holderModel },
+  ]);
+  // The session ends at the pre-delete archive, after the holder was edited and published.
+  tenant.fail = (call) => (call.op === 'archive' ? { status: 401, message: 'session ended' } : null);
+  const store = new FakePlanStore();
+  const isFatal = (e: unknown) => ((e as { status?: number }).status === 401 ? 'Your session ended.' : null);
+  await assert.rejects(runBulkDelete(tenant, { siteUrl: SITE, source: { kind: 'ids', ids: [T1] }, planStore: store, isFatal }));
+
+  const saved = store.latest();
+  assert.equal(saved?.interruptedResults?.find((r) => r.objectId === X1)?.operation, 'RemoveReferences', 'the edit is on record');
+
+  tenant.fail = undefined;
+  const resumed = await resumeUnwind(tenant, saved!, { planStore: store });
+  const ops = resumed.results.filter((r) => r.objectId === X1).map((r) => r.operation);
+  assert.deepEqual(ops, ['RemoveReferences', 'ReArchiveHolder'], 'the results file names the edit and the re-archive');
+  assert.equal(tenant.isArchived(X1), true);
+});
