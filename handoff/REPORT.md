@@ -6,6 +6,97 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## W4. Bulk Update Ownership
+
+Commit `d0062e7` on `claude/web-w4-ownership`, stacked on F1.
+
+**What changed.**
+
+- `ownership/csv.ts`: `parseOwnershipCsv` takes the script's column names, in any case,
+  BOM stripped, the first non-blank matching column winning (`Get-RowValue`). It refuses a
+  file with no id column, naming the columns it found, and lists non-GUID ids for a
+  warning.
+- `ownership/plan.ts`: `resolveCell` follows the script's cell rules: blank leaves the role
+  unchanged, the five unassign keywords set id 2 "Needs to be reassigned N/A", a number is
+  a user id, anything else a logon. Logons are matched case-insensitively against the
+  SCIM directory, and a logon two accounts share is refused, not guessed (`scim.ts`).
+  `buildOwnershipPlan` applies the script's row rules with its wording, reads each
+  process once, and picks a `WritePath` with PGM's rules (`chooseWritePath`).
+  `describeChange` uses the script's "Owner: Old (id 7) -> New (id 101)".
+- `ownership/run.ts`: `runOwnership` sends one `process.setOwnership` per process and,
+  when the path publishes, one `process.publishNow` with the change description as
+  `PublishMessage`. Both steps are journaled and never resent. Two at a time.
+  `settleOwnership` settles every written row from a fresh read of the process.
+- `pm/ownership.ts`: `getOwnership` (compact: roles, revision, permissions) and
+  `setOwnership`, the read-modify-write on the server. It refuses if
+  `ProcessRevisionEditId` moved since the preview, saves through PGM's
+  `buildUpdateEnvelope`/`updateProcess` (now in `pm/processes.ts`: `ProcessJson` as a
+  string, `DoPublish: false`, `SuppressChangeNotification: true`), then reads the new
+  revision for the publish.
+- `pm/scim.ts`: the display name now prefers SCIM `displayName`, as the script does, so
+  the name written into `Owner`/`Expert` matches the script's.
+- Proxy: `process.setOwnership` (write: one GUID, a positive revision, each role null or
+  exactly `{ id, name }`, at least one role, a change description, `submitForApproval`
+  boolean, and no other field, including `suppressChangeNotification`).
+  `process.ownership` and `users.directory` (the SCIM key and nothing else) are reads.
+  `WRITE_OPERATIONS` is now archive, publishNow, group.delete, node.move and
+  setOwnership.
+- UI: `/ownership`, enabled on the landing page. Upload, SCIM key, publish choice
+  (default "Save only", the script's behavior), then preview, change description and
+  confirm.
+
+**Decisions from the spec.** `SuppressChangeNotification` is always true, and there is no
+switch to turn notifications on, as PGM did. "Save only" and "Match current state" are
+PGM's. Under either, a process in progress is only saved, a process awaiting approval is
+Blocked, and a published process the user can neither publish nor submit is Blocked
+under "Match current state".
+
+**Results-file operations.** `UpdateOwnership` (the script's Mode 4 name), `ObjectType`
+`Process`, in the shared columns, not the standalone script's
+`ProcessID,ProcessName,Status,Message,ActionUrl`. Statuses: `Success`, `Preview`,
+`Skipped` (the script's reasons, plus already set, archived, and changed since the
+preview), `Pending` (published but awaiting approval), `Blocked` (permission, awaiting
+approval, or a 4xx), `Failed`, `Unverified`. Messages carry the CSV line numbers.
+
+**Tests.** 269 tests, 269 pass (25 new). Covered: column aliases, case, BOM, first
+non-blank match, the refusals, every cell rule including ids, inactive users and shared
+logons, each script row rule, folding rows, already set and stale names, 404/5xx/archived
+reads, a dead session in planning, every write path, the preview wording, the save and
+publish calls and their arguments, a conflict, a 4xx, a failed publish, a missing
+revision, a dead session mid-run, journal replay, and each settle outcome. Proxy tests:
+the parse refusals above, and the PUT body (model as a string, only named roles changed,
+everything else passed through, suppression on), the conflict check, and the compact
+read.
+
+**End-to-end, offline.** `web/dev/drive-ownership.mjs` against the extended mock, with
+"Match current state": a published process saved and published (one PUT, one Publish
+with the description), one in progress saved only, one set to the placeholder and
+published, and rows skipped for an unknown username, a non-GUID id and an empty row. All
+three settled Success from the final read. The archive and move scenarios still give
+their earlier results against the extended mock.
+
+**Decisions Cowork should check.**
+
+- **Several rows for one process are folded into one write**, the last non-blank cell
+  per role winning. The script saved once per row, so the end state is the same with
+  fewer revisions.
+- **Rows that change nothing are not saved** ("Already set"). The script saved them
+  anyway, bumping a version.
+- **Non-GUID ids are skipped without a call.** The script tried them and failed on the
+  read.
+- **An archived process is skipped** when its model says `isArchived`. If the tenant
+  answers 404 for archived processes instead, the row is Failed "Process not found ...
+  An archived process cannot be read this way". Not measured.
+- **The SCIM directory is read whole** (`scim.ts`), not one filter query per username as
+  the script does. One paged read per run. `SCIM_BASE_URL` overrides the host.
+- **Submit-then-publish is one PUT with `DoSubmitForApproval: true`, then Publish**,
+  as PGM's code does. PGM's design notes describe save, then submit, then publish as
+  three writes. Worth one live check on a process where `CanPublishAfterEdit` is false.
+- **Not measured live:** whether a 200 Publish after an ownership save can still be
+  queued for approval. The final read reports that as Pending.
+
+---
+
 ## F1. Answers to the W2 to W3 questions, and one cleanup bug
 
 Commit `c1667ad` on `claude/web-f1-fixes`.

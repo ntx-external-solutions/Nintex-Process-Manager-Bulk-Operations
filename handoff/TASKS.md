@@ -205,7 +205,7 @@ S2 measured the revision effects, and the preview must show them:
 
 ## W4. Bulk Update Ownership
 
-Status: Ready (after F1)
+Status: Done (d0062e7)
 
 Port `Update-ProcessOwnership.ps1`: same CSV columns and cell rules, SCIM lookup via
 `scim.ts` with the key entered per run. Two changes from the script, both explained in
@@ -214,9 +214,43 @@ only" or "match current state" for published processes, the way PGM does it.
 
 ---
 
+## F2. Fixes from live round R12
+
+Status: Ready (after W4, before W5)
+
+R12 ran Archive, folder cleanup and Move on `https://bulk.ntx-poc.com/` against test
+content on the demo tenant. All three worked end to end and the tenant matched every
+results row (report: project doc `claude/bulk-ops-r12-2026-10-18.md`). Three fixes:
+
+- **A dead session crashes instead of signing out.** Measured with an invalid bearer
+  token and no cookies: the tenant answers **401** on `GetChildProcessGroupTreeItems`,
+  the BFF process list and `ReorderTreeNodes`, but **302** on `GET /Api/v1/Processes/{id}`
+  and `POST /Process/Edit/ArchiveProcess`. It never answered 403. `pmRequest` uses the
+  default `fetch`, which follows the 302 to a login page, gets HTML with a 2xx, and
+  `JSON.parse` throws. The proxy then returns a 500 "Unexpected error" per process, and
+  the operator is never told to sign in again. Nothing is written, so it's safe, but a
+  long run would fail every row. Fix:
+  - call `fetch` with `redirect: 'manual'` and treat any 3xx from the tenant as a dead
+    session, exactly like 401 (`signedOut: true`);
+  - when JSON is expected and the body isn't JSON, raise a `PmError` with the status and a
+    short excerpt, not a `SyntaxError`;
+  - keep 403 as a per-process refusal. That was the right call.
+  - Tests: a 302 and a 2xx HTML body each sign out cleanly mid-run, and the runner stops.
+- **Destination picker layout.** On `/move`, "Choose where it goes" renders radio
+  buttons centered and labels pushed to the right edge, wrapping. Cause: the radio
+  `<input>` in `li.tree-row` (a flex row) computes to `width: 579px`, so a global
+  input width rule is reaching radios. Scope that rule to text inputs, or set
+  `.tree-row input[type=radio] { width: auto; flex: none; }`.
+- **Move result rows read like the preview.** After the run, each process row still
+  says "Its open draft will be published along with the move." Use the final read to say
+  what happened, with the version: for example "Moved. Published as 2.0; the open draft
+  went live." The preview wording stays as is.
+
+---
+
 ## W5. Bulk Delete engine
 
-Status: Ready (after W4; start by porting the tests)
+Status: Ready (after F2; start by porting the tests)
 
 This is the big one, so break it up: one PR per phase (tests and fixtures first, then
 discovery, hold, reference removal, checkpoints, delete, unwind), each green on its own.
