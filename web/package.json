@@ -1,0 +1,28 @@
+{
+  "name": "bulk-operations-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Bulk archive, delete, move and ownership updates for Nintex Process Manager",
+  "scripts": {
+    "test": "node --test 'src/**/*.test.ts'",
+    "typecheck": "tsc --noEmit",
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "engines": {
+    "node": "24.x"
+  },
+  "dependencies": {
+    "next": "^16.3.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "typescript": "^7.0.2"
+  }
+}

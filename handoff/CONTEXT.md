@@ -7,7 +7,10 @@ Maintained by the Cowork session. Claude Code reads this but does not edit it.
 - Code: v4.11 at `3454d69` on `claude/main`.
 - Last live test: R11, `-Mode 5 -Source CSV -Force -AcceptCollateral` over the first 20
   archived processes in the demo tenant.
-- Next: T1 and T2 in `TASKS.md`, then R12 runs the same command again.
+- Direction changed 18 Oct: the product becomes a web app on Vercel (see `SPEC-WEB.md`).
+  The PowerShell is frozen at v4.11 and kept as the reference for the delete engine.
+- Next: W0 to W2 in `TASKS.md`. In parallel, Cowork runs spikes S1 to S3 against the
+  demo tenant.
 
 ## What R11 confirmed working
 
