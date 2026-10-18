@@ -167,17 +167,17 @@ export function resolveSelection(tree: BrowseTree, selection: Selection): Resolu
 const MAX_PASSES = 64;
 
 /**
- * Read whatever the selection needs, then resolve it.
+ * Read levels until `attempt` can answer, then return its answer.
  *
- * Returns the tree as well, with every level it read attached, so the caller can keep
- * it and the screen shows what the plan was built from.
+ * `attempt` is a pure resolver that either completes or names the groups it needs read.
+ * Shared by the archive resolver below and the move resolver (lib/move/select.ts).
  */
-export async function loadForSelection(
+export async function readUntilResolved<R extends { status: 'complete' }>(
   gateway: PlanGateway,
   tree: BrowseTree,
-  selection: Selection,
+  attempt: (tree: BrowseTree) => R | { status: 'incomplete'; unloaded: string[] },
   options: { concurrency?: number; onProgress?: (levelsRead: number) => void } = {},
-): Promise<{ tree: BrowseTree; resolution: Extract<Resolution, { status: 'complete' }> }> {
+): Promise<{ tree: BrowseTree; resolution: R }> {
   const concurrency = Math.max(1, options.concurrency ?? 8);
   let current = tree;
   let read = 0;
@@ -189,8 +189,8 @@ export async function loadForSelection(
   }
 
   for (let pass = 0; pass < MAX_PASSES; pass++) {
-    const resolution = resolveSelection(current, selection);
-    if (resolution.status === 'complete') return { tree: current, resolution };
+    const resolution = attempt(current);
+    if (resolution.status === 'complete') return { tree: current, resolution: resolution as R };
 
     for (let i = 0; i < resolution.unloaded.length; i += concurrency) {
       const batch = resolution.unloaded.slice(i, i + concurrency);
@@ -209,4 +209,19 @@ export async function loadForSelection(
     `Gave up reading the group tree after ${MAX_PASSES} levels. ` +
       `This usually means the tree is far deeper than expected.`,
   );
+}
+
+/**
+ * Read whatever the selection needs, then resolve it.
+ *
+ * Returns the tree as well, with every level it read attached, so the caller can keep
+ * it and the screen shows what the plan was built from.
+ */
+export function loadForSelection(
+  gateway: PlanGateway,
+  tree: BrowseTree,
+  selection: Selection,
+  options: { concurrency?: number; onProgress?: (levelsRead: number) => void } = {},
+): Promise<{ tree: BrowseTree; resolution: Extract<Resolution, { status: 'complete' }> }> {
+  return readUntilResolved(gateway, tree, (current) => resolveSelection(current, selection), options);
 }

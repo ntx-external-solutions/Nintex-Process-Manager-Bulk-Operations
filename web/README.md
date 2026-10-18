@@ -3,12 +3,13 @@
 The web replacement for the PowerShell script in the repository root. The design is
 in [`handoff/SPEC-WEB.md`](../handoff/SPEC-WEB.md).
 
-Status: Bulk Archive works (W2). The tree browser and archived view are built (W1).
-Delete, Move and Update Ownership are disabled tiles until the tasks that build them
-land.
+Status: Bulk Archive (W2, with folder cleanup from W2b) and Bulk Move (W3) work. The
+tree browser and archived view are built (W1). Delete and Update Ownership are disabled
+tiles until the tasks that build them land.
 
-The proxy can write two things, both naming exactly one process: `process.archive` and
-`process.publishNow` (the approval override). Everything else it does is a read.
+The proxy can write four things, each naming exactly one process, group or node:
+`process.archive`, `process.publishNow` (the approval override), `group.delete` and
+`node.move`. Everything else it does is a read.
 
 ## Where the foundation came from
 

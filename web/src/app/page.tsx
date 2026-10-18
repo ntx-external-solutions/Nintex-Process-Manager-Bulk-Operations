@@ -35,7 +35,7 @@ const OPERATIONS: readonly OperationTile[] = [
   {
     title: 'Bulk Move',
     summary: 'Move processes or groups to another group.',
-    href: null,
+    href: '/move',
   },
   {
     title: 'Bulk Update Ownership',

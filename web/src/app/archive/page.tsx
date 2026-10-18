@@ -22,16 +22,10 @@ import {
 } from '@/lib/archive/plan.ts';
 import type { VariationSet } from '@/lib/pm/processes.ts';
 import { ARCHIVE_STATUSES } from '@/lib/archive/outcome.ts';
-import {
-  collateralRows,
-  manualReviewCsvRows,
-  processLink,
-  runArchive,
-  settleFromFinalRead,
-} from '@/lib/archive/run.ts';
+import { collateralRows, manualReviewCsvRows, runArchive, settleFromFinalRead } from '@/lib/archive/run.ts';
 import { toCsv } from '@/lib/csv/parse.ts';
 import { Journal, loadJournal, sessionJournalStore, type JournalEntry } from '@/lib/exec/journal.ts';
-import { countByStatus, resultsToCsv, type ResultRow } from '@/lib/exec/report.ts';
+import { resultsToCsv, type ResultRow } from '@/lib/exec/report.ts';
 import { createControls, errorMessage } from '@/lib/exec/runner.ts';
 import { revalidatePlacements, type StaleFinding } from '@/lib/plan/revalidate.ts';
 import { loadForSelection } from '@/lib/select/resolve.ts';
@@ -41,10 +35,11 @@ import { datedFilename, downloadCsv } from '@/lib/ui/download.ts';
 import {
   browserArchiveGateway,
   browserGateway,
-  currentSession,
   PmRequestError,
   type SessionInfo,
 } from '@/lib/ui/gateway.ts';
+import { ResultsSummary } from '../components/ResultsSummary.tsx';
+import { SessionGate } from '../components/SessionGate.tsx';
 import { TreeBrowser, useBrowseTree } from '../components/TreeBrowser.tsx';
 import { CleanupPanel } from './CleanupPanel.tsx';
 import type { ProcessIndex } from '@/lib/tenant/state.ts';
@@ -63,45 +58,12 @@ type Stage =
       after: ProcessIndex | null;
     };
 
-const NEEDS_ATTENTION: ReadonlySet<string> = new Set(['Blocked', 'Failed', 'Pending', 'Unverified', 'Unreversed']);
-
 export default function ArchivePage() {
-  const [session, setSession] = useState<SessionInfo | null>(null);
-  const [checking, setChecking] = useState(true);
-  const [signedOut, setSignedOut] = useState(false);
-
-  useEffect(() => {
-    void currentSession().then((info) => {
-      setSession(info);
-      setChecking(false);
-    });
-  }, []);
-
-  if (checking) {
-    return (
-      <main>
-        <h1>Bulk Archive</h1>
-        <p className="lede">Checking your session…</p>
-      </main>
-    );
-  }
-
-  if (session === null || signedOut) {
-    return (
-      <main>
-        <h1>Bulk Archive</h1>
-        <div className="panel warning">
-          <h2>{signedOut ? 'Your session ended' : 'Not signed in'}</h2>
-          <p>
-            <a href="/">Sign in</a> to continue.
-            {signedOut && ' Then build the plan again. Anything already archived is listed as skipped.'}
-          </p>
-        </div>
-      </main>
-    );
-  }
-
-  return <ArchiveFlow session={session} onSignedOut={() => setSignedOut(true)} />;
+  return (
+    <SessionGate title="Bulk Archive">
+      {(session, onSignedOut) => <ArchiveFlow session={session} onSignedOut={onSignedOut} />}
+    </SessionGate>
+  );
 }
 
 function ArchiveFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOut: () => void }) {
@@ -554,28 +516,17 @@ function ResultsView({
   siteUrl: string;
   onStartOver: () => void;
 }) {
-  const counts = countByStatus(rows, [...ARCHIVE_STATUSES, 'Orphaned']);
-  const attention = rows.filter((r) => NEEDS_ATTENTION.has(r.status));
-  const blocked = rows.filter((r) => r.status === 'Blocked');
-
+  const blocked = rows.some((r) => r.status === 'Blocked' && r.operation === 'Archive');
   return (
-    <>
-      <div className="panel">
-        <h2>Done</h2>
-        {warning !== null && <p>{warning}</p>}
-        <div className="counts">
-          {counts.map((c) => (
-            <div key={c.status} className={`count${NEEDS_ATTENTION.has(c.status) || c.unexpected ? ' loud' : ''}`}>
-              <span className="value">{c.count}</span>
-              <span className="label">{c.status}</span>
-            </div>
-          ))}
-        </div>
-        <div className="row">
-          <button type="button" onClick={() => downloadCsv(datedFilename('archive-results'), resultsToCsv(rows))}>
-            Download the results
-          </button>
-          {blocked.length > 0 && (
+    <ResultsSummary
+      rows={rows}
+      vocabulary={[...ARCHIVE_STATUSES, 'Orphaned']}
+      warning={warning}
+      siteUrl={siteUrl}
+      filenameStem="archive-results"
+      actions={
+        <>
+          {blocked && (
             <button
               type="button"
               className="secondary"
@@ -587,40 +538,8 @@ function ResultsView({
           <button type="button" className="secondary" onClick={onStartOver}>
             Archive something else
           </button>
-        </div>
-      </div>
-
-      {attention.length > 0 && (
-        <div className="panel warning">
-          <h2>Needs attention ({attention.length})</h2>
-          <table className="plan">
-            <thead>
-              <tr>
-                <th>Process</th>
-                <th>Status</th>
-                <th>What happened</th>
-              </tr>
-            </thead>
-            <tbody>
-              {attention.map((row) => (
-                <tr key={`${row.operation}|${row.objectId}`}>
-                  <td>
-                    {siteUrl !== '' ? (
-                      <a href={processLink(siteUrl, row.objectId)} target="_blank" rel="noreferrer">
-                        {row.name}
-                      </a>
-                    ) : (
-                      row.name
-                    )}
-                  </td>
-                  <td>{row.status}</td>
-                  <td>{row.message}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </>
+        </>
+      }
+    />
   );
 }

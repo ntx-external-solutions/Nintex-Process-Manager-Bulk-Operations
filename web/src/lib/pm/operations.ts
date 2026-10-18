@@ -16,7 +16,16 @@
  */
 
 import type { PmContext } from './client.ts';
-import { deleteGroup, getChildGroups, getGroupBreadcrumb } from './groups.ts';
+import {
+  deleteGroup,
+  getChildGroups,
+  getGroupBreadcrumb,
+  getGroupViewerCounts,
+  MOVABLE_NODE_TYPES,
+  reorderTreeNodes,
+  validateProcessMove,
+  type MovableNodeType,
+} from './groups.ts';
 import {
   archiveProcess,
   getArchiveState,
@@ -39,6 +48,23 @@ export type Operation =
    * (spike S1), so the checks are the caller's; this only ever names one group.
    */
   | { op: 'group.delete'; groupUniqueId: string }
+  /** Viewer counts for a handful of groups, by numeric id: the audience of a move. */
+  | { op: 'groups.viewers'; groupIds: number[] }
+  /** The server's pre-flight for moving one process into one group. */
+  | { op: 'process.validateMove'; processUniqueId: string; destinationGroupUniqueId: string }
+  /**
+   * Move one node. Deliberately one at a time even though the endpoint takes an array:
+   * each move is journaled, and a batch answering only `success: false` cannot be
+   * attributed to a particular node.
+   */
+  | {
+      op: 'node.move';
+      uniqueId: string;
+      nodeType: MovableNodeType;
+      /** null moves a group to the top level. A process always needs a group. */
+      newParentUniqueId: string | null;
+      oldParentUniqueId: string | null;
+    }
   | { op: 'process.summary'; processUniqueId: string }
   | { op: 'processes.list'; page: number; listType: number }
   /** The variation set a process belongs to, and every sibling in it. */
@@ -66,6 +92,9 @@ export const OPERATION_NAMES: readonly OperationName[] = [
   'group.breadcrumb',
   'group.documents',
   'group.delete',
+  'groups.viewers',
+  'process.validateMove',
+  'node.move',
   'process.summary',
   'processes.list',
   'process.variationSet',
@@ -82,6 +111,7 @@ export const WRITE_OPERATIONS: readonly OperationName[] = [
   'process.archive',
   'process.publishNow',
   'group.delete',
+  'node.move',
 ];
 
 /**
@@ -114,6 +144,26 @@ export async function execute(ctx: PmContext, operation: Operation): Promise<unk
     case 'group.delete':
       await deleteGroup(ctx, operation.groupUniqueId);
       return { deleted: true };
+
+    case 'groups.viewers':
+      return getGroupViewerCounts(ctx, operation.groupIds);
+
+    case 'process.validateMove':
+      return validateProcessMove(ctx, operation.processUniqueId, operation.destinationGroupUniqueId);
+
+    case 'node.move':
+      return reorderTreeNodes(ctx, [
+        {
+          NodeType: operation.nodeType,
+          // The server reads an empty string as "top level"; there is no null form.
+          ParentUniqueId: operation.newParentUniqueId ?? '',
+          OriginalParentUniqueId: operation.oldParentUniqueId ?? '',
+          ChildUniqueId: operation.uniqueId,
+          // Append. Ordering siblings is not something this app sets.
+          Position: -1,
+          SiblingUniqueId: null,
+        },
+      ]);
 
     case 'process.summary':
       return summarise(ctx, operation.processUniqueId);
@@ -193,6 +243,63 @@ export function parseOperation(input: unknown): ParseResult {
       return { ok: true, operation: { op, groupUniqueId } };
     }
 
+    case 'groups.viewers': {
+      const extra = Object.keys(body).filter((key) => key !== 'op' && key !== 'groupIds');
+      const groupIds = body['groupIds'];
+      if (
+        extra.length > 0 ||
+        !Array.isArray(groupIds) ||
+        groupIds.length > MAX_VIEWER_GROUPS ||
+        !groupIds.every((id) => typeof id === 'number' && Number.isInteger(id) && id > 0)
+      ) {
+        return { ok: false, error: `${op}: "groupIds" must be up to ${MAX_VIEWER_GROUPS} positive integers.` };
+      }
+      return { ok: true, operation: { op, groupIds: groupIds as number[] } };
+    }
+
+    case 'process.validateMove': {
+      const processUniqueId = singleProcessId(body, op, ['processUniqueId', 'destinationGroupUniqueId']);
+      if (typeof processUniqueId !== 'string') return processUniqueId;
+      const destination = body['destinationGroupUniqueId'];
+      if (typeof destination !== 'string' || !GUID.test(destination)) {
+        return { ok: false, error: `${op}: "destinationGroupUniqueId" must be exactly one group id.` };
+      }
+      return { ok: true, operation: { op, processUniqueId, destinationGroupUniqueId: destination } };
+    }
+
+    case 'node.move': {
+      const uniqueId = singleId(body, op, 'uniqueId', ['uniqueId', 'nodeType', 'newParentUniqueId', 'oldParentUniqueId']);
+      if (typeof uniqueId !== 'string') return uniqueId;
+      const nodeType = body['nodeType'];
+      if (typeof nodeType !== 'string' || !(MOVABLE_NODE_TYPES as readonly string[]).includes(nodeType)) {
+        // Shortcuts and document groups are not movable here: moving a shortcut would
+        // act on a process homed somewhere nobody selected.
+        return { ok: false, error: `${op}: "nodeType" must be one of ${MOVABLE_NODE_TYPES.join(', ')}.` };
+      }
+      const newParent = nullableGuid(body['newParentUniqueId']);
+      const oldParent = nullableGuid(body['oldParentUniqueId']);
+      if (newParent === undefined || oldParent === undefined) {
+        return { ok: false, error: `${op}: parent ids must each be one group id or null.` };
+      }
+      if (newParent === uniqueId) {
+        // The server would detach the group from the tree entirely.
+        return { ok: false, error: `${op}: a group cannot be its own parent.` };
+      }
+      if (nodeType !== 'group' && newParent === null) {
+        return { ok: false, error: `${op}: a process has to be moved into a group.` };
+      }
+      return {
+        ok: true,
+        operation: {
+          op,
+          uniqueId,
+          nodeType: nodeType as MovableNodeType,
+          newParentUniqueId: newParent,
+          oldParentUniqueId: oldParent,
+        },
+      };
+    }
+
     case 'process.summary': {
       const processUniqueId = requiredString(body['processUniqueId']);
       if (!processUniqueId) {
@@ -262,6 +369,15 @@ export function parseOperation(input: unknown): ParseResult {
 }
 
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** A move's preview reads both ends of every move in one call. */
+const MAX_VIEWER_GROUPS = 200;
+
+/** A GUID, null, or undefined for "invalid". */
+function nullableGuid(value: unknown): string | null | undefined {
+  if (value === null || value === undefined || value === '') return null;
+  return typeof value === 'string' && GUID.test(value) ? value : undefined;
+}
 
 /**
  * The one-id rule for operations that act on a process.
