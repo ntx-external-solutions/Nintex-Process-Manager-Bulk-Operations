@@ -8,27 +8,56 @@ earlier task; don't start them.
 The R11 tasks for the PowerShell (old T1 and T2) are superseded. They're folded into W5.
 The PowerShell is frozen at v4.11: don't change it.
 
-## Changed since 18 Oct morning: spikes S1 to S3 are done
+## Next handover (18 Oct, evening): F1, then W4, then W5
 
-Results are in `API_ARCHITECTURE.md`, "Spike results, 18 Oct 2026", and the spec is
-updated. What that means for the tasks:
+W0 to W3 are merged and the app is live at `https://bulk.ntx-poc.com/` on the demo
+tenant. Cowork runs the live tests there (round R12: Archive, folder cleanup, Move) in
+parallel with this work, and writes any findings as new F tasks. Don't run anything
+against it yourself.
 
-- **Answers to your W1 questions.** `linked-process` is a shortcut, confirmed: on the demo
-  tenant each one has the same `uniqueId` as a process homed in another group. Keeping it
-  unselectable is right. `suggested-process` exists (2 items) but nobody has measured what
-  it is, so keep it excluded. No `embeddedprocess`, `vanillaprocess` or `documentgroup`
-  items exist on the demo tenant. Bucket labels for archived groups should now use the
-  breadcrumb endpoint (S3); that's added to W2b, since W1 is done.
-- **W2:** every `Publish` call sends `PublishMessage` (the run's change description). A
-  tenant in "Publish Only mode" returns 400 without it. If W2 is already committed, do
-  this as a follow-up commit on the same branch.
-- **W2b is new** (folder cleanup after Archive), and Ready.
-- **W3** is Ready, with the revision rules S2 measured. Variations were tested later the
-  same day: a set moves as a unit, and moves publish open drafts. Both are in W3.
-- **W5:** `variationSetData` names a process's variation siblings before anything is
-  touched. Use it to put siblings in the plan up front; keep the snapshot comparison as
-  the backstop. `API_ARCHITECTURE.md` has the correction.
-- **W6:** S1 is answered; see the task.
+Work F1 first (small, from Cowork's review of your W2 to W3 reports), then W4, then W5.
+
+---
+
+## F1. Answers to the W2 to W3 questions, and one cleanup bug
+
+Status: Ready
+
+From your "Decisions Cowork should check" notes, using what the spikes recorded:
+
+- **Bug: cleanup misses archived documents.** `ListType=All` does **not** include
+  archived documents. Measured in S1: after the test document was archived, `ListType=All`
+  with its `ProcessGroupId` returned 0 rows and `ListType=Archived` returned 1, and that
+  archived document still made `DeleteGroup` return 409. So `gatherFacts` must read both
+  lists and keep the group if either has a row. Today the plan would call it deletable
+  and the tenant would refuse it (reported as Blocked, so safe, but the preview is wrong).
+- **Breadcrumb shape, captured.** Pin `breadcrumbTitles` to it and drop the guesses:
+
+  ```json
+  {"isChildren": false,
+   "breadcrumbItems": [
+     {"id": "<tenant root uuid>", "parentId": null, "name": "Promapp Demo Ltd.",
+      "position": 1, "type": "ProcessGroup", "url": "https://.../Process/Group/<uuid>", "version": null},
+     {"id": "<group uuid>", "parentId": null, "name": "Library & History Services",
+      "position": 2, "type": "ProcessGroup", "url": "...", "version": null}]}
+  ```
+
+  Root (the tenant) first, the group itself last. For a deleted group the list can be
+  empty; treat that as "path unknown", not an error.
+- **Group link.** `{siteUrl}/Process/Group/{groupUniqueId}`. That's the breadcrumb
+  items' `url` and the URL of the group page in the product. Add it to group rows.
+- **Draft detection, add a structured signal.** Keep the "outstanding changes" wording
+  check, and also treat a process as "draft goes live" when its model has
+  `ProcessRevisionStateId` 1 (in progress) and a major version of 1 or more. Measured:
+  never-published processes were 0.x in state 1; the draft over a published version was
+  1.1 in state 1. Either signal puts it in "Tick to move". `process.summary` already
+  reads the model, so this should be no extra calls for most rows.
+- **403 vs an expired token.** Not measured yet. Cowork will check it in R12 and add a
+  task if it matters. Keep your current handling.
+- **Shortcuts keep a group, the archive variation trigger, and resume-by-re-planning:**
+  agreed, no change.
+- **Your mock and headless driver:** yes, commit them under `web/dev/` as a dev tool, kept
+  out of the production build.
 
 ---
 
@@ -176,7 +205,7 @@ S2 measured the revision effects, and the preview must show them:
 
 ## W4. Bulk Update Ownership
 
-Status: Queued (after W2)
+Status: Ready (after F1)
 
 Port `Update-ProcessOwnership.ps1`: same CSV columns and cell rules, SCIM lookup via
 `scim.ts` with the key entered per run. Two changes from the script, both explained in
@@ -187,7 +216,12 @@ only" or "match current state" for published processes, the way PGM does it.
 
 ## W5. Bulk Delete engine
 
-Status: Queued (after W2; start by porting the tests)
+Status: Ready (after W4; start by porting the tests)
+
+This is the big one, so break it up: one PR per phase (tests and fixtures first, then
+discovery, hold, reference removal, checkpoints, delete, unwind), each green on its own.
+Stop and report after each PR rather than running all of it in one session. Cowork will
+check each phase against the PowerShell's behavior before the next one starts.
 
 Port `NintexProcessDependencies.ps1` into `web/src/lib/delete/`, phase by phase as the
 spec lists them, with the offline tests and `Tests/Fixtures` ported first so behavior

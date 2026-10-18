@@ -2,21 +2,19 @@
 
 Maintained by the Cowork session. Claude Code reads this but does not edit it.
 
-## Where things stand (18 Oct 2026, afternoon)
+## Where things stand (18 Oct 2026, evening)
 
-- Product is now a web app on Vercel (`SPEC-WEB.md`). PowerShell frozen at v4.11.
-- W0 and W1 are done (Claude Code, committed locally on stacked branches). W2 in progress.
-- Spikes S1 to S3 are done; results in `API_ARCHITECTURE.md`. Headlines: `DeleteGroup`
-  deletes groups holding archived processes (orphaning them) but refuses groups holding
-  documents; moving a published process publishes a new major version; archived rows
-  need the breadcrumb endpoint for paths.
-- No test debris left: both spike processes were permanently deleted (JB approved) and
-  no spike groups remain.
-- Variation move test (JB approved republishing) left one lasting change: "SOC 2
-  Submission Review" in Security had an open v1.1 draft; it is now published at 3.0, and
-  its Partner variation is at 3.0 too.
-- JB confirmed live sign-in works against the tenant (W0's open check).
-- Restricting sign-in to known Process Manager hosts is deferred by JB; not a v1 task.
+- Product is a web app, live at `https://bulk.ntx-poc.com/` against the demo tenant.
+  PowerShell frozen at v4.11.
+- Done and merged: W0 scaffold, W1 tree and archived view, W2 Bulk Archive, W2b folder
+  cleanup, W3 Bulk Move (PRs #50 to #52). 239 offline tests pass.
+- Handed over: F1 (small fixes), W4 Bulk Update Ownership, W5 Bulk Delete engine (one PR
+  per phase). W6 waits on W5.
+- Next for Cowork: live round R12 on the deployed app (Archive, folder cleanup, Move)
+  using `ZZ Spike` test content only, plus measuring what an expired token returns.
+- Spikes S1 to S3 and the variation test are in `API_ARCHITECTURE.md`. One lasting change
+  on the tenant: "SOC 2 Submission Review" and its Partner variation are published at 3.0.
+- Restricting sign-in to known Process Manager hosts is deferred by JB.
 
 ## What R11 confirmed working
 
