@@ -10,7 +10,7 @@
 import type { ArchiveGateway, ArchiveState } from '../archive/outcome.ts';
 import type { PlanGateway } from '../plan/load.ts';
 import type { Operation, ProcessSummary } from '../pm/operations.ts';
-import type { ProcessListPage } from '../pm/processes.ts';
+import type { ProcessListPage, VariationSet } from '../pm/processes.ts';
 import type { ChildTreeItemsResponse } from '../pm/types.ts';
 
 export class PmRequestError extends Error {
@@ -82,6 +82,7 @@ export async function callPm<T>(operation: Operation): Promise<T> {
 export interface BrowserGateway extends PlanGateway {
   processSummary(processUniqueId: string): Promise<ProcessSummary>;
   processesList(page: number, listType: number): Promise<ProcessListPage>;
+  variationSet(processUniqueId: string): Promise<VariationSet | null>;
 }
 
 export function browserGateway(): BrowserGateway {
@@ -92,6 +93,8 @@ export function browserGateway(): BrowserGateway {
       callPm<ProcessSummary>({ op: 'process.summary', processUniqueId }),
     processesList: (page, listType) =>
       callPm<ProcessListPage>({ op: 'processes.list', page, listType }),
+    variationSet: (processUniqueId) =>
+      callPm<VariationSet | null>({ op: 'process.variationSet', processUniqueId }),
   };
 }
 

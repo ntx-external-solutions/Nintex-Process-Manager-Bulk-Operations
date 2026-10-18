@@ -128,6 +128,70 @@ export async function getArchiveState(ctx: PmContext, processUniqueId: string): 
   return { found: true, isArchived, revisionEditId };
 }
 
+export interface VariationMember {
+  uniqueId: string;
+  /** The variation's own name, e.g. "Partner". The set carries the process name. */
+  variationName: string;
+  isArchived: boolean | null;
+}
+
+export interface VariationSet {
+  id: number;
+  name: string;
+  group: { id: number | null; name: string; uniqueId: string | null } | null;
+  self: VariationMember | null;
+  others: VariationMember[];
+}
+
+function member(value: unknown): VariationMember | null {
+  const uniqueId = readField(value, 'ProcessUniqueId').value;
+  if (typeof uniqueId !== 'string' || uniqueId === '') return null;
+  const name = readField(value, 'VariationName').value;
+  const archived = readField(value, 'IsArchived').value;
+  return {
+    uniqueId,
+    variationName: typeof name === 'string' ? name : '',
+    isArchived: typeof archived === 'boolean' ? archived : null,
+  };
+}
+
+/**
+ * The variation set a process belongs to, or null when it belongs to none.
+ *
+ * `variationSetData` sits at the top level of the process GET, beside `processJson`, not
+ * inside it, which is why the R3 notes said no read names a variation's relatives. It
+ * names every sibling, and the siblings are not in the tree at all: the tree shows one
+ * node per set (API_ARCHITECTURE.md, "Variations").
+ */
+export async function getVariationSet(ctx: PmContext, processUniqueId: string): Promise<VariationSet | null> {
+  const wrapper = await pmRequest<unknown>(ctx, { path: `/Api/v1/Processes/${processUniqueId}` });
+  const data = readField(wrapper, 'variationSetData').value;
+  if (typeof data !== 'object' || data === null) return null;
+
+  const id = Number(readField(data, 'Id').value);
+  const name = readField(data, 'Name').value;
+  const group = readField(data, 'Group').value;
+  const others = readField(data, 'OtherVariedProcesses').value;
+  const groupId = Number(readField(group, 'Id').value);
+  const groupName = readField(group, 'Name').value;
+  const groupUniqueId = readField(group, 'UniqueId').value;
+
+  return {
+    id: Number.isInteger(id) ? id : 0,
+    name: typeof name === 'string' ? name : '',
+    group:
+      typeof group === 'object' && group !== null
+        ? {
+            id: Number.isInteger(groupId) ? groupId : null,
+            name: typeof groupName === 'string' ? groupName : '',
+            uniqueId: typeof groupUniqueId === 'string' ? groupUniqueId : null,
+          }
+        : null,
+    self: member(readField(data, 'VariedProcess').value),
+    others: Array.isArray(others) ? others.map(member).filter((m): m is VariationMember => m !== null) : [],
+  };
+}
+
 export interface PublishResponse {
   actionUrl: string;
 }

@@ -7,7 +7,7 @@
  */
 
 import { resultRow, type ResultRow } from '../exec/report.ts';
-import type { BrowseTree } from '../select/browse.ts';
+import type { VariationSet } from '../pm/processes.ts';
 import type { ExcludedItem, ResolvedProcess } from '../select/resolve.ts';
 import { indexEntry, type ProcessIndex } from '../tenant/state.ts';
 
@@ -31,8 +31,9 @@ export interface ArchiveTarget {
  *  - `name`: the script's heuristic (`Find-VariationMaster`). A target named
  *    `<base>::<variant>` whose base name belongs to a process that is not a target.
  *    It had no false negatives on the only sample measured, a sample of five;
- *  - `set`: the tree reports `variationSetId`. Another process in a loaded level with the
- *    same set id that is not a target. Only sees levels the tree has read.
+ *  - `set`: the target's `variationSetData` from the process GET names every sibling
+ *    (API_ARCHITECTURE.md, "Variations", corrected 18 Oct 2026). Read for targets the
+ *    tree marks with a `variationSetId`.
  */
 export interface VariationMatch {
   targetUniqueId: string;
@@ -50,6 +51,8 @@ export interface ArchivePlan {
   skipped: ResultRow[];
   excluded: ExcludedItem[];
   variations: VariationMatch[];
+  /** Targets whose variation set could not be read, so their siblings are unknown. */
+  unreadVariationSets: Array<{ uniqueId: string; name: string; error: string }>;
 }
 
 export const VARIATION_SEPARATOR = '::';
@@ -95,34 +98,35 @@ export function findVariationMasters(
   return found;
 }
 
-/** Siblings by `variationSetId`, among the levels the tree has read. */
+/**
+ * Siblings named by each target's `variationSetData`, read at planning time.
+ *
+ * Siblings are not in the tree (the tree shows one node per set), so this is the only
+ * way to name them before the run. Archived siblings are listed too: they are not at
+ * risk of being archived, but an operator archiving one variation should know the set
+ * has others.
+ */
 export function findVariationSiblings(
-  tree: BrowseTree,
   index: ProcessIndex,
-  targets: readonly ResolvedProcess[],
+  targets: readonly { uniqueId: string; name: string }[],
+  sets: ReadonlyMap<string, VariationSet>,
 ): VariationMatch[] {
   const targetIds = new Set(targets.map((t) => t.uniqueId.toLowerCase()));
-  const bySet = new Map<number, Array<{ uniqueId: string; title: string }>>();
-  for (const node of tree.nodes.values()) {
-    if (node.kind !== 'process' || node.variationSetId === null) continue;
-    const list = bySet.get(node.variationSetId) ?? [];
-    if (!list.some((n) => n.uniqueId === node.uniqueId)) list.push({ uniqueId: node.uniqueId, title: node.title });
-    bySet.set(node.variationSetId, list);
-  }
-
   const found: VariationMatch[] = [];
   for (const target of targets) {
-    if (target.variationSetId === null) continue;
-    for (const sibling of bySet.get(target.variationSetId) ?? []) {
+    const set = sets.get(target.uniqueId.toLowerCase());
+    if (!set) continue;
+    for (const sibling of set.others) {
       if (targetIds.has(sibling.uniqueId.toLowerCase())) continue;
       const entry = indexEntry(index, sibling.uniqueId);
       found.push({
         targetUniqueId: target.uniqueId,
-        targetName: target.title,
+        targetName: target.name,
         relativeUniqueId: sibling.uniqueId,
-        relativeName: entry?.name || sibling.title,
-        relativeGroupId: entry?.groupId ?? null,
-        relativeIsArchived: entry?.isArchived ?? null,
+        relativeName:
+          entry?.name || [set.name, sibling.variationName].filter((part) => part !== '').join(' :: '),
+        relativeGroupId: entry?.groupId ?? set.group?.id ?? null,
+        relativeIsArchived: entry?.isArchived ?? sibling.isArchived,
         signal: 'set',
       });
     }
@@ -144,7 +148,8 @@ function dedupeMatches(matches: readonly VariationMatch[]): VariationMatch[] {
 export function buildArchivePlan(
   resolved: { processes: readonly ResolvedProcess[]; excluded: readonly ExcludedItem[] },
   index: ProcessIndex,
-  tree: BrowseTree,
+  variationSets: ReadonlyMap<string, VariationSet> = new Map(),
+  unreadVariationSets: ReadonlyMap<string, string> = new Map(),
 ): ArchivePlan {
   const targets: ArchiveTarget[] = [];
   const skipped: ResultRow[] = [];
@@ -187,13 +192,20 @@ export function buildArchivePlan(
     );
   }
 
-  const live = resolved.processes.filter((p) => targets.some((t) => t.uniqueId === p.uniqueId));
   const variations = dedupeMatches([
+    ...findVariationSiblings(index, targets, variationSets),
     ...findVariationMasters(index, targets),
-    ...findVariationSiblings(tree, index, live),
   ]);
 
-  return { targets, skipped, excluded: [...resolved.excluded], variations };
+  return {
+    targets,
+    skipped,
+    excluded: [...resolved.excluded],
+    variations,
+    unreadVariationSets: targets
+      .filter((t) => unreadVariationSets.has(t.uniqueId.toLowerCase()))
+      .map((t) => ({ uniqueId: t.uniqueId, name: t.name, error: unreadVariationSets.get(t.uniqueId.toLowerCase()) ?? '' })),
+  };
 }
 
 /** "Finance / Accounts Payable", or the group id when the path is not known. */
@@ -230,9 +242,12 @@ export function previewRows(plan: ArchivePlan): ResultRow[] {
 }
 
 export function variationMessage(m: VariationMatch): string {
-  const why =
-    m.signal === 'name'
-      ? `master of target '${m.targetName}' by name`
-      : `in the same variation set as target '${m.targetName}'`;
-  return `Possibly ${why}, and not itself a target`;
+  return m.signal === 'name'
+    ? `Possibly the master of target '${m.targetName}', going by its name, and not itself a target`
+    : `In the same variation set as target '${m.targetName}', and not itself a target`;
+}
+
+/** Targets whose variation set should be read: the tree marks them with a set id. */
+export function targetsInVariationSets(resolved: readonly ResolvedProcess[]): string[] {
+  return resolved.filter((p) => p.variationSetId !== null).map((p) => p.uniqueId);
 }

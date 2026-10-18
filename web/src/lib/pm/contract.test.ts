@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 
 import type { PmContext } from './client.ts';
 import { getChildGroups } from './groups.ts';
-import { getArchiveState, getLatestRevision, publishProcess } from './processes.ts';
+import { getArchiveState, getLatestRevision, getVariationSet, publishProcess } from './processes.ts';
 
 interface Call {
   url: string;
@@ -168,4 +168,37 @@ test('getArchiveState treats a 404 as having left the active side', async () => 
 
 test('getArchiveState lets any other failure through', async () => {
   await assert.rejects(getArchiveState(answering(400, { message: 'Bad' }), ARCHIVED_ID), /returned 400/);
+});
+
+// ---------------------------------------------------------------- variation sets
+
+test('getVariationSet reads the set beside processJson, siblings included', async () => {
+  const set = await getVariationSet(
+    answering(200, {
+      processJson: { Name: 'Review' },
+      variationSetData: {
+        Id: 38,
+        Name: 'Review',
+        VariationGroupId: 1,
+        Type: 1,
+        Group: { Id: 12, Name: 'Security', UniqueId: 'g-sec' },
+        VariedProcess: { ProcessUniqueId: 'v-internal', VariationName: 'Internal', IsArchived: false },
+        OtherVariedProcesses: [{ ProcessUniqueId: 'v-partner', VariationName: 'Partner', IsArchived: false }],
+        IsVariationSetInDraftState: false,
+      },
+    }),
+    ARCHIVED_ID,
+  );
+  assert.deepEqual(set, {
+    id: 38,
+    name: 'Review',
+    group: { id: 12, name: 'Security', uniqueId: 'g-sec' },
+    self: { uniqueId: 'v-internal', variationName: 'Internal', isArchived: false },
+    others: [{ uniqueId: 'v-partner', variationName: 'Partner', isArchived: false }],
+  });
+});
+
+test('getVariationSet is null for a process in no set', async () => {
+  assert.equal(await getVariationSet(answering(200, { processJson: {} }), ARCHIVED_ID), null);
+  assert.equal(await getVariationSet(answering(200, { processJson: {}, variationSetData: null }), ARCHIVED_ID), null);
 });

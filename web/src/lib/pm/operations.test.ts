@@ -110,6 +110,7 @@ const ONE_ID_CASES: Array<[string, Record<string, unknown>]> = [
   ['process.archive', { comment: 'Bulk archive' }],
   ['process.publishNow', { processRevisionEditId: 10133, publishMessage: 'Bulk archive' }],
   ['process.archiveState', {}],
+  ['process.variationSet', {}],
 ];
 
 test('each process operation accepts exactly one id', () => {

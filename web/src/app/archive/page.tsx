@@ -13,7 +13,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import type { ArchivePlan } from '@/lib/archive/plan.ts';
-import { buildArchivePlan, describeGroup, previewRows, variationMessage } from '@/lib/archive/plan.ts';
+import {
+  buildArchivePlan,
+  describeGroup,
+  previewRows,
+  targetsInVariationSets,
+  variationMessage,
+} from '@/lib/archive/plan.ts';
+import type { VariationSet } from '@/lib/pm/processes.ts';
 import { ARCHIVE_STATUSES } from '@/lib/archive/outcome.ts';
 import {
   collateralRows,
@@ -136,7 +143,22 @@ function ArchiveFlow({ session, onSignedOut }: { session: SessionInfo; onSignedO
       const index = await loadProcessIndex(gateway.processesList, {
         onProgress: (n) => setStage({ kind: 'planning', progress: `Reading the process lists… ${n} processes` }),
       });
-      setStage({ kind: 'plan', plan: buildArchivePlan(resolution, index, tree) });
+      // Siblings are not in the tree, so each variation's set is read from the process.
+      const sets = new Map<string, VariationSet>();
+      const unread = new Map<string, string>();
+      const inSets = targetsInVariationSets(resolution.processes);
+      for (const [i, uniqueId] of inSets.entries()) {
+        setStage({ kind: 'planning', progress: `Reading variation sets… ${i + 1} of ${inSets.length}` });
+        try {
+          const set = await gateway.variationSet(uniqueId);
+          if (set) sets.set(uniqueId.toLowerCase(), set);
+        } catch (cause) {
+          handleError(cause);
+          if (cause instanceof PmRequestError && cause.signedOut) throw cause;
+          unread.set(uniqueId.toLowerCase(), errorMessage(cause));
+        }
+      }
+      setStage({ kind: 'plan', plan: buildArchivePlan(resolution, index, sets, unread) });
     } catch (cause) {
       fail(cause);
       setStage({ kind: 'select' });
@@ -364,13 +386,30 @@ function PlanView(props: {
         </div>
       )}
 
+      {plan.unreadVariationSets.length > 0 && (
+        <div className="panel warning">
+          <h2>Variation sets that could not be read</h2>
+          <p>
+            These targets are variations, and their sets could not be read, so any siblings that
+            may be affected are not listed above. Check them in Process Manager before archiving.
+          </p>
+          <ul className="checklist">
+            {plan.unreadVariationSets.map((u) => (
+              <li key={u.uniqueId}>
+                {u.name}: {u.error}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {needsAcceptance && (
         <div className="panel warning">
           <h2>Variations: these may be archived too</h2>
           <p>
-            Process variations are coupled, and no field says so. Each process below looks related to a
-            target and is not one. Archiving the target can affect it. Add it to your selection if it
-            should be archived as well.
+            Process variations are coupled. Each process below is a variation of a target, or looks
+            like one by its name, and is not itself a target. Archiving the target can affect it.
+            Variation siblings are not shown in the tree, so this is the only place they appear.
           </p>
           <ul className="checklist">
             {plan.variations.map((m) => (

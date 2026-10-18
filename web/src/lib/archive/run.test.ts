@@ -4,11 +4,10 @@ import assert from 'node:assert/strict';
 import { Journal, step } from '../exec/journal.ts';
 import type { ResultRow } from '../exec/report.ts';
 import { createControls } from '../exec/runner.ts';
-import { addBrowseLevel, emptyBrowseTree } from '../select/browse.ts';
-import { TREE_LEVELS } from '../select/fixtures.ts';
+import type { VariationSet } from '../pm/processes.ts';
 import type { IndexEntry, ProcessIndex } from '../tenant/state.ts';
 import type { ArchiveGateway, ArchiveState } from './outcome.ts';
-import { buildArchivePlan, type ArchivePlan } from './plan.ts';
+import { buildArchivePlan, targetsInVariationSets, type ArchivePlan } from './plan.ts';
 import { collateralRows, manualReviewCsvRows, processLink, runArchive, settleFromFinalRead } from './run.ts';
 
 function entry(uniqueId: string, name: string, isArchived: boolean, groupId = 10): IndexEntry {
@@ -32,6 +31,7 @@ function plan(...ids: string[]): ArchivePlan {
     skipped: [],
     excluded: [],
     variations: [],
+    unreadVariationSets: [],
   };
 }
 
@@ -222,25 +222,60 @@ test('the manual review file lists refusals with a link to each process', () => 
 
 // ----------------------------------------------------------- plan
 
-test('the plan skips archived processes and warns about variation relatives', () => {
-  let tree = emptyBrowseTree();
-  for (const p of [null, 'g-fin', 'g-ap', 'g-empty']) tree = addBrowseLevel(tree, p, TREE_LEVELS[p ?? ''] ?? []);
+test('the plan skips archived processes and names variation siblings from the set', () => {
   const idx = index(
     entry('p-close', 'Month-end close', true),
     entry('p-exp', 'Expense claims', false),
-    entry('p-exp-c', 'Expense claims::Contractors', false),
+    entry('p-exp-c', 'Expense claims :: Contractors', false),
+    entry('p-exp-s', 'Expense claims :: Staff', false),
   );
   const resolved = {
     processes: [
       { uniqueId: 'p-close', id: 1, title: 'Month-end close', itemType: 'process', groupUniqueId: 'g-fin', groupId: 1, path: ['Finance'], variationSetId: null },
-      { uniqueId: 'p-exp-c', id: 2, title: 'Expense claims::Contractors', itemType: 'process', groupUniqueId: 'g-fin', groupId: 1, path: ['Finance'], variationSetId: 5 },
+      { uniqueId: 'p-exp-c', id: 2, title: 'Expense claims', itemType: 'process', groupUniqueId: 'g-fin', groupId: 1, path: ['Finance'], variationSetId: 5 },
     ],
     excluded: [{ uniqueId: 'p-onb', title: 'Onboarding', itemType: 'linked-process', path: ['Finance'], reason: 'shortcut' }],
   };
-  const p = buildArchivePlan(resolved, idx, tree);
+  const sets = new Map<string, VariationSet>([
+    [
+      'p-exp-c',
+      {
+        id: 5,
+        name: 'Expense claims',
+        group: { id: 1, name: 'Finance', uniqueId: 'g-fin' },
+        self: { uniqueId: 'p-exp-c', variationName: 'Contractors', isArchived: false },
+        // Neither sibling is in the tree; only the set names them.
+        others: [
+          { uniqueId: 'p-exp-s', variationName: 'Staff', isArchived: false },
+          { uniqueId: 'p-exp-x', variationName: 'Visitors', isArchived: true },
+        ],
+      },
+    ],
+  ]);
+  const p = buildArchivePlan(resolved, idx, sets, new Map([['p-close', 'not a target anyway']]));
   assert.deepEqual(p.targets.map((t) => t.uniqueId), ['p-exp-c']);
   assert.equal(p.skipped.find((r) => r.objectId === 'p-close')?.message, 'Already archived');
   assert.equal(p.skipped.find((r) => r.objectId === 'p-onb')?.operation, 'Select');
-  // Found by name and by variation set; reported once.
-  assert.deepEqual(p.variations.map((v) => [v.relativeUniqueId, v.signal]), [['p-exp', 'name']]);
+  assert.deepEqual(
+    p.variations.map((v) => [v.relativeUniqueId, v.relativeName, v.signal]),
+    [
+      ['p-exp-s', 'Expense claims :: Staff', 'set'],
+      // Not in either listing: named from the set itself.
+      ['p-exp-x', 'Expense claims :: Visitors', 'set'],
+      // The name heuristic still runs and finds the master.
+      ['p-exp', 'Expense claims', 'name'],
+    ],
+  );
+  // An unreadable set is reported only for a target.
+  assert.deepEqual(p.unreadVariationSets, []);
+});
+
+test('a target whose variation set could not be read is listed as such', () => {
+  const resolved = {
+    processes: [{ uniqueId: 'v', id: 1, title: 'V', itemType: 'process', groupUniqueId: 'g', groupId: 1, path: [], variationSetId: 9 }],
+    excluded: [],
+  };
+  assert.deepEqual(targetsInVariationSets(resolved.processes), ['v']);
+  const p = buildArchivePlan(resolved, index(entry('v', 'V', false)), new Map(), new Map([['v', 'HTTP 500']]));
+  assert.deepEqual(p.unreadVariationSets, [{ uniqueId: 'v', name: 'V', error: 'HTTP 500' }]);
 });

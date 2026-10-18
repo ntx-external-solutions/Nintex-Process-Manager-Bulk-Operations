@@ -21,6 +21,7 @@ import {
   archiveProcess,
   getArchiveState,
   getProcess,
+  getVariationSet,
   listProcesses,
   publishProcess,
 } from './processes.ts';
@@ -30,6 +31,8 @@ export type Operation =
   | { op: 'groups.tree'; parentUniqueId: string | null }
   | { op: 'process.summary'; processUniqueId: string }
   | { op: 'processes.list'; page: number; listType: number }
+  /** The variation set a process belongs to, and every sibling in it. */
+  | { op: 'process.variationSet'; processUniqueId: string }
   /** Is it archived yet, and what revision would the approval override publish? */
   | { op: 'process.archiveState'; processUniqueId: string }
   /** One process. The comment is the run's change description. */
@@ -52,6 +55,7 @@ export const OPERATION_NAMES: readonly OperationName[] = [
   'groups.tree',
   'process.summary',
   'processes.list',
+  'process.variationSet',
   'process.archiveState',
   'process.archive',
   'process.publishNow',
@@ -89,6 +93,9 @@ export async function execute(ctx: PmContext, operation: Operation): Promise<unk
 
     case 'processes.list':
       return listProcesses(ctx, operation.page, undefined, operation.listType);
+
+    case 'process.variationSet':
+      return getVariationSet(ctx, operation.processUniqueId);
 
     case 'process.archiveState':
       return getArchiveState(ctx, operation.processUniqueId);
@@ -171,6 +178,7 @@ export function parseOperation(input: unknown): ParseResult {
       return { ok: true, operation: { op, page, listType: (listType as number) ?? 0 } };
     }
 
+    case 'process.variationSet':
     case 'process.archiveState': {
       const processUniqueId = singleProcessId(body, op, ['processUniqueId']);
       if (typeof processUniqueId !== 'string') return processUniqueId;
