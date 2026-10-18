@@ -5,7 +5,8 @@
 // behaviour to exercise each outcome: an archive that lands outright, one that goes
 // pending, one the tenant refuses, one that reports failure but took effect, a group held
 // by a live document, one held only by an archived document (F1), a draft that goes live
-// on a move, and the breadcrumb.
+// on a move, the breadcrumb, and an ownership save and publish with a SCIM directory.
+// For ownership, start the app with SCIM_BASE_URL=http://localhost:<port>.
 //
 //   node dev/mock-pm.mjs [port]      (default 4999; sign in to http://localhost:4999/tenant)
 //
@@ -28,17 +29,23 @@ const groups = {
 // ListType=All does not return archived documents (spike S1), so they are kept apart.
 const documents = { [FORMS]: { live: ['Expense form.docx'], archived: [] }, [POLICIES]: { live: [], archived: ['Old policy.pdf'] } };
 
-// mode: how ArchiveProcess behaves. version/state: the model's revision, for the move
-// plan's draft check (state 1 at a major version of 1 or more is a draft over a
-// published version).
+// mode: how ArchiveProcess behaves. version/state: the model's revision (1 in progress,
+// 2 awaiting approval, 3 published), for the move plan's draft check and for how an
+// ownership change is written.
+const owner = { id: 7, name: 'Old Owner' };
+const expert = { id: 8, name: 'Old Expert' };
 const procs = {
-  [id(1)]: { name: 'Outright', group: FIN, archived: false, mode: 'outright', rev: 100, version: '2.0', state: 2 },
-  [id(2)]: { name: 'Needs approval', group: FIN, archived: false, mode: 'pending', rev: 200, version: '1.1', state: 1 },
-  [id(3)]: { name: 'Disabled owner', group: SUB, archived: false, mode: 'refuse', rev: 300, version: '0.3', state: 1 },
-  [id(4)]: { name: 'Fails but works', group: SUB, archived: false, mode: 'fail-but-works', rev: 400, version: '0.2', state: 1 },
-  [id(5)]: { name: 'Elsewhere', group: OTHER, archived: false, mode: 'outright', rev: 500, version: '1.0', state: 2 },
-  [id(6)]: { name: 'Old thing', group: RET, archived: false, mode: 'outright', rev: 600, version: '1.0', state: 2 },
+  [id(1)]: { name: 'Outright', group: FIN, archived: false, mode: 'outright', rev: 100, version: '2.0', state: 3, owner, expert },
+  [id(2)]: { name: 'Needs approval', group: FIN, archived: false, mode: 'pending', rev: 200, version: '1.1', state: 1, owner, expert },
+  [id(3)]: { name: 'Disabled owner', group: SUB, archived: false, mode: 'refuse', rev: 300, version: '0.3', state: 1, owner, expert },
+  [id(4)]: { name: 'Fails but works', group: SUB, archived: false, mode: 'fail-but-works', rev: 400, version: '0.2', state: 1, owner, expert },
+  [id(5)]: { name: 'Elsewhere', group: OTHER, archived: false, mode: 'outright', rev: 500, version: '1.0', state: 3, owner, expert },
+  [id(6)]: { name: 'Old thing', group: RET, archived: false, mode: 'outright', rev: 600, version: '1.0', state: 3, owner, expert },
 };
+const scimUsers = [
+  { id: '101', userName: 'ann@example.com', displayName: 'Ann Owner', active: true },
+  { id: '102', userName: 'bob@example.com', name: { givenName: 'Bob', familyName: 'Expert' }, active: true },
+];
 
 const item = (uniqueId, title, itemType, n) => ({
   id: n, uniqueId, title, itemType, itemOrder: 0, hasChild: itemType === 'group',
@@ -69,6 +76,10 @@ http.createServer(async (req, res) => {
 
   if (p === '/_log') return send(res, 200, log);
   if (p === '/oauth2/token') return send(res, 200, { access_token: 'tok', expires_in: 3600 });
+  if (p === '/api/scim/users') {
+    if (req.headers.authorization !== 'Bearer scim-key') return send(res, 401, { detail: 'bad key' });
+    return send(res, 200, { Resources: scimUsers, totalResults: scimUsers.length });
+  }
   if (req.headers.authorization !== 'Bearer tok') return send(res, 401, { message: 'no' });
 
   if (p === '/Process/View/GetChildProcessGroupTreeItems') {
@@ -88,7 +99,7 @@ http.createServer(async (req, res) => {
     const { processUniqueId } = JSON.parse(body);
     const x = procs[processUniqueId];
     if (x.mode === 'refuse') return send(res, 400, { message: 'The process owner is a disabled user' });
-    if (x.mode === 'pending') { x.rev++; return send(res, 200, {}); }
+    if (x.mode === 'pending') { x.rev++; x.pendingArchive = true; return send(res, 200, {}); }
     x.archived = true;
     x.rev++;
     if (x.mode === 'fail-but-works') return send(res, 500, { message: 'Timeout' });
@@ -96,7 +107,7 @@ http.createServer(async (req, res) => {
   }
   if (p === '/Process/Edit/ValidateProcessAction') {
     const x = procs[url.searchParams.get('processUniqueId')];
-    if (x.state === 2) {
+    if (x.state === 3) {
       return send(res, 200, { isValid: true, isCancelled: false, isPrompt: true, title: 'Publish New Version?', message: 'for this change to take effect a new version will be created and published' });
     }
     if (x.version.startsWith('0.')) return send(res, 200, { isValid: true, isCancelled: false, isPrompt: false, title: null, message: null });
@@ -141,19 +152,43 @@ http.createServer(async (req, res) => {
     if (typeof b.ProcessRevisionEditId !== 'string' || Number(b.ProcessRevisionEditId) !== x.rev) {
       return send(res, 400, { message: 'stale revision ' + b.ProcessRevisionEditId });
     }
-    x.archived = true;
+    if (x.pendingArchive) x.archived = true;
+    else {
+      x.state = 3;
+      x.version = `${Number(x.version.split('.')[0]) + 1}.0`;
+    }
+    x.pendingArchive = false;
     return send(res, 200, { actionUrl: '/x' });
   }
+  m = p.match(/^\/bff\/Process\/api\/v1\/processes\/([^/]+)\/revisions\/latest$/);
+  if (m) return send(res, 200, { latestProcessRevisionEditId: procs[m[1]].rev });
   m = p.match(/^\/Api\/v1\/Processes\/([^/]+)$/);
+  if (m && req.method === 'PUT') {
+    const x = procs[m[1]];
+    const b = JSON.parse(body);
+    if (typeof b.ProcessJson !== 'string') return send(res, 500, { message: 'ProcessJson must be a string' });
+    if (b.SuppressChangeNotification !== true) return send(res, 400, { message: 'mock: notifications must be suppressed' });
+    const model = JSON.parse(b.ProcessJson);
+    if (model.ProcessRevisionEditId !== x.rev) return send(res, 409, { message: 'stale' });
+    x.owner = { id: model.OwnerId, name: model.Owner };
+    x.expert = { id: model.ExpertId, name: model.Expert };
+    const [major, minor] = x.version.split('.').map(Number);
+    x.version = `${major}.${minor + 1}`;
+    x.state = b.DoSubmitForApproval ? 2 : 1;
+    x.rev++;
+    res.writeHead(204);
+    return res.end();
+  }
   if (m) {
     const x = procs[m[1]];
     if (!x) return send(res, 404, { message: 'not found' });
     return send(res, 200, {
       processJson: {
         UniqueId: m[1], Name: x.name, Version: x.version, isArchived: x.archived, ProcessRevisionEditId: x.rev, ProcessRevisionStateId: x.state,
+        OwnerId: x.owner.id, Owner: x.owner.name, ExpertId: x.expert.id, Expert: x.expert.name, Objective: 'kept as is',
         ProcessGroupItems: { ProcessGroup: { UniqueId: x.group, Name: groups[x.group]?.title ?? '' } },
       },
-      processActions: { CanSave: true },
+      processActions: { CanSave: true, CanPublishAfterEdit: true, CanSubmitForApprovalAfterEdit: true },
     });
   }
   send(res, 404, { message: 'unknown ' + p });

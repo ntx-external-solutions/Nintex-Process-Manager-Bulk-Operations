@@ -88,14 +88,17 @@ test('users with no id or no logon are dropped rather than carried as unusable',
             { id: null, userName: 'no-id' },
             { id: '7', userName: '  ' },
             { id: '8', userName: 'fine', name: { givenName: 'A', familyName: 'B' } },
+            // The script's order: an explicit display name wins over the parts.
+            { id: '9', userName: 'shown', displayName: 'Shown Name', name: { givenName: 'C', familyName: 'D' } },
           ],
-          totalResults: 3,
+          totalResults: 4,
         }),
       }) as unknown as Response) as typeof fetch,
   });
 
-  assert.deepEqual(users.map((u) => u.logon), ['fine']);
+  assert.deepEqual(users.map((u) => u.logon), ['fine', 'shown']);
   assert.equal(users[0]?.displayName, 'A B');
+  assert.equal(users[1]?.displayName, 'Shown Name');
 });
 
 test('logons match case-insensitively, and a collision refuses to guess', () => {

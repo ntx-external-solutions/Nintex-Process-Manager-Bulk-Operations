@@ -60,6 +60,11 @@ export async function connect({ chromePort = 9333, app = 'http://localhost:3919'
     await js(`$btn('Sign in')`);
     await until(`document.body.innerText.includes('Signed in as op')`, 'signed in');
   };
+  const upload = async (selector, file) => {
+    const { result: doc } = await cdp('DOM.getDocument', {});
+    const { result: found } = await cdp('DOM.querySelector', { nodeId: doc.root.nodeId, selector });
+    await cdp('DOM.setFileInputFiles', { nodeId: found.nodeId, files: [file] });
+  };
   const sent = async () => (await (await fetch(`${mock}/_log`)).json());
   const screenshot = async (file) => {
     await cdp('Emulation.setDeviceMetricsOverride', { width: 900, height: 900, deviceScaleFactor: 1, mobile: false });
@@ -67,5 +72,5 @@ export async function connect({ chromePort = 9333, app = 'http://localhost:3919'
     (await import('node:fs')).writeFileSync(file, Buffer.from(shot.result.data, 'base64'));
   };
 
-  return { cdp, js, until, go, signIn, sent, screenshot, close: () => ws.close() };
+  return { cdp, js, until, go, signIn, upload, sent, screenshot, close: () => ws.close() };
 }
