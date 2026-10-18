@@ -28,6 +28,7 @@ function plan(...ids: string[]): ArchivePlan {
       path: ['Finance'],
       inIndex: true,
     })),
+    groups: [],
     skipped: [],
     excluded: [],
     variations: [],

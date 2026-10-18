@@ -217,3 +217,26 @@ test('the same process under two groups is two nodes, so a mark on one is not a 
   const selection = click(tree, EMPTY_SELECTION, 'g-hr>p-onb');
   assert.equal(checkState(tree, selection, node(tree, 'g-fin>p-onb')), 'unchecked');
 });
+
+test('the groups a selection covers are listed parents first, with depth', () => {
+  const tree = treeWith(...FULL);
+  const resolution = resolveSelection(tree, click(tree, EMPTY_SELECTION, 'g-fin', 'g-fin>p-close'));
+  assert.equal(resolution.status, 'complete');
+  if (resolution.status !== 'complete') return;
+  assert.deepEqual(
+    resolution.groups.map((g) => [g.title, g.depth, g.path.join('/')]),
+    [
+      ['Finance', 0, ''],
+      ['Accounts Payable', 1, 'Finance'],
+      ['Retired', 2, 'Finance/Accounts Payable'],
+    ],
+  );
+});
+
+test('a group that is only partly selected from outside is not covered', () => {
+  const tree = treeWith(...FULL);
+  const resolution = resolveSelection(tree, click(tree, EMPTY_SELECTION, 'g-ap>p-pay'));
+  assert.equal(resolution.status, 'complete');
+  if (resolution.status !== 'complete') return;
+  assert.deepEqual(resolution.groups, []);
+});

@@ -8,6 +8,9 @@
  */
 
 import type { ArchiveGateway, ArchiveState } from '../archive/outcome.ts';
+import type { FactsGateway } from '../cleanup/facts.ts';
+import type { CleanupGateway } from '../cleanup/run.ts';
+import type { TreeItem } from '../pm/types.ts';
 import type { PlanGateway } from '../plan/load.ts';
 import type { Operation, ProcessSummary } from '../pm/operations.ts';
 import type { ProcessListPage, VariationSet } from '../pm/processes.ts';
@@ -110,6 +113,23 @@ export function browserArchiveGateway(): ArchiveGateway {
     publishNow: (processUniqueId, processRevisionEditId, publishMessage) =>
       callPm({ op: 'process.publishNow', processUniqueId, processRevisionEditId, publishMessage }),
   };
+}
+
+/** Reading and deleting groups for folder cleanup. Each call names one group. */
+export function browserCleanupGateway(): CleanupGateway & FactsGateway {
+  const childItems = async (groupUniqueId: string | null): Promise<readonly TreeItem[]> =>
+    (await callPm<ChildTreeItemsResponse>({ op: 'groups.tree', parentUniqueId: groupUniqueId })).treeItems ?? [];
+  return {
+    childItems,
+    groupDocuments: (groupUniqueId) =>
+      callPm<{ total: number; names: string[] }>({ op: 'group.documents', groupUniqueId }),
+    deleteGroup: (groupUniqueId) => callPm({ op: 'group.delete', groupUniqueId }),
+  };
+}
+
+/** A group's path, top first, without the tenant. */
+export function groupBreadcrumb(groupUniqueId: string): Promise<string[]> {
+  return callPm<string[]>({ op: 'group.breadcrumb', groupUniqueId });
 }
 
 // -------------------------------------------------------------- session

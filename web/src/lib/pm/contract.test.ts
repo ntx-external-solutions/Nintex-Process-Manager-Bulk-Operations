@@ -10,8 +10,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { PmContext } from './client.ts';
-import { getChildGroups } from './groups.ts';
-import { getArchiveState, getLatestRevision, getVariationSet, publishProcess } from './processes.ts';
+import { breadcrumbTitles, getChildGroups, readAssociatedContents } from './groups.ts';
+import {
+  getArchiveState,
+  getGroupDocuments,
+  getLatestRevision,
+  getVariationSet,
+  publishProcess,
+} from './processes.ts';
 
 interface Call {
   url: string;
@@ -201,4 +207,49 @@ test('getVariationSet reads the set beside processJson, siblings included', asyn
 test('getVariationSet is null for a process in no set', async () => {
   assert.equal(await getVariationSet(answering(200, { processJson: {} }), ARCHIVED_ID), null);
   assert.equal(await getVariationSet(answering(200, { processJson: {}, variationSetData: null }), ARCHIVED_ID), null);
+});
+
+// ---------------------------------------------------------------- group cleanup
+
+test('a DeleteGroup refusal is read for its blocking documents', () => {
+  assert.deepEqual(
+    readAssociatedContents(
+      JSON.stringify({
+        errorCode: 'AssociatedContents',
+        caption: 'Unable to Delete Group',
+        additionalInfos: { documents: ['Form.docx (archived)'] },
+      }),
+    ),
+    { caption: 'Unable to Delete Group', documents: ['Form.docx (archived)'], processes: [] },
+  );
+  assert.equal(readAssociatedContents('{"errorCode":"Other"}'), null);
+  assert.equal(readAssociatedContents('not json'), null);
+  assert.equal(readAssociatedContents(null), null);
+});
+
+test('a breadcrumb drops the tenant and keeps the group itself last', () => {
+  const chain = [{ name: 'Example Organisation' }, { name: 'Finance' }, { name: 'Accounts Payable' }];
+  assert.deepEqual(breadcrumbTitles(chain), ['Finance', 'Accounts Payable']);
+  assert.deepEqual(breadcrumbTitles({ items: chain.map((c) => ({ title: c.name })) }), ['Finance', 'Accounts Payable']);
+  // A deleted group's chain can come back empty: an empty path, not a guess.
+  assert.deepEqual(breadcrumbTitles([]), []);
+  assert.deepEqual(breadcrumbTitles(null), []);
+});
+
+test('the documents read asks for every document in one group', async () => {
+  const calls: string[] = [];
+  const ctx: PmContext = {
+    baseUrl: 'https://demo.promapp.com',
+    tenant: 'tenant',
+    token: 'tok',
+    fetch: (async (url: string) => {
+      calls.push(String(url));
+      return new Response(JSON.stringify({ items: [{ documentName: 'Form.docx' }], totalItemCount: 3 }), { status: 200 });
+    }) as unknown as typeof fetch,
+    sleep: async () => {},
+  };
+  assert.deepEqual(await getGroupDocuments(ctx, 'g-1'), { total: 3, names: ['Form.docx'] });
+  assert.match(calls[0]!, /\/bff\/document\/api\/v1\/documents\?/);
+  assert.match(calls[0]!, /ListType=All/);
+  assert.match(calls[0]!, /ProcessGroupId=g-1/);
 });

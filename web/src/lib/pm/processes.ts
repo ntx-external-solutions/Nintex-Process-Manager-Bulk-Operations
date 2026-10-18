@@ -306,3 +306,31 @@ export async function listAllProcesses(
 
   return all;
 }
+
+// --------------------------------------------------------------- documents
+
+export interface GroupDocuments {
+  /** Every document whose primary group this is, archived or not. */
+  total: number;
+  /** Names from the first page, for the report. */
+  names: string[];
+}
+
+/**
+ * The documents in one group, archived or not.
+ *
+ * Documents block DeleteGroup (409, spike S1), so cleanup checks for them first and
+ * keeps the group rather than sending a delete it knows will be refused. One page is
+ * enough: the question is "any?", and the names are for the report.
+ */
+export async function getGroupDocuments(ctx: PmContext, groupUniqueId: string): Promise<GroupDocuments> {
+  const response = await pmRequest<{ items?: Array<{ documentName?: string }> | null; totalItemCount?: number }>(ctx, {
+    path: '/bff/document/api/v1/documents',
+    query: { Page: 1, PageSize: 200, ListType: 'All', DocumentType: 'All', ProcessGroupId: groupUniqueId },
+  });
+  const items = response?.items ?? [];
+  return {
+    total: typeof response?.totalItemCount === 'number' ? Math.max(response.totalItemCount, items.length) : items.length,
+    names: items.map((item) => item.documentName ?? '').filter((name) => name !== ''),
+  };
+}
