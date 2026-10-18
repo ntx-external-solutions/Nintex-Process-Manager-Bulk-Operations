@@ -27,8 +27,11 @@ Maintained by the Cowork session. Claude Code reads this but does not edit it.
 - W5 phase 2 live dry run (18 Oct): 74 claims (matches direct reads), 24 mismatches and
   11 orphaned holders (both match R11). 21 of the 24 mismatches are the dependency API
   listing each link twice; 3 are still unexplained. Phase 3 (hold) handed over.
+- F4 verified live (18 Oct, no writes): an archived process is "Skipped. The process is
+  archived ..." and named; an unknown-user row on a live process is named from the
+  listing.
 - Next for Cowork: investigate the 3 unexplained mismatches before W5's delete phase;
-  verify F4 live (needs JB to paste the SCIM key); review phase 3.
+  review phase 3.
 - Spikes S1 to S3 and the variation test are in `API_ARCHITECTURE.md`. One lasting change
   on the tenant: "SOC 2 Submission Review" and its Partner variation are published at 3.0.
 - Restricting sign-in to known Process Manager hosts is deferred by JB.
