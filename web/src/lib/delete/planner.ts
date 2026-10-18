@@ -37,6 +37,7 @@ import {
   type FailedTarget,
   type OrphanedHolder,
   type ParticipantRecord,
+  type PlanLedgerRow,
   type ProcessStateSnapshot,
   type UnreadProcess,
 } from './ledger.ts';
@@ -301,6 +302,12 @@ export interface DeletePlanOptions {
   onFailedTargets?: ((failed: readonly FailedTarget[]) => boolean | Promise<boolean>) | undefined;
   /** The state before the Hold phase moved anything; wins over the index wherever it has an entry. */
   preHoldSnapshot?: ProcessStateSnapshot | null | undefined;
+  /**
+   * Called after each participant this run un-archives, with the ledger as plan rows, so
+   * the caller can save the plan before the next call. A session that dies mid-planning
+   * otherwise leaves restored holders on no record (W5 phase 7).
+   */
+  onRestored?: ((ledger: PlanLedgerRow[]) => Promise<void>) | undefined;
   cache?: ModelCache | null | undefined;
   onEvent?: DeleteEventSink | undefined;
   isFatal?: FatalCheck | undefined;
@@ -444,6 +451,7 @@ export async function buildDeletePlan(gateway: PlanningGateway, options: DeleteP
       // Read again next time: the cached copy is the archived one.
       cache.delete(record.uniqueId.toLowerCase());
       restoredTotal++;
+      await options.onRestored?.(ledgerToPlanRows(ledger));
       log(
         parked
           ? `Held ${record.uniqueId} (${record.name}) in the holding group ${why}; its own group ${record.originalGroupId} no longer exists`

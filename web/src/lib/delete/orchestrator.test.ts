@@ -251,3 +251,35 @@ test('a run that dies keeps its rows in the plan, and the resumed unwind reports
   assert.deepEqual(ops, ['RemoveReferences', 'ReArchiveHolder'], 'the results file names the edit and the re-archive');
   assert.equal(tenant.isArchived(X1), true);
 });
+
+test('a session that dies during planning leaves the holders it restored on the saved plan', async () => {
+  const H1 = 'efef0000-0000-0000-0000-0000000000c1';
+  const H2 = 'efef0000-0000-0000-0000-0000000000c2';
+  const tenant = scenario(
+    [
+      {
+        uniqueId: T1,
+        name: 'Raise invoice',
+        groupId: HOME.id,
+        dependencies: [{ Type: 'Linked Process', Dependencies: [{ Name: 'Review', UniqueId: H1 }, { Name: 'Approve', UniqueId: H2 }] }],
+      },
+      { uniqueId: H1, name: 'Review', archived: true, groupId: HOME.id },
+      { uniqueId: H2, name: 'Approve', archived: true, groupId: HOME.id },
+    ],
+    { groups: [HOME] },
+  );
+  // Both holders are restored in the first discovery pass; the second pass then dies.
+  tenant.fail = (call) => (call.op === 'checkDependencies' && tenant.callsTo('restore').length >= 2 ? { status: 401, message: 'session ended' } : null);
+  const store = new FakePlanStore();
+  const isFatal = (e: unknown) => ((e as { status?: number }).status === 401 ? 'Your session ended.' : null);
+  await assert.rejects(runBulkDelete(tenant, { siteUrl: SITE, source: { kind: 'ids', ids: [T1] }, planStore: store, isFatal }));
+
+  const saved = store.latest();
+  for (const id of [H1, H2]) {
+    assert.equal(saved?.ledger.find((e) => e.uniqueId === id)?.restoredByThisRun, true, `${id}: on record before the run died`);
+  }
+  tenant.fail = undefined;
+  await resumeUnwind(tenant, saved!, { planStore: store });
+  assert.equal(tenant.isArchived(H1), true);
+  assert.equal(tenant.isArchived(H2), true);
+});

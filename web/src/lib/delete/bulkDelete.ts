@@ -274,6 +274,7 @@ export async function runBulkDelete(gateway: DeleteGateway, options: BulkDeleteO
 
     // ---- Hold: a real run makes the holding group, then restores archived targets into it ----
     let tempGroup: GroupRef | null = null;
+    let preliminary: DependencyPlan | null = null;
     const holdLog: string[] = [];
     let holdCollateral: CollateralChange[] = [];
     const cleanup = async (plan: DependencyPlan) => {
@@ -308,7 +309,7 @@ export async function runBulkDelete(gateway: DeleteGateway, options: BulkDeleteO
         return { results, plan: null };
       }
       const archivedTargets = targets.filter((id) => index.get(id.toLowerCase())?.isArchived === true);
-      const preliminary = newDependencyPlan(options.siteUrl, targets, now());
+      preliminary = newDependencyPlan(options.siteUrl, targets, now());
       preliminary.status = 'Holding';
       preliminary.holdingGroup = tempGroup;
       preliminary.ledger = snapshotToPlanLedger(snapshot);
@@ -426,6 +427,12 @@ export async function runBulkDelete(gateway: DeleteGateway, options: BulkDeleteO
       allowRestore: !dryRun,
       scanActiveForInputOutput: options.thoroughScan,
       preHoldSnapshot: snapshot,
+      onRestored: async (ledger) => {
+        if (!preliminary) return;
+        preliminary.ledger = mergePlanLedger(ledger, snapshot);
+        runLedger = preliminary.ledger;
+        await save(preliminary);
+      },
       // A preview proceeds past nothing; a run asks.
       onFailedTargets: dryRun ? () => false : decisions.failedTargets,
       onEvent: options.onEvent,
