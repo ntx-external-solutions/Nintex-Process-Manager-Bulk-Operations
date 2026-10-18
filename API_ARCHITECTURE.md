@@ -1463,3 +1463,20 @@ process (0.x) only gets a minor bump.
 deleted two orphaned archived processes (`groupExists: false`). Response 200
 `{"isValid":true, ...}`; a GET afterwards returns 404. `CheckProcessDependencies` on
 each returned `[]` first.
+
+### Why links reconcile as "claimed 2, located 1" (18 Oct 2026)
+
+Measured on the W5 phase 2 dry run of the first 20 archived processes, which reproduced
+R11's 24 reconciliation mismatches. For the target "Carry out interviews" the dependency
+check lists each of its four linked processes **twice** (8 entries, 4 distinct ids). The
+three holders' models were read in full: each references the target **exactly once**
+(`ProcessProcedures.ProcessLink[1].LinkedProcessUniqueId`), and the target references none
+of them. So the doubled count is the endpoint's, not a reference our finders miss.
+
+Process links only come back when flags 1 and 16 are both set in `searchBehavior`
+(17, 19, 21, 23, 25, 27, 29, 31 all return the same 8 entries); no single flag returns
+them. Group links come from flag 4 alone. Every combination that returns links returns
+them doubled, so the doubling cannot be avoided by choosing flags.
+
+21 of the 24 mismatches are exactly this shape. The other three are not
+(`claimed 1, located 0` twice, `claimed 3, located 1` once) and are still unexplained.
