@@ -21,6 +21,7 @@ node dev/drive-archive.mjs
 node dev/drive-move.mjs
 node dev/drive-ownership.mjs   # SCIM key: scim-key
 node dev/drive-expired.mjs     # the session dies between preview and run (R12)
+node dev/drive-delete.mjs      # a Bulk Delete dry run: plans, writes nothing
 ```
 
 Each script prints the screens it passes through and the write calls the mock received.

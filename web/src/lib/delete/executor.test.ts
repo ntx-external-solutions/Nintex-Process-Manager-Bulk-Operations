@@ -10,9 +10,8 @@
 //
 // Each PowerShell scenario runs its stages in sequence; here a stage that needs a later
 // phase is its own test, rebuilding the state it starts from, so it can be skipped on the
-// phase that will make it pass. `buildDeletePlan` returns its plan through the ledger
-// functions (newDependencyPlan, ledgerToPlanRows), which ledger.ts schedules for the hold
-// phase, so every planner test is tagged hold even where no restore happens.
+// phase that will make it pass. Planner tests that restore nothing run with discovery,
+// which produces a complete read-only plan; those that restore wait for the hold phase.
 //
 // Replaced as possible tenant data: the orphan scenario's id prefix and its listing's
 // group name, and the collateral scenario's two process names.
@@ -116,14 +115,14 @@ function capturedTenant(options: { holderArchived?: boolean } = {}) {
 
 // ---------------------------------------------------------------- delete the target, both processes active
 
-test('both active: the index sweep classifies both processes', { skip: PHASE.discovery }, async () => {
+test('both active: the index sweep classifies both processes', async () => {
   const { tenant, target } = capturedTenant();
   const index = await loadDeleteIndex(tenant);
   assert.equal(index.size, 2, 'the index sweep classifies both processes');
   assert.equal(entry(index, target.UniqueId)?.isArchived, false, 'the target reads as active');
 });
 
-test('both active: the holder is the work, not the target', { skip: PHASE.hold }, async () => {
+test('both active: the holder is the work, not the target', async () => {
   const { tenant, holder, target } = capturedTenant();
   const index = await loadDeleteIndex(tenant);
   const p = await plan(tenant, { targetUniqueIds: [target.UniqueId], index, holdingGroupId: 999, allowRestore: true });
@@ -182,7 +181,7 @@ test('both active: the target is deleted', { skip: PHASE.delete }, async () => {
 
 // ---------------------------------------------------------------- the holder is archived
 
-test('an archived holder reads as archived', { skip: PHASE.discovery }, async () => {
+test('an archived holder reads as archived', async () => {
   const { tenant, holder } = capturedTenant({ holderArchived: true });
   const index = await loadDeleteIndex(tenant);
   assert.equal(entry(index, holder.UniqueId)?.isArchived, true, 'the holder reads as archived');
@@ -225,7 +224,7 @@ test('a restored holder is verified, then re-archived once, and only once', { sk
 
 // ---------------------------------------------------------------- a failed dependency check blocks the run
 
-test('a failed dependency check blocks planning', { skip: PHASE.hold }, async () => {
+test('a failed dependency check blocks planning', async () => {
   const target = readFixture<Fixture>('DependencyTest.json');
   const tenant = new FakeTenant({
     processes: [{ uniqueId: target.UniqueId, name: target.Name, model: target }],
@@ -256,7 +255,7 @@ const cleanTenant = () =>
     ],
   });
 
-test('an empty dependency payload is a successful check with no claims', { skip: PHASE.discovery }, async () => {
+test('an empty dependency payload is a successful check with no claims', async () => {
   const clean = await checkProcessDependencies(cleanTenant(), CLEAN_A);
   assert.equal(clean.success, true, 'an empty dependency payload is a SUCCESSFUL check');
   assert.equal(clean.claims.length, 0, 'an empty payload yields zero claims');
@@ -264,7 +263,7 @@ test('an empty dependency payload is a successful check with no claims', { skip:
   assert.ok(Array.isArray(clean.claims), 'claims is an array');
 });
 
-test('a tenant-wide clean dependency result does not block the plan', { skip: PHASE.hold }, async () => {
+test('a tenant-wide clean dependency result does not block the plan', async () => {
   const tenant = cleanTenant();
   const index = await loadDeleteIndex(tenant);
   const p = await plan(tenant, { targetUniqueIds: [CLEAN_A, CLEAN_B], index, holdingGroupId: 999, allowRestore: true });
@@ -282,7 +281,7 @@ test('a tenant-wide clean dependency result does not block the plan', { skip: PH
 // between them cease to exist when both are deleted, so gating on them asked the
 // operator to adjudicate 120 lines to protect 6.
 
-test('a pair whose both sides are deleted is not a mismatch', { skip: PHASE.discovery }, () => {
+test('a pair whose both sides are deleted is not a mismatch', () => {
   const holder = readFixture<Fixture>('ActionCustomerRequest.json');
   const target = readFixture<Fixture>('DependencyTest.json');
   const claim: DependencyClaim = {
@@ -330,12 +329,12 @@ const ghostTenant = () =>
     ],
   });
 
-test('the unlisted participant really is absent from the index', { skip: PHASE.discovery }, async () => {
+test('the unlisted participant really is absent from the index', async () => {
   const index = await loadDeleteIndex(ghostTenant());
   assert.equal(index.size, 1, 'the ghost really is absent from the index');
 });
 
-test('an unlisted participant is recovered by direct fetch, or named when it cannot be', { skip: PHASE.hold }, async () => {
+test('an unlisted participant is recovered by direct fetch, or named when it cannot be', async () => {
   const tenant = ghostTenant();
   const index = await loadDeleteIndex(tenant);
 
@@ -362,7 +361,7 @@ test('an unlisted participant is recovered by direct fetch, or named when it can
 
 // ---------------------------------------------------------------- a preview does not claim restores it did not make
 
-test('a preview restores nothing and says so; a real run says what it restored', { skip: PHASE.hold }, async () => {
+test('a preview restores nothing and says so', async () => {
   const { tenant, target } = capturedTenant({ holderArchived: true });
   const previewIndex = await loadDeleteIndex(tenant);
   const preview = await plan(tenant, { targetUniqueIds: [target.UniqueId], index: previewIndex, allowRestore: false });
@@ -373,12 +372,16 @@ test('a preview restores nothing and says so; a real run says what it restored',
     'a preview restores nothing, so nothing is flagged as restored',
   );
   assert.ok(preview.ledger.filter((r) => r.wasArchived).length > 0, 'the preview still knows an archived participant is involved');
+  assert.equal(preview.status, 'PlannedIncomplete', 'and says its plan understates the work');
+  assert.equal(tenant.callsTo('restore').length, 0, 'not one restore was sent');
 
   const shown = joined(planSummaryLines(preview, previewIndex));
   assert.match(shown, /none restored/, 'the preview says plainly that it restored nothing');
   assert.doesNotMatch(shown, /restored for the run/, 'the preview does not claim restores it never made');
+});
 
-  // A real run does restore, and says so.
+test('a real run says what it restored', { skip: PHASE.hold }, async () => {
+  const { tenant, target } = capturedTenant({ holderArchived: true });
   const realIndex = await loadDeleteIndex(tenant);
   const real = await plan(tenant, { targetUniqueIds: [target.UniqueId], index: realIndex, holdingGroupId: 999, allowRestore: true });
   assert.match(joined(planSummaryLines(real, realIndex)), /restored for the run/, 'a real run does report the restores it made');
@@ -903,6 +906,7 @@ test('NEW (T1): an uploaded plan alone puts back every process the run un-archiv
   }
   assert.equal(rows.find((r) => r.objectId === LIVE)?.operation, 'ReArchive', 'the target under the target operation');
   assert.equal(rows.find((r) => r.objectId === HOLDER)?.operation, 'ReArchiveHolder', 'a holder under the holder operation');
+  assert.equal(rows.find((r) => r.objectId === ORPHAN)?.operation, 'ReArchiveOrphanedHolder', 'a parked holder under its own operation');
   assert.equal(tenant.groupOf(LIVE), 500, 'the target went home before it was archived');
   assert.equal(resumed.ledger.every((r) => r.denormalized), true, 'and the plan records every one as done, so a second resume does nothing');
 });

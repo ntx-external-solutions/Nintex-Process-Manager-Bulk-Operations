@@ -16,9 +16,10 @@
 import type { DependencyClaim, HolderWorkItem, Reconciliation } from './claims.ts';
 import type { CollateralChange } from './collateral.ts';
 import type { GroupRef } from './gateway.ts';
-import type { DeleteIndex, ProcessModel } from './model.ts';
+import { nodeInt, nodeString, type DeleteIndex, type ProcessModel } from './model.ts';
 import { notPorted } from './phases.ts';
 import type { ReferenceSite } from './references.ts';
+import { readGroupExists } from '../select/archived.ts';
 import type { IndexEntry } from '../tenant/state.ts';
 
 /** One process's state as the plan found it. Port of `New-ProcessLedgerEntry`'s object. */
@@ -48,7 +49,18 @@ export interface LedgerEntryInput {
 
 /** Port of `New-ProcessLedgerEntry`. Progress flags start false; the group is assumed to exist unless told. */
 export function newLedgerEntry(input: LedgerEntryInput): LedgerEntry {
-  return notPorted('hold');
+  return {
+    uniqueId: input.uniqueId,
+    name: input.name,
+    wasArchived: input.wasArchived,
+    originalGroupUniqueId: input.originalGroupUniqueId,
+    originalGroupId: input.originalGroupId,
+    originalGroupExists: input.originalGroupExists ?? true,
+    restoredByThisRun: false,
+    restoredToGroupId: null,
+    denormalized: false,
+    deleted: false,
+  };
 }
 
 /**
@@ -56,7 +68,17 @@ export function newLedgerEntry(input: LedgerEntryInput): LedgerEntry {
  * label is the fallback when there is no id. Port of `New-ProcessLedgerEntryFromModel`.
  */
 export function ledgerEntryFromModel(model: ProcessModel): LedgerEntry {
-  return notPorted('hold');
+  const stateId = nodeInt(model, 'StateId');
+  const state = nodeString(model, 'State');
+  // Trust the numeric id and fall back to the label.
+  const wasArchived = stateId !== null ? stateId !== 1 : state === 'Archived';
+  return newLedgerEntry({
+    uniqueId: nodeString(model, 'UniqueId'),
+    name: nodeString(model, 'Name'),
+    wasArchived,
+    originalGroupUniqueId: nodeString(model, 'GroupUniqueId'),
+    originalGroupId: nodeInt(model, 'GroupId'),
+  });
 }
 
 /** A target's state before the Hold phase. Port of `New-ProcessStateSnapshot`'s rows. */
@@ -142,7 +164,22 @@ export function snapshotToPlanLedger(snapshot: ProcessStateSnapshot | null): Pla
 
 /** The working ledger as plan rows, models dropped. Port of `ConvertTo-PlanLedgerRow`. */
 export function ledgerToPlanRows(ledger: ReadonlyMap<string, ParticipantRecord>): PlanLedgerRow[] {
-  return notPorted('hold');
+  // Every early return of the planner is a blocked plan, and a blocked plan is when the
+  // caller most needs to know what the run un-archived, so this is used on every exit.
+  return [...ledger.values()].map((record) => ({
+    uniqueId: record.uniqueId,
+    name: record.name,
+    numericId: record.numericId,
+    wasArchived: record.wasArchived,
+    originalGroupUniqueId: record.originalGroupUniqueId,
+    originalGroupId: record.originalGroupId,
+    originalGroupExists: readGroupExists(record.originalGroupExists).exists,
+    restoredByThisRun: record.restoredByThisRun,
+    role: record.role || 'Target',
+    parkedInHoldingGroup: record.parkedInHoldingGroup === true,
+    denormalized: record.denormalized,
+    deleted: record.deleted,
+  }));
 }
 
 /**
@@ -226,14 +263,30 @@ export interface DependencyPlan {
 export function newDependencyPlan(
   siteUrl: string,
   targetUniqueIds: readonly string[],
-  now?: Date,
+  now: Date = new Date(),
 ): DependencyPlan {
-  return notPorted('hold');
+  return {
+    schemaVersion: 1,
+    createdUtc: now.toISOString(),
+    siteUrl,
+    status: 'Draft',
+    targetUniqueIds: [...targetUniqueIds],
+    ledger: [],
+    claims: [],
+    sites: [],
+    workItems: [],
+    reconciliation: [],
+    failedTargets: [],
+    unresolved: [],
+    orphanedHolders: [],
+    collateral: [],
+    log: [],
+  };
 }
 
 /** The plan file's text. Port of `Export-DependencyPlan`, minus the disk. */
 export function serializePlan(plan: DependencyPlan): string {
-  return notPorted('hold');
+  return JSON.stringify(plan, null, 2);
 }
 
 /**
@@ -241,5 +294,16 @@ export function serializePlan(plan: DependencyPlan): string {
  * script returns null for a plan that is not there. Port of `Import-DependencyPlan`.
  */
 export function parsePlan(text: string): DependencyPlan | null {
-  return notPorted('hold');
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null;
+  const plan = parsed as Partial<DependencyPlan>;
+  // Enough to know it is one of ours: a later phase resumes from it, and resuming from
+  // something else would act on whatever ids it happened to hold.
+  if (plan.schemaVersion !== 1 || !Array.isArray(plan.targetUniqueIds) || !Array.isArray(plan.ledger)) return null;
+  return parsed as DependencyPlan;
 }

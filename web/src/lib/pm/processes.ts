@@ -28,6 +28,30 @@ export function getProcess(ctx: PmContext, processUniqueId: string): Promise<Pro
   return pmRequest<ProcessResponse>(ctx, { path: `/Api/v1/Processes/${processUniqueId}` });
 }
 
+/** What `GET /Api/v1/Processes/{id}` said: the process, or that it is archived. */
+export type ProcessRead = { kind: 'model'; response: ProcessResponse } | { kind: 'archived' };
+
+/**
+ * Reading the process GET's envelope.
+ *
+ * For an archived process the tenant answers **200** with only
+ * `{"success": true, "isArchived": true}` and no `processJson` (measured in S1, again
+ * in the S2 cleanup, and in the W4 live test). 404 is for a deleted process. Code that
+ * took "not found" to mean "archived", or read the envelope as if it were the model,
+ * got both wrong, so every caller goes through here.
+ */
+export function readProcessEnvelope(wrapper: unknown): ProcessRead {
+  const model = readField(wrapper, 'processJson').value;
+  if (typeof model === 'object' && model !== null) return { kind: 'model', response: wrapper as ProcessResponse };
+  const archived = readField(wrapper, 'isArchived').value;
+  if (archived === true || String(archived).toLowerCase() === 'true') return { kind: 'archived' };
+  throw new Error('Process Manager answered the process read with neither a process nor an archived flag.');
+}
+
+export async function readProcess(ctx: PmContext, processUniqueId: string): Promise<ProcessRead> {
+  return readProcessEnvelope(await pmRequest<unknown>(ctx, { path: `/Api/v1/Processes/${processUniqueId}` }));
+}
+
 export function getEditPermissions(
   ctx: PmContext,
   processUniqueId: string,

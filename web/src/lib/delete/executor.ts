@@ -50,6 +50,8 @@ export interface RestoreOptions {
   /** False when the caller already knows the destination is gone: RestoreProcess would answer 500, four times. */
   destinationGroupExists?: boolean | undefined;
   retry?: boolean | undefined;
+  /** A dead session is rethrown rather than reported as a refused restore. */
+  isFatal?: ((error: unknown) => string | null) | undefined;
 }
 
 /**
@@ -209,7 +211,7 @@ export interface RestorePlanStateOptions extends EngineOptions {
 
 /**
  * Everything the ledger says this run un-archived and did not delete, holders and targets
- * alike, returned to its own group and archived: one `ReArchive` or `ReArchiveHolder` row
+ * alike, returned to its own group and archived: one `ReArchive`, `ReArchiveHolder` or `ReArchiveOrphanedHolder` row
  * each, naming the group it verifiably landed in. A process whose group is gone, a parked
  * holder among them, is archived where it sits. Idempotent: an entry marked denormalised
  * is skipped. Port of `Restore-ProcessPlanState`.

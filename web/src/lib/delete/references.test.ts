@@ -32,7 +32,7 @@ const where = (sites: readonly ReferenceSite[], pick: (s: ReferenceSite) => bool
 
 // ---------------------------------------------------------------- locator, real payloads
 
-test('the locator finds every reference the holder makes to the target', { skip: PHASE.discovery }, () => {
+test('the locator finds every reference the holder makes to the target', () => {
   const model = holder();
   const sites = findProcessReferenceSites(model, [TARGET_ID]);
 
@@ -53,7 +53,7 @@ test('the locator finds every reference the holder makes to the target', { skip:
   );
 });
 
-test('the target holds references back, and the two sides sum to what the API reports', { skip: PHASE.discovery }, () => {
+test('the target holds references back, and the two sides sum to what the API reports', () => {
   const sites = findProcessReferenceSites(holder(), [TARGET_ID]);
   const backSites = findProcessReferenceSites(target(), [HOLDER_ID]);
   assert.equal(backSites.length, 2, 'the target holds exactly 2 references to the holder');
@@ -69,7 +69,7 @@ test('the target holds references back, and the two sides sum to what the API re
 
 // ---------------------------------------------------------------- locator, all buckets
 
-test('the locator finds a target in every bucket', { skip: PHASE.discovery }, () => {
+test('the locator finds a target in every bucket', () => {
   const a = findProcessReferenceSites(allBuckets(), ['TARGET-A']);
   assert.equal(where(a, (s) => s.bucket === 'Activity').length, 1, 'finds an Activity-level link');
   assert.equal(where(a, (s) => s.bucket === 'Decision').length, 1, 'finds a Decision link');
@@ -87,13 +87,13 @@ test('the locator finds a target in every bucket', { skip: PHASE.discovery }, ()
   assert.equal(b.length, 4, 'finds all 4 TARGET-B sites');
 });
 
-test('group links are found only by group id, and only reported', { skip: PHASE.discovery }, () => {
+test('group links are found only by group id, and only reported', () => {
   const g = findProcessReferenceSites(allBuckets(), [], ['GROUP-1']);
   assert.equal(g.length, 1, 'finds the ProcessGroupLink when a group id is supplied');
   assert.equal(g[0]?.action, 'Report', 'group links are report-only');
 });
 
-test('a multi-target search returns the union', { skip: PHASE.discovery }, () => {
+test('a multi-target search returns the union', () => {
   const both = findProcessReferenceSites(allBuckets(), ['TARGET-A', 'TARGET-B']);
   assert.equal(both.length, 11, 'multi-target search returns the union of both site sets');
 });
@@ -198,7 +198,7 @@ test('a bare-object bucket is walked, and ids match whatever their case', { skip
 
 // ---------------------------------------------------------------- the narrow Input/Output finder
 
-test('the Input/Output finder agrees with the full walk', { skip: PHASE.discovery }, () => {
+test('the Input/Output finder agrees with the full walk', () => {
   // The blind-spot sweep uses the narrow finder instead of walking every activity tree
   // and discarding the result. The two must agree on Input and Output sites.
   const model = holder();

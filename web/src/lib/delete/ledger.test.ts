@@ -29,7 +29,7 @@ const target = () => readFixture<Fixture>('DependencyTest.json');
 
 // ---------------------------------------------------------------- ledger and plan persistence
 
-test('a ledger entry reads archive state and the original group from the model', { skip: PHASE.hold }, () => {
+test('a ledger entry reads archive state and the original group from the model', () => {
   const model = holder();
   const entry = ledgerEntryFromModel(model);
   assert.equal(entry.wasArchived, false, 'StateId 1 reads as active');
@@ -39,7 +39,7 @@ test('a ledger entry reads archive state and the original group from the model',
   assert.equal(ledgerEntryFromModel(archived).wasArchived, true, 'a non-active StateId reads as archived');
 });
 
-test('the plan survives a round trip through its file', { skip: PHASE.hold }, () => {
+test('the plan survives a round trip through its file', () => {
   const holderModel = holder();
   const targetModel = target();
   const entry = ledgerEntryFromModel(holderModel);
@@ -71,7 +71,7 @@ test('the plan survives a round trip through its file', { skip: PHASE.hold }, ()
   assert.equal(reloaded?.ledger[0]?.originalGroupUniqueId, holderModel.GroupUniqueId, 'the ledger survives the round trip');
 });
 
-test('a file that is not a plan reads as no plan', { skip: PHASE.hold }, () => {
+test('a file that is not a plan reads as no plan', () => {
   assert.equal(parsePlan(''), null, 'importing a missing plan returns null rather than throwing');
 });
 

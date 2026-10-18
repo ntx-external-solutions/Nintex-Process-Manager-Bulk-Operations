@@ -44,6 +44,13 @@ export type DeleteEvent =
   | { kind: 'collateralDecision'; phase: string; accepted: boolean; authority: string | null; count: number }
   /** A holder whose group is gone, restored into the holding group so it can be read. */
   | { kind: 'holderHeld'; uniqueId: string; name: string; originalGroupId: number | null }
+  /**
+   * How far a long phase has got. The script printed a counter as well as a progress bar,
+   * because a phase that says nothing for eleven minutes looks like a hang.
+   */
+  | { kind: 'progress'; label: string; done: number; total: number }
+  /** A line the plan log also records, raised as it is written so the screen can show it. */
+  | { kind: 'log'; line: string }
   /** The relocation probe answered for this run (`Move-NpmProcessToGroup`). */
   | { kind: 'relocationProbe'; relocatesActive: boolean };
 

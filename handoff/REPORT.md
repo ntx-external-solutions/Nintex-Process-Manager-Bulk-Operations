@@ -6,6 +6,77 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## W5 phase 2. Discovery, and a read-only plan
+
+Commit `13fdfe5` on `claude/web-w5-2-discovery`. Stopped after this PR, as the task asks.
+
+**What changed.**
+
+- **Pure discovery, ported from the script:**
+  - `delete/model.ts`: case-insensitive field access (`nodeValue`, `nodeHas`, `setNodeValue`, `nodeArray`, plus `nodeString`/`nodeInt`).
+  - `references.ts`: `matchTarget` and the three finders.
+  - `claims.ts`: parse, candidates, inversion by holder, reconciliation.
+  - Ids are compared case-insensitively throughout, as PowerShell's `-eq` and hashtable keys are.
+- **The planner, `delete/planner.ts`:**
+  - `checkProcessDependencies` (success carried in a field).
+  - `loadDeleteIndex`, which adds the numeric `id` and whether the row reported `groupExists`.
+  - `readModelAnyState` with an explicit `ModelCache`.
+  - `findHiddenInputOutputReferences`.
+  - `buildDeletePlan`: a full port of `New-ProcessDeletePlan`, covering passes, the retry, `onFailedTargets`, unlisted participants recovered or named, the restore and park branches, the blind-spot scan, locate, filter, reconcile, and `PlannedIncomplete`.
+  - `planProcessName`, and `planSummaryLines` (the text of `Show-ProcessDeletePlan`).
+  - A dead session rethrows instead of being counted as a failed check.
+- **Plan file** (moved into discovery per your review): `newDependencyPlan` and `ledgerToPlanRows`, plus `newLedgerEntry`, `ledgerEntryFromModel`, `serializePlan` and `parsePlan`. `parsePlan` returns null for anything without schema 1, targets and ledger, because a later phase resumes from it.
+- **Targets:** `targetsFromCsv`/`idFromCsvRow` (ObjectID and the other spellings, case-insensitive), and `resolveTargetIds` (numeric ids through the listing, unknown ones reported).
+- **Proxy reads** (`pm/dependencies.ts`):
+  - `process.dependencies`: one GUID, `searchBehavior=31`. An empty body comes back as null.
+  - `process.model`: one GUID.
+  - `processes.archivedModels`: 1 to 25 GUIDs. A batch is allowed because it only reads.
+  - None of them is a write.
+- **The archived read, as you measured it.** `readProcessEnvelope`/`readProcess` in `pm/processes.ts` is the shared helper you asked for: a model, or `{ kind: 'archived' }` for the 200 with no `processJson`. Anything else throws. F4 will use it too.
+  - The gateway's `readModel` now returns `ActiveRead`, not a model or a 404.
+  - The fake tenant answers an archived process with `{ kind: 'archived' }`, and `archiveState` reads `found: true, isArchived: true` from it.
+  - 404 only comes after a delete.
+  - The planner's active read falls through to the batch read when told "archived". The script returned the envelope as if it were the model and walked an empty process.
+- **T2.** `reArchiveOperation(role, parked)` gives `ReArchiveOrphanedHolder` for a parked holder. The skipped unwind tests now expect it, with a message containing "stays archived without a group".
+- **`/delete`**, a dry run page reached by URL; the landing tile is still disabled.
+  - Input: ids (GUID or numeric), or a CSV such as a results file, and an optional thorough scan.
+  - It builds the plan with `allowRestore: false` through `browserPlanningGateway`, whose `restore` refuses. It then shows the summary text and downloads the plan JSON.
+
+**Results-file operations.** New: `ReArchiveOrphanedHolder`, used from the unwind phase. Nothing writes rows yet.
+
+**Tests.** 434 tests: 360 pass, 0 fail, 74 skipped (was 424 / 322 / 102). There are no skipped discovery tests left.
+- **Now running:** every pure discovery test, plus the planner scenarios that restore nothing:
+  - both active
+  - archived holder classification
+  - a failed check blocks planning
+  - a clean check is not a failure
+  - both sides deleted
+  - an unlisted participant, recovered or named
+  - a preview restores nothing
+  - the CSV id reader
+- **Split:** "a preview restores nothing and says so" now runs; "a real run says what it restored" waits for hold.
+- **New:** targets (3), the parked operation (1), the delete proxy reads (4), the envelope helper (1), and the fake tenant's archived and deleted reads.
+- **Still skipped:** hold 14, references 6, checkpoints 13, delete 1, unwind 40.
+
+**End-to-end, offline.** `web/dev/drive-delete.mjs` against the mock. The mock now answers the dependency check and the batch read, and serves the measured archived envelope. Planning the deletion of a process by its numeric id found:
+- the active holder through the dependency check (a ProcessLink);
+- the archived holder's hidden Input through the archive scan, logged as "never reported";
+- `PlannedIncomplete`, with "none restored";
+- no PUT or POST sent.
+
+The archive, move, ownership and expired-session scenarios still give their earlier results.
+
+**For your live dry run.** Sign in on the deployed app, go to `/delete`, and paste the ids or upload a results file. Download the plan to compare with the script's R3 output. Leave "Also scan active processes" off to match the script's default. The dependency checks run one at a time, as the script's do, so a few hundred targets takes minutes.
+
+**Decisions Cowork should check.**
+
+- **Recovering a participant no listing returns** tries the batch read first, then the active read, as the script does. When the active read says "archived", it falls through to the batch read.
+- **`parsePlan` only accepts web plans** (schema 1 with targets and a ledger).
+- **Two unwind tests still opt into `activeReadServesArchived`**, the old mock's behavior, for the relocation probe. The unwind phase has to revisit them against the measured envelope.
+- **`archive/outcome.ts` (W2) reads a 404 on the archive-state read as the archive having taken effect.** Measured, 404 means deleted. Archive runs never delete, so nothing is misreported today, but that comment and branch are wrong. I left W2 alone. Worth a line in F4 or later.
+
+---
+
 ## W5 phase 1. Tests and fixtures first
 
 Commits `9d70974` and `d09159a` on `claude/web-w5-1-tests`, stacked on F2. `9d70974` was

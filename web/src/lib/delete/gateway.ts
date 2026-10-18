@@ -11,20 +11,21 @@
  * A call that fails rejects. The script returned `Success`/`StatusCode`/`Error`; here the
  * HTTP status and the tenant's own message travel on what is thrown, as the browser
  * gateway's `PmRequestError` (ui/gateway.ts) carries them, and `failureOf`
- * (archive/outcome.ts) reads them back. A 404 from `readModel` is the active side not
- * having the process, which is how the script tells an archived one apart.
+ * (archive/outcome.ts) reads them back.
+ *
+ * `readModel` does not use a 404 to mean "archived". The tenant answers the active read
+ * for an archived process with 200 and only `{"success": true, "isArchived": true}`; 404
+ * is a deleted process (Cowork's review of phase 1, measured in S1 and S2). The script
+ * fell back to returning that envelope as if it were the model.
  */
 
 import type { ArchiveGateway } from '../archive/outcome.ts';
 import type { ProcessListPage } from '../pm/processes.ts';
 import type { ProcessUpdateEnvelope } from '../pm/types.ts';
+import type { ActiveRead } from '../pm/dependencies.ts';
 import type { ProcessModel } from './model.ts';
 
-/** `CheckProcessDependencies?searchBehavior=31`: both directions, every category (API_ARCHITECTURE.md). */
-export const DEPENDENCY_SEARCH_BEHAVIOR = 31;
-
-/** `Get-NpmArchivedProcessModel`'s chunk: the query string grows with every id, and long URLs are refused. */
-export const ARCHIVED_BATCH_SIZE = 25;
+export { ARCHIVED_BATCH_SIZE, DEPENDENCY_SEARCH_BEHAVIOR, type ActiveRead } from '../pm/dependencies.ts';
 
 /** The script's default `-TempGroupName`. */
 export const HOLDING_GROUP_NAME = 'Bulk Delete Temporary Group';
@@ -70,8 +71,11 @@ export interface DeleteGateway extends ArchiveGateway {
    */
   readArchivedModels(processUniqueIds: readonly string[]): Promise<ProcessModel[]>;
 
-  /** `GET /Api/v1/Processes/{id}`, `processJson` unwrapped. Active processes only; 404 otherwise. */
-  readModel(processUniqueId: string): Promise<ProcessModel>;
+  /**
+   * `GET /Api/v1/Processes/{id}`: the model for an active process, `{ kind: 'archived' }`
+   * for an archived one (200 with no model). Rejects with 404 for a deleted process.
+   */
+  readModel(processUniqueId: string): Promise<ActiveRead>;
 
   /**
    * `PUT /Api/v1/Processes/{id}` with `buildUpdateEnvelope` (pm/processes.ts): ProcessJson as
