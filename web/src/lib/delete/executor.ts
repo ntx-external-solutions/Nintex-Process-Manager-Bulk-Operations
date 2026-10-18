@@ -23,7 +23,7 @@ import { resultRow, type ResultRow } from '../exec/report.ts';
 import { defaultIsFatal } from '../exec/runner.ts';
 import { buildUpdateEnvelope } from '../pm/processes.ts';
 import type { ProcessActions } from '../pm/types.ts';
-import { chooseWritePath, isWritePath, writeStateOf, type WriteRefusal } from '../pm/writePath.ts';
+import { chooseWritePath, isOpenDraft, isWritePath, writeStateOf, type WriteRefusal } from '../pm/writePath.ts';
 import { loadProcessIndex, type ProcessIndex } from '../tenant/state.ts';
 import {
   ACCEPTANCE_AUTHORITY,
@@ -294,43 +294,74 @@ export async function removePlanReferences(
     }
   };
 
+  const heldBackIds = new Set<string>();
+  const refusedHolders = new Set<string>();
+  const holdBack = (holderId: string, targets: readonly string[], reason: string) => {
+    refusedHolders.add(holderId.toLowerCase());
+    for (const target of targets) {
+      if (heldBackIds.has(target.toLowerCase())) continue;
+      heldBackIds.add(target.toLowerCase());
+      heldBack.push({ targetUniqueId: target, holderUniqueId: holderId, reason });
+    }
+  };
+  const draftReason = (name: string) => `${name} has an unpublished draft; removing its reference would publish it`;
+  const keptOut = (n: number) => (n === 1 ? 'the target it holds is' : `the ${n} targets it holds are`);
+
+  // Every holder's write state before the first save (Cowork's review of W5 phase 6).
+  // Deciding at edit time meant a clean holder earlier in the list lost its link to a
+  // target that a draft holder later kept alive: a published change for nothing, and
+  // nothing puts references back.
   options.onEvent?.({ kind: 'stage', stage: 'removing-references' });
+  for (const [i, item] of workItems.entries()) {
+    options.onEvent?.({ kind: 'progress', label: 'Checking holders for open drafts', done: i + 1, total: workItems.length });
+    if (ticked.has(item.holderUniqueId.toLowerCase())) continue;
+    const { model, processActions } = await readForEdit(item.holderUniqueId);
+    // Unreadable here is left to the edit, which reports it.
+    if (model && isOpenDraft(writeStateOf(model, processActions))) {
+      holdBack(item.holderUniqueId, item.targetsAffected, draftReason(nameOf(item.holderUniqueId)));
+    }
+  }
+
+  /** Target to the holders whose references to it were removed, for the backstop's log line. */
+  const editedFor = new Map<string, string[]>();
   for (const [i, item] of workItems.entries()) {
     options.onEvent?.({ kind: 'progress', label: 'Removing references', done: i + 1, total: workItems.length });
     const holderId = item.holderUniqueId;
     const name = nameOf(holderId);
+    const row = (status: string, message: string, statusCode?: number | null) =>
+      resultRow({ objectId: holderId, name, operation: 'RemoveReferences', status, message, statusCode });
+
+    if (refusedHolders.has(holderId.toLowerCase())) {
+      results.push(
+        row(
+          'Failed',
+          `Not saved: ${SAVE_REFUSALS['open-draft']}. Its references remain, so ${keptOut(item.targetsAffected.length)} left out of the delete. Tick it to publish the draft with the removal.`,
+        ),
+      );
+      continue;
+    }
+    // Only references to targets still being deleted: a link to a kept target still works.
+    const deleting = item.targetsAffected.filter((t) => !heldBackIds.has(t.toLowerCase()));
+    if (deleting.length === 0) {
+      results.push(row('Skipped', 'Not edited: every target it references is being kept'));
+      continue;
+    }
+
     const { model, processActions, reason, status } = await readForEdit(holderId);
     if (!model) {
-      results.push(
-        resultRow({
-          objectId: holderId,
-          name,
-          operation: 'RemoveReferences',
-          status: 'Failed',
-          message: `Could not fetch process for editing (${reason})`,
-          statusCode: status,
-        }),
-      );
+      results.push(row('Failed', `Could not fetch process for editing (${reason})`, status));
       continue;
     }
 
     // Every target at once: one save and one publish per holder.
-    const removal = removeProcessReferences(model, item.targetsAffected);
+    const removal = removeProcessReferences(model, deleting);
     if (removal.referencesRemoved === 0 || !removal.cleaned) {
-      results.push(
-        resultRow({
-          objectId: holderId,
-          name,
-          operation: 'RemoveReferences',
-          status: 'Skipped',
-          message: 'No references found at edit time (already removed?)',
-        }),
-      );
+      results.push(row('Skipped', 'No references found at edit time (already removed?)'));
       continue;
     }
 
-    // Decided from this read, not the plan's: a draft opened since planning is refused
-    // just the same, and one published since needs no tick.
+    // Decided again from this read: the pre-pass is the decision, this is the backstop
+    // for a draft opened since.
     const save = await saveProcessModel(gateway, holderId, removal.cleaned, {
       processActions,
       changeDescription: options.changeDescription,
@@ -339,30 +370,39 @@ export async function removePlanReferences(
       suppressChangeNotification: true,
       isFatal,
     });
-    const openDraft = save.refusal === 'open-draft';
-    if (openDraft) {
-      const reason = `${name} has an unpublished draft; removing its reference would publish it`;
-      for (const target of item.targetsAffected) heldBack.push({ targetUniqueId: target, holderUniqueId: holderId, reason });
+    if (save.refusal === 'open-draft') {
+      holdBack(holderId, deleting, draftReason(name));
+      for (const target of deleting) {
+        const already = editedFor.get(target.toLowerCase()) ?? [];
+        if (already.length === 0) continue;
+        const line = `${name} opened a draft after the check, so ${nameOf(target)} (${target}) is kept, but its references were already removed from: ${already.join(', ')}`;
+        plan.log.push(line);
+        options.onEvent?.({ kind: 'log', line });
+      }
+      results.push(
+        row(
+          'Failed',
+          `Not saved: ${save.error ?? ''}. A draft was opened after the check; its references remain, so ${keptOut(deleting.length)} left out of the delete.`,
+          save.statusCode,
+        ),
+      );
+      continue;
+    }
+    if (save.success) {
+      for (const target of deleting) editedFor.set(target.toLowerCase(), [...(editedFor.get(target.toLowerCase()) ?? []), name]);
     }
     results.push(
-      resultRow({
-        objectId: holderId,
-        name,
-        operation: 'RemoveReferences',
-        status: save.success ? 'Success' : 'Failed',
-        message: save.success
+      row(
+        save.success ? 'Success' : 'Failed',
+        save.success
           ? `Removed ${removal.referencesRemoved} reference(s), ${save.stage}${save.draftPublished ? '; its open draft went live with the removal' : ''}`
-          : openDraft
-            ? `Not saved: ${save.error ?? ''}. Its references remain, so ${item.targetsAffected.length === 1 ? 'the target it holds is' : `the ${item.targetsAffected.length} targets it holds are`} left out of the delete. Tick it to publish the draft with the removal.`
-            : save.stage === 'Refused'
-              ? `Not saved: ${save.error ?? ''}. Its references to the targets remain.`
-              : `${save.stage} failed: ${save.error ?? ''}`.trimEnd(),
-        statusCode: save.success ? null : save.statusCode,
-      }),
+          : save.stage === 'Refused'
+            ? `Not saved: ${save.error ?? ''}. Its references to the targets remain.`
+            : `${save.stage} failed: ${save.error ?? ''}`.trimEnd(),
+        save.success ? null : save.statusCode,
+      ),
     );
   }
-  const heldBackIds = new Set(heldBack.map((h) => h.targetUniqueId.toLowerCase()));
-  const refusedHolders = new Set(heldBack.map((h) => h.holderUniqueId.toLowerCase()));
 
   // Verify while everything is still active, by walking each holder's saved model:
   // archiving suppresses the very rows that would reveal a missed reference, so asking the

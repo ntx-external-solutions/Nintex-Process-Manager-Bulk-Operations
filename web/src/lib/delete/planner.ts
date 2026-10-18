@@ -13,7 +13,7 @@
 
 import { failureOf } from '../archive/outcome.ts';
 import { defaultIsFatal } from '../exec/runner.ts';
-import { writeStateOf } from '../pm/writePath.ts';
+import { isOpenDraft, writeStateOf } from '../pm/writePath.ts';
 import { readGroupExists } from '../select/archived.ts';
 import { ACTIVE_LIST_TYPE, ARCHIVED_LIST_TYPE, INDEX_PAGE_SIZE } from '../tenant/state.ts';
 import {
@@ -658,8 +658,7 @@ function draftHoldersOf(workItems: readonly HolderWorkItem[], ledger: ReadonlyMa
   for (const item of workItems) {
     const record = ledger.get(item.holderUniqueId.toLowerCase());
     if (!record?.model) continue;
-    const state = writeStateOf(record.model, null);
-    if (state.revisionStateId !== 1 || state.publishedVersionExists === false) continue;
+    if (!isOpenDraft(writeStateOf(record.model, null))) continue;
     drafts.push({
       holderUniqueId: item.holderUniqueId,
       name: record.name,
