@@ -23,7 +23,11 @@ updated. What that means for the tasks:
   tenant in "Publish Only mode" returns 400 without it. If W2 is already committed, do
   this as a follow-up commit on the same branch.
 - **W2b is new** (folder cleanup after Archive), and Ready.
-- **W3** is Ready, with the revision rules S2 measured.
+- **W3** is Ready, with the revision rules S2 measured. Variations were tested later the
+  same day: a set moves as a unit, and moves publish open drafts. Both are in W3.
+- **W5:** `variationSetData` names a process's variation siblings before anything is
+  touched. Use it to put siblings in the plan up front; keep the snapshot comparison as
+  the backstop. `API_ARCHITECTURE.md` has the correction.
 - **W6:** S1 is answered; see the task.
 
 ---
@@ -80,7 +84,7 @@ recorded fixture.
 
 ## W2. Bulk Archive
 
-Status: Ready
+Status: Done (2f9832a, 5f36abf, 6bbf48b)
 
 Port the archive path from `Nintex-BulkOperations.ps1` (`Invoke-BulkArchiveProcesses`)
 and `Set-NpmProcessArchived` in `NintexProcessDependencies.ps1`. Add `process.archive`
@@ -95,7 +99,9 @@ Must carry over, all covered in `API_ARCHITECTURE.md`:
   the tenant's status code and message, as `New-NpmArchiveOutcome` does.
 - A 400 is reported with the tenant's message and a link, and not retried.
 - Final status for every process comes from a fresh read at the end of the run.
-- The preview lists variation siblings of selected processes.
+- The preview lists variation siblings of selected processes, from `variationSetData`
+  (top level of `GET /Api/v1/Processes/{id}`, beside `processJson`):
+  `OtherVariedProcesses[].ProcessUniqueId`. Siblings aren't in the tree.
 - Results CSV with the script's columns.
 - Every `Publish` sends `PublishMessage` set to the change description (S2: 400 without
   it on a tenant in "Publish Only mode").
@@ -155,9 +161,16 @@ S2 measured the revision effects, and the preview must show them:
   `ValidateProcessAction?processUniqueId=<id>&actionType=11&processGroupUniqueId=<dest>&isShortcut=false`.
   When it returns `isPrompt: true`, show its title and message in the preview and count
   those processes in the confirmation.
-- `linked-process` items and processes with a `variationSetId` can't be moved
-  individually (variations are untested and may be coupled, R3). List them as excluded
-  with the reason.
+- **Drafts go live.** Moving a process that has a published version publishes it, and
+  if it has an open draft, the draft is published too (measured on a real variation,
+  v1.1 draft became published 2.0). `ValidateProcessAction` says so in its message
+  ("has outstanding changes ... will also be published"). Put these processes in their
+  own section of the preview, unselected by default, with the tenant's message.
+- **A variation set moves as one.** The tree shows one node per set; moving it moves
+  every variation (siblings are not in the tree at all). Read `variationSetData` from
+  `GET /Api/v1/Processes/{id}` (top level, beside `processJson`) and list every sibling
+  in `OtherVariedProcesses` in the preview as moving too.
+- `linked-process` items can't be moved here. List them as excluded with the reason.
 
 ---
 
@@ -186,6 +199,10 @@ equivalence is checked as you go. Includes, as new behavior:
 - **Old T2.** An orphaned dependency holder (its group is gone) is restored into the
   holding group, read there, and re-archived before `Remove-HoldingGroup`, with its own
   results operation.
+
+Variation siblings come from `variationSetData.OtherVariedProcesses` at planning time,
+so the preview can name them before the run; the R3 collateral checkpoints stay as the
+backstop.
 
 The plan ledger goes in IndexedDB. The plan file is downloadable and can be re-uploaded
 to resume or unwind.
