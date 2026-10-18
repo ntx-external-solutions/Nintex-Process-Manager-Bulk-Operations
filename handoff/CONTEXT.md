@@ -10,10 +10,13 @@ Maintained by the Cowork session. Claude Code reads this but does not edit it.
   deletes groups holding archived processes (orphaning them) but refuses groups holding
   documents; moving a published process publishes a new major version; archived rows
   need the breadcrumb endpoint for paths.
-- Test debris on the demo tenant: two archived, orphaned processes named
-  `ZZ Spike S1 test process` and `ZZ Spike S2 test process`. No spike groups remain.
-- Waiting on JB: the one live sign-in W0 asked for (needs the service account
-  password), and whether sign-in should be limited to known Process Manager hosts.
+- No test debris left: both spike processes were permanently deleted (JB approved) and
+  no spike groups remain.
+- Variation move test (JB approved republishing) left one lasting change: "SOC 2
+  Submission Review" in Security had an open v1.1 draft; it is now published at 3.0, and
+  its Partner variation is at 3.0 too.
+- JB confirmed live sign-in works against the tenant (W0's open check).
+- Restricting sign-in to known Process Manager hosts is deferred by JB; not a v1 task.
 
 ## What R11 confirmed working
 

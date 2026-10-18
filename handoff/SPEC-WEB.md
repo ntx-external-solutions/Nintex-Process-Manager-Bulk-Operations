@@ -199,9 +199,11 @@ on its own will be republished, which may notify its stakeholders (not measured)
   destination group, `isShortcut=false`). When it returns `isPrompt`, show its message in
   the preview ("Publish New Version?") and count those processes in the confirmation.
 - One node per call, journaled, as PGM does.
-- `linked-process` (shortcut) items aren't movable here. Variations are excluded from
-  individual moves until someone tests them, because a variation may be coupled to its
-  siblings (R3) and moving it republishes.
+- A process with an open draft gets that draft published by the move (measured on a
+  real variation set). Those go in their own preview section, unselected by default.
+- A variation set moves as one: the tree shows one node, and its siblings (listed in
+  `variationSetData`, not in the tree) move with it. The preview names them.
+- `linked-process` (shortcut) items aren't movable here.
 - Show the viewer delta (`GetTotalSpecifiedGroupRoleAndUserViewers`) for source and
   destination.
 - Reuse PGM's cycle and document-group checks for group moves.
@@ -227,7 +229,7 @@ Two things the script does that the web version should not copy without a decisi
 | # | Question | Answer |
 |---|---|---|
 | S1 | Does `DeleteGroup` delete a group holding archived content? | Archived processes: yes, and they become orphans. Documents: no, 409 `AssociatedContents`. |
-| S2 | Does `ReorderTreeNodes` move single processes? | Yes. In-progress gets a minor bump; published gets a new major version published. Groups move with no revision change. Variations untested. |
+| S2 | Does `ReorderTreeNodes` move single processes? | Yes. Never-published in-progress gets a minor bump; anything with a published version is republished, open drafts included. Groups move with no revision change. A variation set moves as one. |
 | S3 | Where does the archived view get group paths? | Rows have the immediate group only; the breadcrumb endpoint gives the full chain per group. |
 
 Details are in `API_ARCHITECTURE.md`, "Spike results, 18 Oct 2026". All three were run

@@ -710,12 +710,16 @@ tooling can see it:
 
 | Source | Fields | Mentions the master? |
 |---|---|---|
-| Process model (`/Api/v1/Processes/{id}`) | 46 keys | no |
+| Process model (`/Api/v1/Processes/{id}`) | 46 keys | no (**corrected 18 Oct 2026**: the response's top-level `variationSetData` names every sibling; see "Variations" under Spike results) |
 | Index entry (`ListType=0` / `ListType=7`) | 5 fields | no |
 | `CheckProcessDependencies` | claim rows | no |
 
 So a target cannot be inspected to find out whether operating on it will also
 operate on something else. **There is no read that answers the question.**
+(**Corrected 18 Oct 2026.** There is one: `variationSetData` sits beside
+`processJson` in the same GET, not inside it, which is likely why it was missed.
+It lists the set's group and every sibling's `ProcessUniqueId`. The snapshot
+comparison is still the backstop, but siblings can now be named before the run.)
 
 What can be done is to record the state of every process in the tenant before
 the run, and compare after each mutating phase. Anything that moved which was
@@ -1383,8 +1387,8 @@ the prompt. Whether the republish notifies stakeholders was not measured.
 group must be provided when moving a process group" and take no destination parameter
 we know of, so group-move pre-flight stays on PGM's client-side checks.
 
-Not tested: variations (could not create one without tenant setup, and moving a real one
-would republish it) and `suggested-process`.
+Variations were tested afterwards with JB's approval; see "Variations" below. Not
+tested: `suggested-process`.
 
 ### Tree item types on the demo tenant
 
@@ -1418,3 +1422,44 @@ mode". Adding `"PublishMessage": "<text>"` returned 200 and published (`Message`
 was not accepted). This is a tenant setting. The archive override in R11 succeeded
 without a message, so either that path is exempt or the setting changed since; send the
 change description as `PublishMessage` on every publish to be safe.
+
+### Variations (tested 18 Oct 2026, on a real set, with JB's approval)
+
+`GET /Api/v1/Processes/{id}` returns `variationSetData` at the top level, next to
+`processJson`:
+
+```
+variationSetData:
+  Id: 38, Name, VariationGroupId, Type
+  Group: {Id, Name, UniqueId}                 the set's group
+  VariedProcess: {ProcessUniqueId, VariationName, IsArchived,
+                  ProcessRevisionEditStateId, ProcessStateId, ...}    this record
+  OtherVariedProcesses: [{ProcessUniqueId, VariationName, IsArchived, ...}]   siblings
+  IsVariationSetInDraftState
+```
+
+Measured on set 38 ("SOC 2 Submission Review", variations Internal and Partner):
+
+- **The tree shows one node per set.** The Partner sibling is not in
+  `GetChildProcessGroupTreeItems` at all. The active index lists it as
+  `"<name> :: <variation>"` in the same group. Both records had the same home group;
+  "each variation in its own group" (above) is not true of this set.
+- **Moving the node moves the whole set.** Both records changed home group, and
+  `variationSetData.Group` followed.
+- **The move published an unpublished draft.** Internal was in progress at v1.1 over a
+  published version. `ValidateProcessAction` warned: "'SOC 2 Submission Review' which has
+  outstanding changes, for this change to take effect all other outstanding changes will
+  also be published". After the move Internal was published at 2.0 and Partner went
+  1.0 to 2.0. Moving back made both 3.0. The draft's edits are now live; that was not
+  reversible from the API.
+
+So for any move of a process with a published version, the move publishes, and if the
+process has an open draft the draft goes live with it. A never-published in-progress
+process (0.x) only gets a minor bump.
+
+### Deleting an orphan
+
+`POST /Process/Edit/DeleteProcess` with `{"processUniqueId": "<id>"}` and no group id
+deleted two orphaned archived processes (`groupExists: false`). Response 200
+`{"isValid":true, ...}`; a GET afterwards returns 404. `CheckProcessDependencies` on
+each returned `[]` first.
