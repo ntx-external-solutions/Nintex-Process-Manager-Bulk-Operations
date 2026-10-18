@@ -40,7 +40,7 @@ const OPERATIONS: readonly OperationTile[] = [
   {
     title: 'Bulk Update Ownership',
     summary: 'Upload a CSV of owners and experts, check it, then apply.',
-    href: null,
+    href: '/ownership',
   },
 ];
 

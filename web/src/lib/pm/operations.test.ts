@@ -92,9 +92,97 @@ test('there is no way to name a URL', () => {
   }
 });
 
-test('the only writes are archive, the approval override, deleting a group and moving a node', () => {
+test('the only writes are archive, the approval override, deleting a group, moving a node and setting ownership', () => {
   // Adding a write has to be a decision made here, not a side effect of a new case.
-  assert.deepEqual([...WRITE_OPERATIONS].sort(), ['group.delete', 'node.move', 'process.archive', 'process.publishNow']);
+  assert.deepEqual([...WRITE_OPERATIONS].sort(), [
+    'group.delete',
+    'node.move',
+    'process.archive',
+    'process.publishNow',
+    'process.setOwnership',
+  ]);
+});
+
+// ----------------------------------------------------------------- ownership
+
+const SET_OWNERSHIP = {
+  op: 'process.setOwnership',
+  processUniqueId: PROCESS,
+  expectedRevisionEditId: 9180,
+  owner: { id: 1084, name: 'Ann Owner' },
+  expert: null,
+  changeDescription: 'Owners moved to the new team',
+  submitForApproval: false,
+};
+
+test('setting ownership names one process, a revision, and users by id and name only', () => {
+  assert.ok(parseOperation(SET_OWNERSHIP).ok);
+  const refused = (extra: Record<string, unknown>) => parseOperation({ ...SET_OWNERSHIP, ...extra }).ok;
+  assert.equal(refused({ processUniqueId: [PROCESS] }), false);
+  assert.equal(refused({ processUniqueIds: [PROCESS] }), false, 'no second process under another field');
+  assert.equal(refused({ expectedRevisionEditId: '9180' }), false);
+  assert.equal(refused({ owner: null, expert: null }), false, 'nothing to set');
+  assert.equal(refused({ owner: { id: '1084', name: 'Ann' } }), false);
+  assert.equal(refused({ owner: { id: 0, name: 'Ann' } }), false);
+  assert.equal(refused({ owner: { id: 5, name: ' ' } }), false);
+  assert.equal(refused({ owner: { id: 5, name: 'Ann', processJson: {} } }), false, 'nothing rides along on a user');
+  assert.equal(refused({ changeDescription: ' ' }), false);
+  assert.equal(refused({ submitForApproval: 'yes' }), false);
+  assert.equal(refused({ suppressChangeNotification: false }), false, 'notifications are not the caller\'s to turn on');
+  assert.equal(refused({ owner: null, expert: { id: 2, name: 'Needs to be reassigned N/A' } }), true);
+});
+
+test('the directory read takes the SCIM key and nothing else', () => {
+  assert.ok(parseOperation({ op: 'users.directory', scimApiKey: 'key' }).ok);
+  assert.equal(parseOperation({ op: 'users.directory' }).ok, false);
+  assert.equal(parseOperation({ op: 'users.directory', scimApiKey: 'key', baseUrl: 'https://evil.example' }).ok, false);
+  assert.equal(parseOperation({ op: 'process.ownership', processUniqueId: 'not-a-guid' }).ok, false);
+});
+
+test('setting ownership saves the model as a string, notifications suppressed, and returns the new revision', async () => {
+  const h = harness([processResponse(), undefined, { latestProcessRevisionEditId: 9181 }]);
+  const parsed = parseOperation(SET_OWNERSHIP);
+  assert.ok(parsed.ok);
+  assert.deepEqual(await execute(h.ctx, parsed.operation), { ok: true, revisionEditId: 9181 });
+  assert.deepEqual(h.calls.map((c) => c.method), ['GET', 'PUT', 'GET']);
+  const envelope = JSON.parse(h.calls[1]!.body!);
+  assert.equal(typeof envelope.ProcessJson, 'string');
+  const model = JSON.parse(envelope.ProcessJson);
+  assert.equal(model.OwnerId, 1084);
+  assert.equal(model.Owner, 'Ann Owner');
+  assert.equal('ExpertId' in model, false, 'a role not named is left alone');
+  assert.equal(model.Objective, 'Test', 'everything else passes through');
+  assert.equal(envelope.SuppressChangeNotification, true);
+  assert.equal(envelope.DoPublish, false);
+  assert.equal(envelope.DoSubmitForApproval, false);
+  assert.equal(envelope.ChangeDescription, 'Owners moved to the new team');
+});
+
+test('setting ownership refuses to write over an edit made since the preview', async () => {
+  const h = harness([processResponse()]);
+  const parsed = parseOperation({ ...SET_OWNERSHIP, expectedRevisionEditId: 9179 });
+  assert.ok(parsed.ok);
+  assert.deepEqual(await execute(h.ctx, parsed.operation), { ok: false, conflict: { expected: 9179, actual: 9180 } });
+  assert.deepEqual(h.calls.map((c) => c.method), ['GET']);
+});
+
+test('the ownership read is compact: roles, revision and permissions, not the model', async () => {
+  const response = processResponse();
+  Object.assign(response.processJson, { OwnerId: 7, Owner: 'Old Owner', ExpertId: 0, Expert: '' });
+  const h = harness([response]);
+  assert.deepEqual(await execute(h.ctx, { op: 'process.ownership', processUniqueId: PROCESS }), {
+    uniqueId: PROCESS,
+    name: 'First Process',
+    version: '2.0',
+    revisionEditId: 9180,
+    revisionStateId: 3,
+    isArchived: null,
+    owner: { id: 7, name: 'Old Owner' },
+    expert: null,
+    canSave: true,
+    canPublishAfterEdit: false,
+    canSubmitForApprovalAfterEdit: true,
+  });
 });
 
 // ----------------------------------------------------------------- moves

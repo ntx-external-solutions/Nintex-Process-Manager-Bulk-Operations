@@ -1,15 +1,20 @@
 /**
  * Process read/write endpoints.
  *
- * Lifted from process-group-manager without its shortcut editing and its process PUT.
- * The PUT comes back with Bulk Update Ownership (W4) and reference removal (W5), and
- * when it does, two of PGM's rules come with it: `ProcessJson` is sent as a JSON
- * *string* (an object returns HTTP 500), and `SuppressChangeNotification` defaults to
- * true.
+ * Lifted from process-group-manager without its shortcut editing. The process PUT came
+ * back with Bulk Update Ownership (W4), and reference removal (W5) will use it too, with
+ * two of PGM's rules: `ProcessJson` is sent as a JSON *string* (an object returns HTTP
+ * 500), and `SuppressChangeNotification` defaults to true.
  */
 
 import { isPmError, pmRequest, type PmContext } from './client.ts';
-import type { LatestRevisionResponse, ProcessResponse, PublishRequest } from './types.ts';
+import type {
+  LatestRevisionResponse,
+  ProcessJson,
+  ProcessResponse,
+  ProcessUpdateEnvelope,
+  PublishRequest,
+} from './types.ts';
 
 /** Subset of /EditPermissions we act on. */
 export interface EditPermissions {
@@ -190,6 +195,53 @@ export async function getVariationSet(ctx: PmContext, processUniqueId: string): 
     self: member(readField(data, 'VariedProcess').value),
     others: Array.isArray(others) ? others.map(member).filter((m): m is VariationMember => m !== null) : [],
   };
+}
+
+export interface UpdateOptions {
+  changeDescription: string;
+  submitForApproval?: boolean;
+  /** Opt out only with an explicit, confirmed decision. */
+  suppressChangeNotification?: boolean;
+}
+
+/**
+ * The PUT envelope, lifted from process-group-manager.
+ *
+ * Exported separately from the request so the exact bytes can be asserted in tests.
+ * `DoPublish` is always false: the UI never publishes through it, it saves and then
+ * calls Publish. `SuppressChangeNotification` defaults to true, where the PowerShell sent
+ * false and notified every stakeholder once per row (SPEC-WEB.md, Bulk Update Ownership).
+ */
+export function buildUpdateEnvelope(processJson: ProcessJson, options: UpdateOptions): ProcessUpdateEnvelope {
+  return {
+    // Double-serialised: the server rejects a plain object with a 500.
+    ProcessJson: JSON.stringify(processJson),
+    ChangeDescription: options.changeDescription,
+    DoSubmitForApproval: options.submitForApproval ?? false,
+    DoPublish: false,
+    SuppressChangeNotification: options.suppressChangeNotification ?? true,
+    SharedActivityCollectionEditModel: {
+      ActivitiesToDelete: [],
+      ActivitiesToShare: [],
+      ActivitiesToUnlink: [],
+    },
+    VariantConnectionChangeStates: [],
+  };
+}
+
+/** Save one process. Returns 204 with no body on success. */
+export function updateProcess(
+  ctx: PmContext,
+  processUniqueId: string,
+  envelope: ProcessUpdateEnvelope,
+): Promise<void> {
+  return pmRequest<void>(ctx, {
+    path: `/Api/v1/Processes/${processUniqueId}`,
+    method: 'PUT',
+    body: envelope,
+    // A dropped connection may have saved it. Not sent twice; the final read settles it.
+    retry: 'write',
+  });
 }
 
 export interface PublishResponse {

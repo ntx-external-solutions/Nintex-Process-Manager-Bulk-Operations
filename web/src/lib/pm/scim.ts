@@ -27,7 +27,7 @@ export interface DirectoryUser {
   userId: number;
   /** SCIM `userName` — what the operator types in the spreadsheet. */
   logon: string;
-  /** "Given Family", for the preview. Falls back to the logon. */
+  /** The display name, else "Given Family", else the logon. */
   displayName: string;
   /** Inactive users can still be assigned, and almost never should be. */
   active: boolean;
@@ -68,6 +68,7 @@ interface ScimName {
 interface ScimUser {
   id?: string | null;
   userName?: string | null;
+  displayName?: string | null;
   name?: ScimName | null;
   active?: boolean | null;
 }
@@ -79,7 +80,14 @@ interface ScimListResponse {
   startIndex?: number | null;
 }
 
+/**
+ * The name written into a process's `Owner` or `Expert` field, built the way
+ * `Update-ProcessOwnership.ps1` builds it: an explicit display name, then SCIM's
+ * formatted name, then "given family", then the logon.
+ */
 function displayNameOf(user: ScimUser, logon: string): string {
+  const display = user.displayName?.trim();
+  if (display) return display;
   const formatted = user.name?.formatted?.trim();
   if (formatted) return formatted;
   const parts = [user.name?.givenName, user.name?.familyName]

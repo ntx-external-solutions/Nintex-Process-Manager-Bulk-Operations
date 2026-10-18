@@ -10,7 +10,7 @@ node dev/mock-pm.mjs 4999
 
 # 2. The app, built as production
 AUTH_SECRET=$(openssl rand -base64 48) npm run build
-AUTH_SECRET=... npx next start -p 3919
+AUTH_SECRET=... SCIM_BASE_URL=http://localhost:4999 npx next start -p 3919
 
 # 3. Chrome, headless, with a throwaway profile
 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new \
@@ -19,6 +19,7 @@ AUTH_SECRET=... npx next start -p 3919
 # 4. A scenario. Restart the mock between scenarios.
 node dev/drive-archive.mjs
 node dev/drive-move.mjs
+node dev/drive-ownership.mjs   # SCIM key: scim-key
 ```
 
 Each script prints the screens it passes through and the write calls the mock received.

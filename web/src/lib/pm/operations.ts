@@ -35,6 +35,8 @@ import {
   listProcesses,
   publishProcess,
 } from './processes.ts';
+import { getOwnership, setOwnership, type UserRef } from './ownership.ts';
+import { listDirectoryUsers, scimBaseUrl } from './scim.ts';
 import type { ProcessRevisionStateId } from './types.ts';
 
 export type Operation =
@@ -74,6 +76,27 @@ export type Operation =
   /** One process. The comment is the run's change description. */
   | { op: 'process.archive'; processUniqueId: string; comment: string }
   /**
+   * Every user in the SCIM directory, for resolving owner and expert usernames. The key
+   * is the operator's, entered per run, and used for this one call only: never stored.
+   */
+  | { op: 'users.directory'; scimApiKey: string }
+  /** One process's owner, expert, revision and permissions. */
+  | { op: 'process.ownership'; processUniqueId: string }
+  /**
+   * Set one process's owner and/or expert: a read-modify-write of its model, refused
+   * if the revision has moved since the preview. Never publishes; that is a separate
+   * `process.publishNow`.
+   */
+  | {
+      op: 'process.setOwnership';
+      processUniqueId: string;
+      expectedRevisionEditId: number;
+      owner: UserRef | null;
+      expert: UserRef | null;
+      changeDescription: string;
+      submitForApproval: boolean;
+    }
+  /**
    * The approval override: "Archive now" under the cog in the UI. Publishes the given
    * revision with IsPublishNow, the revision id sent as a string, and the run's change
    * description as PublishMessage.
@@ -101,6 +124,9 @@ export const OPERATION_NAMES: readonly OperationName[] = [
   'process.archiveState',
   'process.archive',
   'process.publishNow',
+  'users.directory',
+  'process.ownership',
+  'process.setOwnership',
 ];
 
 /**
@@ -112,6 +138,7 @@ export const WRITE_OPERATIONS: readonly OperationName[] = [
   'process.publishNow',
   'group.delete',
   'node.move',
+  'process.setOwnership',
 ];
 
 /**
@@ -180,6 +207,19 @@ export async function execute(ctx: PmContext, operation: Operation): Promise<unk
     case 'process.archive':
       await archiveProcess(ctx, operation.processUniqueId, operation.comment);
       return { accepted: true };
+
+    case 'users.directory':
+      return listDirectoryUsers({
+        baseUrl: scimBaseUrl(process.env['SCIM_BASE_URL']),
+        apiKey: operation.scimApiKey,
+        fetch: ctx.fetch,
+      });
+
+    case 'process.ownership':
+      return getOwnership(ctx, operation.processUniqueId);
+
+    case 'process.setOwnership':
+      return setOwnership(ctx, operation);
 
     case 'process.publishNow':
       return publishProcess(
@@ -363,12 +403,93 @@ export function parseOperation(input: unknown): ParseResult {
       };
     }
 
+    case 'users.directory': {
+      const extra = Object.keys(body).filter((key) => key !== 'op' && key !== 'scimApiKey');
+      const scimApiKey = requiredString(body['scimApiKey']);
+      if (extra.length > 0 || !scimApiKey || scimApiKey.length > MAX_KEY_LENGTH) {
+        return { ok: false, error: `${op}: "scimApiKey" is required, and nothing else.` };
+      }
+      return { ok: true, operation: { op, scimApiKey: scimApiKey.trim() } };
+    }
+
+    case 'process.ownership': {
+      const processUniqueId = singleProcessId(body, op, ['processUniqueId']);
+      if (typeof processUniqueId !== 'string') return processUniqueId;
+      return { ok: true, operation: { op, processUniqueId } };
+    }
+
+    case 'process.setOwnership': {
+      const processUniqueId = singleProcessId(body, op, [
+        'processUniqueId',
+        'expectedRevisionEditId',
+        'owner',
+        'expert',
+        'changeDescription',
+        'submitForApproval',
+      ]);
+      if (typeof processUniqueId !== 'string') return processUniqueId;
+      const expectedRevisionEditId = body['expectedRevisionEditId'];
+      if (typeof expectedRevisionEditId !== 'number' || !Number.isInteger(expectedRevisionEditId) || expectedRevisionEditId <= 0) {
+        return { ok: false, error: `${op}: "expectedRevisionEditId" must be a positive integer.` };
+      }
+      const owner = userRef(body['owner']);
+      const expert = userRef(body['expert']);
+      if (owner === undefined || expert === undefined) {
+        return { ok: false, error: `${op}: "owner" and "expert" must each be null or { id, name } with a positive integer id.` };
+      }
+      if (owner === null && expert === null) {
+        return { ok: false, error: `${op}: nothing to set. Give an owner, an expert, or both.` };
+      }
+      const changeDescription = requiredString(body['changeDescription']);
+      if (!changeDescription) {
+        return { ok: false, error: `${op}: "changeDescription" is required. It is the run's change description.` };
+      }
+      const submitForApproval = body['submitForApproval'];
+      if (typeof submitForApproval !== 'boolean') {
+        return { ok: false, error: `${op}: "submitForApproval" must be true or false.` };
+      }
+      return {
+        ok: true,
+        operation: {
+          op,
+          processUniqueId,
+          expectedRevisionEditId,
+          owner,
+          expert,
+          changeDescription: changeDescription.trim(),
+          submitForApproval,
+        },
+      };
+    }
+
     default:
       return { ok: false, error: `Unknown operation "${op}".` };
   }
 }
 
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Longer than any real key, short enough that a body cannot smuggle much in. */
+const MAX_KEY_LENGTH = 4_096;
+
+/** Longer than any display name a directory holds. */
+const MAX_USER_NAME_LENGTH = 256;
+
+/**
+ * null, `{ id, name }`, or undefined for "invalid". Nothing else may ride along, for the
+ * same reason as the one-id rule: a field nobody reads today is one somebody reads later.
+ */
+function userRef(value: unknown): UserRef | null | undefined {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).some((key) => key !== 'id' && key !== 'name')) return undefined;
+  const id = record['id'];
+  const name = record['name'];
+  if (typeof id !== 'number' || !Number.isInteger(id) || id <= 0) return undefined;
+  if (typeof name !== 'string' || name.trim() === '' || name.length > MAX_USER_NAME_LENGTH) return undefined;
+  return { id, name: name.trim() };
+}
 
 /** A move's preview reads both ends of every move in one call. */
 const MAX_VIEWER_GROUPS = 200;
