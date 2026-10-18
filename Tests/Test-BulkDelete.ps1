@@ -1393,6 +1393,313 @@ try {
 finally { Pop-Location; Remove-Item $workE -Recurse -Force -ErrorAction SilentlyContinue }
 
 # ---------------------------------------------------------------------------
+Write-Host "`nScenario: a blocked plan still puts back the holders it restored" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# The measured failure: the Hold phase restored eleven archived dependency
+# holders so their Input/Output edges could be read, planning was then blocked,
+# and the unwind re-archived the twenty targets but not the eleven holders. The
+# tenant went 181 active / 464 archived to 192 / 454, and not one of the 45
+# results rows mentioned any of them.
+#
+# The cause is one line. Restore-ProcessPlanState reads the plan's ledger, and
+# the ledger is the only record that a holder was un-archived; the blocked path
+# assigned a target-only snapshot over the top of it first, so by the time the
+# unwind ran the holders had been erased from the run's own memory.
+
+$R11Target     = 'aa110000-0000-0000-0000-0000000000a1'
+$R11Holder     = 'bb110000-0000-0000-0000-00000000b0b0'
+$R11DeadHolder = 'cc110000-0000-0000-0000-00000000dead'
+
+# These ids are prefixed because PowerShell resolves an unqualified variable up
+# the CALL stack, case-insensitively, before it reaches this file's scope. A
+# mock that referred to $Held read the $held loop counter inside
+# Invoke-BulkDeleteProcesses instead, and silently reported the holder as having
+# disappeared from the tenant.
+function Reset-HolderTenant {
+    # $R11Holder has a live group, so it is restored in place for discovery.
+    # $R11DeadHolder has no group at all, so it has to be parked in the holding group,
+    # and this mock refuses that, which is what blocks planning.
+    $script:Archived = @{ $R11Target = $true; $R11Holder = $true; $R11DeadHolder = $true }
+    $script:GroupOf  = @{ $R11Target = 100;   $R11Holder = 500;  $R11DeadHolder = 1 }
+    $script:GroupExistsFor = @{ $R11DeadHolder = $false }
+    $script:Names    = @{ $R11Target = 'Create sales order'; $R11Holder = 'Review applications'
+                          $R11DeadHolder = 'Obtain approval to recruit' }
+    $script:Deleted  = @()
+    $script:RestoreCalls = @(); $script:ArchiveCalls = @()
+    $script:TempGroupDeleted = $false
+    $script:TempGroupContents = @()
+    $script:LastResults = @()
+    $script:R11RefuseHold = $true
+}
+Reset-HolderTenant
+
+function Invoke-ApiGet {
+    param([string]$Url,[string]$Token)
+    if ($Url -match 'ListType=7') {
+        $page = 1
+        if ($Url -match 'Page=(\d+)') { $page = [int]$Matches[1] }
+        if ($page -gt 1) { return [PSCustomObject]@{ items = @() } }
+        # Only the TARGET is offered as a delete candidate; the holders are
+        # reached through the dependency API, the way they are on the tenant.
+        $items = @()
+        if ($script:Archived[$R11Target]) {
+            $items += [PSCustomObject]@{ processUniqueId=$R11Target; processName=$script:Names[$R11Target]; groupId=$script:GroupOf[$R11Target] }
+        }
+        return [PSCustomObject]@{ items = $items }
+    }
+    return [PSCustomObject]@{ items = @() }
+}
+function Get-ProcessesFromGroup {
+    param([string]$SiteURL,[string]$Token,$GroupID,[string]$GroupUniqueId,$IncludeSubgroups)
+    return @($script:TempGroupContents)
+}
+
+function Invoke-NpmApi {
+    param([string]$Url,[string]$Token,[string]$Method='Get',$Body=$null,[int]$MaxRetries=0)
+    function Ok($r) { return [PSCustomObject]@{ Success=$true; StatusCode=200; Response=$r; Error=$null } }
+
+    if ($Url -match 'ListType=(\d+)') {
+        $wantArchived = ([int]$Matches[1] -eq 7)
+        $items = @()
+        foreach ($id in @($R11Target,$R11Holder,$R11DeadHolder)) {
+            if ($null -eq $script:Archived[$id]) { continue }
+            if ($script:Archived[$id] -ne $wantArchived) { continue }
+            $row = [PSCustomObject]@{
+                processUniqueId=$id; id=1; processName=$script:Names[$id]; groupId=$script:GroupOf[$id] }
+            $exists = $true
+            if ($script:GroupExistsFor.ContainsKey($id)) { $exists = $script:GroupExistsFor[$id] }
+            $row | Add-Member -NotePropertyName 'groupExists' -NotePropertyValue $exists
+            $items += $row
+        }
+        return Ok ([PSCustomObject]@{ items = $items })
+    }
+
+    # The target is held against by both archived processes.
+    if ($Url -match '/Processes/([0-9a-fA-F\-]+)/CheckProcessDependencies') {
+        if ($Matches[1] -eq $R11Target) {
+            return Ok (@"
+[{"Type":"Linked Process","Dependencies":[
+  {"Name":"Review applications","UniqueId":"$R11Holder"},
+  {"Name":"Obtain approval to recruit","UniqueId":"$R11DeadHolder"}]}]
+"@ | ConvertFrom-Json)
+        }
+        return Ok @()
+    }
+    if ($Url -match 'CheckProcessDependencies') { return Ok @() }
+
+    if ($Url -match 'RestoreProcess') {
+        $id = [string]$Body.processUniqueId
+        # A group that is not there is a 500, the way the tenant answers.
+        if ("$($Body.processGroupId)" -eq '1') {
+            return [PSCustomObject]@{ Success=$false; StatusCode=500; Response=$null; Error='Internal Server Error' }
+        }
+        # With this set the holding group refuses the orphan too, which blocks
+        # planning AFTER $R11Holder has already been restored. That ordering is
+        # what the blocked-unwind test turns on.
+        if ($script:R11RefuseHold -and $id -eq $R11DeadHolder) {
+            return [PSCustomObject]@{ Success=$false; StatusCode=500; Response=$null; Error='Internal Server Error' }
+        }
+        $script:RestoreCalls += $id
+        $script:Archived[$id] = $false
+        $script:GroupOf[$id]  = [int]$Body.processGroupId
+
+        # A restored process is live, and a live process shows up in its group's
+        # listing. Modelling that is what makes the holding-group cleanup
+        # assertion mean anything: the group can only be deleted if every
+        # process the run put there was archived again first.
+        if ([int]$Body.processGroupId -eq $script:TempGroupId) {
+            $script:TempGroupContents = @(@($script:TempGroupContents) + @([PSCustomObject]@{
+                processUniqueId = $id; processName = $script:Names[$id] }))
+        }
+        return Ok @{}
+    }
+    if ($Url -match 'ArchiveProcess') {
+        $id = [string]$Body.processUniqueId
+        $script:ArchiveCalls += $id
+        $script:Archived[$id] = $true
+        # Archiving takes the process out of the group listing, which is how an
+        # orphan archived in place leaves the holding group empty.
+        $script:TempGroupContents = @(@($script:TempGroupContents) |
+            Where-Object { $_.processUniqueId -ne $id })
+        return Ok @{}
+    }
+    if ($Url -match 'DeleteProcess') {
+        $script:Deleted += [string]$Body.processUniqueId
+        $script:Archived.Remove([string]$Body.processUniqueId)
+        return Ok @{}
+    }
+    if ($Url -match 'mobile/api/v1/processes') {
+        $data = @()
+        foreach ($m in ($Url -split '&')) {
+            if ($m -match 'processUniqueIds=([0-9a-fA-F\-]+)') {
+                $id = $Matches[1]
+                if ($null -ne $script:Archived[$id]) {
+                    $data += [PSCustomObject]@{ ProcessModel = [PSCustomObject]@{
+                        UniqueId=$id; Name=$script:Names[$id]; GroupId=$script:GroupOf[$id]
+                        GroupUniqueId=''; StateId=$(if ($script:Archived[$id]) { 2 } else { 1 }) } }
+                }
+            }
+        }
+        return Ok ([PSCustomObject]@{ data = $data })
+    }
+    if ($Method -eq 'Get' -and $Url -match '/Api/v1/Processes/([0-9a-fA-F\-]+)$') {
+        $id = $Matches[1]
+        return Ok ([PSCustomObject]@{ processJson = [PSCustomObject]@{
+            UniqueId=$id; Name=$script:Names[$id]; GroupId=$script:GroupOf[$id]
+            GroupUniqueId=''; StateId=$(if ($script:Archived[$id]) { 2 } else { 1 }) } })
+    }
+    return Ok $null
+}
+
+$workF = Join-Path ([System.IO.Path]::GetTempPath()) "holderunwind-$([guid]::NewGuid())"
+New-Item -ItemType Directory -Path $workF -Force | Out-Null
+Push-Location $workF
+try {
+    Invoke-BulkDeleteProcesses -SiteURL 'https://mock' -Token 't' -SourceType 'Archived' `
+        -TempGroupName 'Bulk Delete Temporary Group' -CurrentUsername 'u' -Force -AcceptCollateral
+
+    Assert-True ($script:RestoreCalls -contains $R11Holder) 'the holder was un-archived for discovery'
+    Assert-Equal 0 $script:Deleted.Count 'planning was blocked, so nothing is deleted'
+
+    # The finding, stated as an invariant: a process this run un-archived is a
+    # process this run puts back.
+    Assert-Equal $true $script:Archived[$R11Holder] `
+        'the holder the run un-archived is archived again on the way out'
+    Assert-Equal 500 $script:GroupOf[$R11Holder] 'and is still in its own group'
+    Assert-Equal $true $script:Archived[$R11Target] 'the target is re-archived too, as it always was'
+
+    $rows = @($script:LastResults)
+    $holderRows = @($rows | Where-Object { $_.ObjectID -eq $R11Holder })
+    Assert-True ($holderRows.Count -gt 0) `
+        'and the results file says so, rather than changing a process and reporting nothing'
+    Assert-Equal 'ReArchiveHolder' $holderRows[0].Operation `
+        'under its own operation, so a holder the run moved does not read as a target or as collateral'
+    Assert-Equal 'Success' $holderRows[0].Status 'and it is recorded as done'
+    Assert-Equal '500' ([string]$holderRows[0].GroupId) 'with the group it landed in'
+
+    # The target keeps the operation it always had; the two are distinguishable.
+    $targetRows = @($rows | Where-Object { $_.ObjectID -eq $R11Target -and $_.Operation -eq 'ReArchive' })
+    Assert-Equal 1 $targetRows.Count 'the target is still reported under ReArchive'
+
+    Assert-Equal 0 @($rows | Where-Object { $_.Operation -eq 'ReArchiveHolder' -and -not $_.GroupId }).Count `
+        'no holder row is missing its group'
+
+    # The plan on disk is the audit record and has to carry the holders too.
+    $planFile = @(Get-ChildItem -Path . -Filter 'Delete_Plan_*.json')[0]
+    $plan = Get-Content $planFile.FullName -Raw | ConvertFrom-Json
+    Assert-Equal 'Blocked' $plan.Status 'the plan records that it was blocked'
+    Assert-True (@($plan.Ledger | Where-Object { $_.UniqueId -eq $R11Holder }).Count -gt 0) `
+        'and its ledger still carries the holder after the snapshot is folded in'
+    Assert-Equal 'Holder' @($plan.Ledger | Where-Object { $_.UniqueId -eq $R11Holder })[0].Role `
+        'labelled as a holder'
+    Assert-True (@($plan.Ledger | Where-Object { $_.UniqueId -eq $R11Target }).Count -gt 0) `
+        'and the target, which is what the snapshot was assigned for'
+}
+finally { Pop-Location; Remove-Item $workF -Recurse -Force -ErrorAction SilentlyContinue }
+
+# ---------------------------------------------------------------------------
+Write-Host "`nScenario: a holder whose group is gone is held, read, and put back" -ForegroundColor Cyan
+# ---------------------------------------------------------------------------
+# Eleven archived holders on the demo tenant sat behind eleven of twenty
+# targets, each one in a group that had been deleted. The run named them and
+# told the operator to go and move them by hand, so no delete could complete.
+#
+# The Hold phase already parks an orphaned TARGET in the holding group, reads it
+# there, and archives it in place on the way out. A holder is the same problem.
+# Parking costs it nothing it had not already lost: its group was deleted before
+# the run started, so it is orphaned either way.
+
+Reset-HolderTenant
+$script:R11RefuseHold = $false      # the holding group will take the orphan
+
+$workG = Join-Path ([System.IO.Path]::GetTempPath()) "holderpark-$([guid]::NewGuid())"
+New-Item -ItemType Directory -Path $workG -Force | Out-Null
+Push-Location $workG
+try {
+    $out = (Invoke-BulkDeleteProcesses -SiteURL 'https://mock' -Token 't' -SourceType 'Archived' `
+        -TempGroupName 'Bulk Delete Temporary Group' -CurrentUsername 'u' -Force -AcceptCollateral) 6>&1 | Out-String
+
+    Assert-True ($out -notmatch 'Move these holders into a group that exists') `
+        'the run no longer tells the operator to go and move processes by hand'
+    Assert-True ($script:RestoreCalls -contains $R11DeadHolder) `
+        'the orphaned holder is restored rather than refused'
+    Assert-True ($out -match 'no longer exists; holding it instead') `
+        'and the console says it went to the holding group and why'
+
+    # It has to leave the holding group before cleanup, or the group cannot go.
+    Assert-Equal $true $script:Archived[$R11DeadHolder] `
+        'the parked holder is archived again on the way out'
+    Assert-Equal $true $script:TempGroupDeleted `
+        'so the holding group is empty by cleanup time and is deleted'
+
+    $rows = @($script:LastResults)
+    $parkedRow = @($rows | Where-Object { $_.ObjectID -eq $R11DeadHolder })[0]
+    Assert-True ($null -ne $parkedRow) 'the parked holder has a results row'
+    Assert-Equal 'ReArchiveHolder' $parkedRow.Operation 'under the holder operation'
+    Assert-Equal 'Success' $parkedRow.Status `
+        'and counts as done: archived where it sits is the state it was found in'
+    Assert-True ($parkedRow.Message -match 'group 1') `
+        'the row names the dead group it came from, so the trail survives the run'
+    Assert-True ($parkedRow.Message -match 'already orphaned before the run started') `
+        'and is explicit that the run did not cause the orphaning'
+
+    # The holder with a real group still goes home, unchanged by any of this.
+    $homeRow = @($rows | Where-Object { $_.ObjectID -eq $R11Holder })[0]
+    Assert-Equal 'ReArchiveHolder' $homeRow.Operation 'the ordinary holder is a holder too'
+    Assert-Equal '500' ([string]$homeRow.GroupId) 'and goes back to its own group'
+    Assert-Equal $true $script:Archived[$R11Holder] 'and is archived again'
+
+    Assert-Equal 0 @($rows | Where-Object { $_.Operation -eq 'Collateral' -and $_.Status -eq 'Failed' }).Count `
+        'a holder the run moved on purpose is not reported as collateral damage'
+}
+finally { Pop-Location; Remove-Item $workG -Recurse -Force -ErrorAction SilentlyContinue }
+
+# A process the run could not put back is NAMED, not just counted. It used to be
+# listed only inside the collateral block, so a run that left a holder active
+# with no collateral to report said nothing beyond a number on the Failed line.
+$strandedSummary = (Show-DeleteResultsSummary -Results @(
+    [PSCustomObject]@{ ObjectType='Process'; ObjectID=$R11Holder; Name='Review applications'
+        Operation='ReArchiveHolder'; Status='Failed'
+        Message='Re-archive failed; this process is still ACTIVE in group 500' }
+    [PSCustomObject]@{ ObjectType='Process'; ObjectID=$R11Target; Name='Create sales order'
+        Operation='Delete'; Status='Success'; Message='Deleted' }
+)) 6>&1 | Out-String
+
+Assert-True ($strandedSummary -match 'STILL NEEDS MANUAL ATTENTION') `
+    'a process the run left active is called out, with no collateral needed to trigger it'
+Assert-True ($strandedSummary -match 'Review applications') 'and named'
+Assert-True ($strandedSummary -match 'still ACTIVE in group 500') 'with what has to be done about it'
+
+$cleanSummary = (Show-DeleteResultsSummary -Results @(
+    [PSCustomObject]@{ ObjectType='Process'; ObjectID=$R11Target; Name='Create sales order'
+        Operation='Delete'; Status='Success'; Message='Deleted' }
+)) 6>&1 | Out-String
+Assert-True ($cleanSummary -notmatch 'STILL NEEDS MANUAL ATTENTION') `
+    'and a clean run says nothing of the kind'
+
+# Merge-PlanLedgerEntry, on its own: the snapshot wins where it has an entry and
+# nothing else is dropped.
+$mergeSnap = @{
+    'aaa' = [PSCustomObject]@{ UniqueId='aaa'; Name='Target'; NumericId=1; WasArchived=$true
+        OriginalGroupUniqueId='g'; OriginalGroupId=100; OriginalGroupExists=$true
+        RestoredByThisRun=$true }
+}
+$mergeLedger = @(
+    [PSCustomObject]@{ UniqueId='aaa'; Name='Target'; WasArchived=$true; RestoredByThisRun=$true
+        OriginalGroupId=999; OriginalGroupExists=$true; Role='Target'; Deleted=$true; Denormalized=$false }
+    [PSCustomObject]@{ UniqueId='bbb'; Name='Holder'; WasArchived=$true; RestoredByThisRun=$true
+        OriginalGroupId=500; OriginalGroupExists=$true; Role='Holder'; Deleted=$false; Denormalized=$false }
+)
+$mergedLedger = @(Merge-PlanLedgerEntry -Ledger $mergeLedger -Snapshot $mergeSnap)
+Assert-Equal 2 $mergedLedger.Count 'the merge keeps both entries where the old assignment kept one'
+Assert-Equal 100 @($mergedLedger | Where-Object { $_.UniqueId -eq 'aaa' })[0].OriginalGroupId `
+    'the snapshot wins for a process it covers, which is what the assignment was for'
+Assert-Equal $true @($mergedLedger | Where-Object { $_.UniqueId -eq 'aaa' })[0].Deleted `
+    'but progress the plan recorded against it is carried across, not reset'
+Assert-Equal 'Holder' @($mergedLedger | Where-Object { $_.UniqueId -eq 'bbb' })[0].Role `
+    'and an entry the snapshot never knew about survives intact'
+
+# ---------------------------------------------------------------------------
 Write-Host "`nScenario: both archived-list readers page identically" -ForegroundColor Cyan
 # ---------------------------------------------------------------------------
 $script:PageSizesSeen = @()

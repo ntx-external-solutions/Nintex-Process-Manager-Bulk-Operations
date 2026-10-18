@@ -2114,7 +2114,7 @@ function Resolve-TargetOutcome {
     if ($entries.Count -eq 0) { return $rows }
 
     $outstanding = @($rows | Where-Object {
-        $_.Operation -eq 'ReArchive' -and $_.Status -ne 'Success'
+        $script:NpmReArchiveOperations -contains $_.Operation -and $_.Status -ne 'Success'
     })
     if ($outstanding.Count -eq 0) { return $rows }
 
@@ -2133,7 +2133,7 @@ function Resolve-TargetOutcome {
     $updated = @()
 
     foreach ($row in $rows) {
-        if ($row.Operation -ne 'ReArchive' -or $row.Status -eq 'Success') {
+        if ($script:NpmReArchiveOperations -notcontains $row.Operation -or $row.Status -eq 'Success') {
             $updated += $row
             continue
         }
@@ -2189,7 +2189,7 @@ function Resolve-TargetOutcome {
 
         $updated += [PSCustomObject]@{
             ObjectType = $row.ObjectType; ObjectID = $row.ObjectID; Name = $row.Name
-            Operation = 'ReArchive'; Status = $status; Message = $message
+            Operation = $row.Operation; Status = $status; Message = $message
             GroupId = [string]$now.GroupId
             StatusCode = $row.StatusCode
         }
@@ -2224,7 +2224,8 @@ function Resolve-RunOutcome {
     $rows = @($Results)
 
     $needsCheck = @($rows | Where-Object {
-        ($_.Operation -eq 'ReverseCollateral' -or $_.Operation -eq 'ReArchive') -and $_.Status -ne 'Success'
+        ($_.Operation -eq 'ReverseCollateral' -or $script:NpmReArchiveOperations -contains $_.Operation) -and
+        $_.Status -ne 'Success'
     })
     if ($needsCheck.Count -eq 0) { return $rows }
 
@@ -2405,10 +2406,108 @@ function ConvertTo-PlanLedgerEntry {
             OriginalGroupId       = $_.OriginalGroupId
             OriginalGroupExists   = (ConvertTo-NpmGroupExists -Value $_.OriginalGroupExists)
             RestoredByThisRun     = $_.RestoredByThisRun
+            # A snapshot only ever covers the run's own targets; dependency
+            # holders are not known until the plan has been built.
+            Role                  = 'Target'
+            ParkedInHoldingGroup  = $false
             Denormalized          = $false
             Deleted               = $false
         }
     })
+}
+
+function ConvertTo-PlanLedgerRow {
+    <#
+    .SYNOPSIS
+        The working ledger in the shape the plan persists and the unwind reads.
+
+    .DESCRIPTION
+        The model is dropped: it is large, it is re-fetchable, and a stale copy
+        is worse than none on resume.
+
+        This used to be written out inline at the very end of planning, which
+        meant a plan that returned early carried NO ledger at all. Every early
+        return is a blocked plan, and a blocked plan is exactly when the caller
+        most needs to know which processes the run un-archived: it is about to
+        unwind. A measured run left eleven holders active because the plan it
+        unwound from had an empty ledger.
+    #>
+    param($Ledger)
+
+    return @(@($Ledger.Values) | ForEach-Object {
+        [PSCustomObject]@{
+            UniqueId              = $_.UniqueId
+            Name                  = $_.Name
+            NumericId             = $_.NumericId
+            WasArchived           = $_.WasArchived
+            OriginalGroupUniqueId = $_.OriginalGroupUniqueId
+            OriginalGroupId       = $_.OriginalGroupId
+            OriginalGroupExists   = (ConvertTo-NpmGroupExists -Value $_.OriginalGroupExists)
+            RestoredByThisRun     = $_.RestoredByThisRun
+            Role                  = $(if ($_.Role) { [string]$_.Role } else { 'Target' })
+            ParkedInHoldingGroup  = [bool]$_.ParkedInHoldingGroup
+            Denormalized          = $_.Denormalized
+            Deleted               = $_.Deleted
+        }
+    })
+}
+
+function Merge-PlanLedgerEntry {
+    <#
+    .SYNOPSIS
+        The plan's ledger with the pre-Hold snapshot's view of the targets
+        folded in, rather than replaced by it.
+
+    .DESCRIPTION
+        The snapshot covers the run's own targets and nothing else. The plan's
+        ledger covers every participant, targets and dependency holders alike,
+        and it is the only record that a holder was ever un-archived.
+
+        Assigning the snapshot over the top of the ledger therefore threw the
+        holders away. On a measured run that left ELEVEN processes active which
+        the run had itself restored out of the archive, and wrote no results row
+        for any of them, because the unwind reads the ledger and by then the
+        ledger no longer knew they existed. Forty-five rows, none of them about
+        the eleven processes the run had changed.
+
+        So the snapshot still wins for the processes it covers, which is the
+        whole point of the assignment it replaces, and every other entry is
+        kept. Progress the plan already recorded against a target, that a fresh
+        snapshot row cannot know, is carried across rather than reset.
+    #>
+    param($Ledger, $Snapshot)
+
+    $existing = @{}
+    foreach ($row in @($Ledger)) {
+        if ($row.UniqueId) { $existing[([string]$row.UniqueId).ToLowerInvariant()] = $row }
+    }
+
+    $merged = @()
+    $covered = @{}
+
+    foreach ($row in @(ConvertTo-PlanLedgerEntry -Snapshot $Snapshot)) {
+        if (-not $row.UniqueId) { continue }
+        $key = ([string]$row.UniqueId).ToLowerInvariant()
+        $covered[$key] = $true
+
+        # A snapshot row is built fresh and reports both of these as false. The
+        # plan may already have recorded a delete or a completed re-archive
+        # against the same process, and that is not something to forget.
+        if ($existing.ContainsKey($key)) {
+            $prior = $existing[$key]
+            if ($prior.Deleted) { $row.Deleted = $true }
+            if ($prior.Denormalized) { $row.Denormalized = $true }
+        }
+        $merged += $row
+    }
+
+    foreach ($row in @($Ledger)) {
+        if (-not $row.UniqueId) { continue }
+        if ($covered.ContainsKey(([string]$row.UniqueId).ToLowerInvariant())) { continue }
+        $merged += $row
+    }
+
+    return @($merged)
 }
 
 function New-DependencyPlan {
@@ -3081,6 +3180,14 @@ function New-ProcessDeletePlan {
     $allClaims = @()
     $restoredTotal = 0
 
+    # Which ledger entries are the run's own targets. Everything else in the
+    # ledger is a dependency holder: a process that survives the run and is only
+    # being touched so its references can be read and edited. The two need
+    # different rows in the results file, because a holder the run moved and put
+    # back is not damage and should not read like it.
+    $targetLookupForRole = @{}
+    foreach ($t in @($TargetUniqueIds)) { if ($t) { $targetLookupForRole[$t.ToLowerInvariant()] = $true } }
+
     function Add-LedgerEntry {
         param($UniqueId)
         $key = $UniqueId.ToLowerInvariant()
@@ -3184,6 +3291,8 @@ function New-ProcessDeletePlan {
             OriginalGroupId       = $groupId
             OriginalGroupExists   = $groupExists
             RestoredByThisRun     = $restoredByThisRun
+            Role                  = $(if ($targetLookupForRole.ContainsKey($key)) { 'Target' } else { 'Holder' })
+            ParkedInHoldingGroup  = $false
             Denormalized          = $false
             Deleted               = $false
             Model                 = $model
@@ -3269,6 +3378,7 @@ function New-ProcessDeletePlan {
                 $plan.FailedTargets = @($failedTargets)
                 $plan.Log += "Dependency check failed for $($failedTargets.Count) target(s) after retry: $($names -join '; ')"
                 Write-Host "  Cannot plan safely." -ForegroundColor Red
+                $plan.Ledger = @(ConvertTo-PlanLedgerRow -Ledger $ledger)
                 return $plan
             }
 
@@ -3287,6 +3397,7 @@ function New-ProcessDeletePlan {
             if ($TargetUniqueIds.Count -eq 0) {
                 $plan.Status = 'Blocked'
                 $plan.Log += 'Every target failed its dependency check; nothing is left to plan'
+                $plan.Ledger = @(ConvertTo-PlanLedgerRow -Ledger $ledger)
                 return $plan
             }
         }
@@ -3319,33 +3430,54 @@ function New-ProcessDeletePlan {
                 $groupId = $record.OriginalGroupId
                 if ($null -eq $groupId) { $groupId = $HoldingGroupId }
 
-                # A holder whose own group was deleted has nowhere to be restored
-                # to. It cannot be parked in the temp group either, because it
-                # survives this run and would be stranded when the group goes.
-                # Un-restored, its Input/Output edges stay hidden, so a target it
-                # points at would be deleted on an incomplete reading.
+                # A holder whose own group was deleted has nowhere of its own to
+                # go back to. That used to end the run: the holders were named
+                # and the operator was told to go and move them by hand, which
+                # meant no delete could complete on a tenant that has any. Eleven
+                # of them sat behind eleven of twenty targets on the demo tenant.
                 #
-                # That is a blocker, and it is named as one. It used to surface
-                # three floors down as a reconciliation mismatch, which describes
-                # the symptom and not the cause.
+                # The run already solves this problem for targets. The Hold phase
+                # parks an orphaned target in the holding group, reads it there,
+                # and archives it in place on the way out, because there is
+                # nowhere else to put it. A holder is the same problem and takes
+                # the same answer.
+                #
+                # Parking costs it nothing it had not already lost. Its group was
+                # deleted before this run started, so it is orphaned either way;
+                # all that changes is which dead group id it carries. The plan
+                # log and the results row both name the original, so the trail
+                # survives even though the group does not.
+                $parked = $false
                 if ($null -ne $record.OriginalGroupId -and
                     -not (ConvertTo-NpmGroupExists -Value $record.OriginalGroupExists)) {
-                    $orphanedHolders += [PSCustomObject]@{
-                        UniqueId        = $record.UniqueId
-                        Name            = $record.Name
-                        OriginalGroupId = $record.OriginalGroupId
-                        Reason          = 'its group no longer exists'
-                    }
-                    Write-Host "    Cannot restore $($record.Name): its group ($($record.OriginalGroupId)) no longer exists." -ForegroundColor Red
-                    continue
+                    $parked = $true
+                    $groupId = $HoldingGroupId
+                    Write-Host "    $($record.Name): its group ($($record.OriginalGroupId)) no longer exists; holding it instead." -ForegroundColor Yellow
                 }
 
                 Write-Host "    Restoring archived process: $($record.Name)" -ForegroundColor Yellow
                 if (Restore-NpmProcess -SiteURL $SiteURL -Token $Token -ProcessUniqueId $record.UniqueId -ProcessGroupId $groupId) {
                     $record.RestoredByThisRun = $true
+                    $record.ParkedInHoldingGroup = $parked
                     $restoredThisPass++
                     $restoredTotal++
-                    $plan.Log += "Restored $($record.UniqueId) ($($record.Name)) to group $groupId for discovery"
+                    if ($parked) {
+                        $plan.Log += "Held $($record.UniqueId) ($($record.Name)) in the holding group for discovery; its own group $($record.OriginalGroupId) no longer exists"
+                    } else {
+                        $plan.Log += "Restored $($record.UniqueId) ($($record.Name)) to group $groupId for discovery"
+                    }
+                } elseif ($parked) {
+                    # The holding group was the fallback. With that refused there
+                    # is nowhere left to read this holder, so the old blocker is
+                    # the right answer after all: its Input/Output edges stay
+                    # hidden and a target it points at cannot be deleted safely.
+                    $orphanedHolders += [PSCustomObject]@{
+                        UniqueId        = $record.UniqueId
+                        Name            = $record.Name
+                        OriginalGroupId = $record.OriginalGroupId
+                        Reason          = "its group no longer exists and it could not be held in the holding group either (HTTP $(Get-NpmLastRestoreStatus))"
+                    }
+                    Write-Host "    Failed to hold $($record.Name); it cannot be read anywhere." -ForegroundColor Red
                 } else {
                     $plan.Log += "FAILED to restore $($record.UniqueId) ($($record.Name)); its Input/Output edges stay hidden"
                     Write-Host "    Failed to restore $($record.Name)" -ForegroundColor Red
@@ -3360,6 +3492,10 @@ function New-ProcessDeletePlan {
                 $plan.Log += "BLOCKED: dependency holder $($holder.UniqueId) ($($holder.Name)) is archived and cannot be restored because $($holder.Reason) (group $($holder.OriginalGroupId)). Its Input/Output references cannot be read, so a target it points at cannot be deleted safely."
             }
             $plan.Log += 'Move these holders into a group that exists, then re-run.'
+
+            # The ledger goes out with the blocked plan, because the caller is
+            # about to unwind and this is the only record of what was restored.
+            $plan.Ledger = @(ConvertTo-PlanLedgerRow -Ledger $ledger)
             return $plan
         }
 
@@ -3442,22 +3578,7 @@ function New-ProcessDeletePlan {
         }
     }
 
-    $plan.Ledger = @($ledger.Values | ForEach-Object {
-        # The model is dropped from the persisted ledger: it is large, it is
-        # re-fetchable, and a stale copy is worse than none on resume.
-        [PSCustomObject]@{
-            UniqueId              = $_.UniqueId
-            Name                  = $_.Name
-            NumericId             = $_.NumericId
-            WasArchived           = $_.WasArchived
-            OriginalGroupUniqueId = $_.OriginalGroupUniqueId
-            OriginalGroupId       = $_.OriginalGroupId
-            OriginalGroupExists   = (ConvertTo-NpmGroupExists -Value $_.OriginalGroupExists)
-            RestoredByThisRun     = $_.RestoredByThisRun
-            Denormalized          = $_.Denormalized
-            Deleted               = $_.Deleted
-        }
-    })
+    $plan.Ledger = @(ConvertTo-PlanLedgerRow -Ledger $ledger)
     $plan.Claims = $allClaims
     $plan.Sites = $workSites
     $plan.WorkItems = $workItems
@@ -4131,6 +4252,23 @@ function Move-NpmProcessToGroup {
     }
 }
 
+# The unwind writes one of two operations, and several places have to agree on
+# the pair: the row builder, the end-of-run re-check that corrects those rows
+# against the tenant, and the summary.
+#
+# They are separate operations because they mean different things to whoever
+# reads the file. A ReArchive row is one of the run's own targets going home. A
+# ReArchiveHolder row is a process that was never a target, which the run
+# un-archived only so its references could be read, and then put back. Filing
+# both under one name left no way to see that a holder had been moved at all.
+$script:NpmReArchiveOperations = @('ReArchive', 'ReArchiveHolder')
+
+function Get-NpmReArchiveOperation {
+    param([string]$Role)
+    if ($Role -eq 'Holder') { return 'ReArchiveHolder' }
+    return 'ReArchive'
+}
+
 function Restore-ProcessPlanState {
     <#
     .SYNOPSIS
@@ -4157,6 +4295,12 @@ function Restore-ProcessPlanState {
         Message. The column is what the manual-review companion is built from;
         with it empty the companion could only be assembled by parsing the
         prose back apart, which is the job the column was added to remove.
+
+        This covers dependency holders as well as targets, and always did: the
+        filter is the ledger, not the target list. What it could not cover was a
+        ledger that had been overwritten with a target-only snapshot before it
+        got here, which is how a measured run left eleven holders active and
+        said nothing about any of them.
     #>
     param(
         [string]$SiteURL,
@@ -4200,7 +4344,10 @@ function Restore-ProcessPlanState {
             # Home is gone: this process was orphaned before the run started,
             # and the run cannot put it somewhere that does not exist. Archiving
             # takes no group, so it can always be archived; the only question is
-            # where, and the honest answer is where it sits.
+            # where, and the honest answer is where it sits. This is also the
+            # branch a parked holder lands in, which is why parking one is safe:
+            # it is archived before the holding group is deleted, so it leaves
+            # the group the same way an orphaned target does.
             #
             # Attempting the move instead cost three HTTP 500s and a results row
             # asserting a placement that never happened.
@@ -4253,12 +4400,23 @@ function Restore-ProcessPlanState {
         if (-not $ok) { $status = 'Failed' }
         elseif (-not $movedOk) { $status = 'Skipped' }
 
+        # A holder the run parked in the holding group had no group of its own to
+        # go back to before the run started either. Archived where it sits is the
+        # same state it was found in, so that is a success and not a compromise,
+        # and the row says which dead group it came from so the trail survives.
+        if ($ok -and $entry.ParkedInHoldingGroup) { $status = 'Success' }
+
+        $message = $(if ($ok) { "Re-archived in $placement" }
+                     else { "Re-archive failed; this process is still ACTIVE in $placement. $($outcome.Message)" })
+        if ($entry.ParkedInHoldingGroup) {
+            $message = "$message. This run held it here only so its references could be read; it was already orphaned before the run started"
+        }
+
         $results += [PSCustomObject]@{
             ObjectType = 'Process'; ObjectID = $entry.UniqueId; Name = $entry.Name
-            Operation = 'ReArchive'
+            Operation = (Get-NpmReArchiveOperation -Role $entry.Role)
             Status = $status
-            Message = $(if ($ok) { "Re-archived in $placement" }
-                        else { "Re-archive failed; this process is still ACTIVE in $placement. $($outcome.Message)" })
+            Message = $message
             GroupId = $landedGroupId
             StatusCode = $(if ([int]$outcome.StatusCode -gt 0) { [string]$outcome.StatusCode } else { '' })
         }

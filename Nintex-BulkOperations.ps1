@@ -128,7 +128,7 @@ param(
     [switch]$AcceptCollateral
 )
 
-$script:ScriptVersion = '4.11'
+$script:ScriptVersion = '4.12'
 
 # ----------------------------------------------------------------------------
 # Dependency engine. Mode 5 delegates all dependency discovery, reference
@@ -3933,7 +3933,12 @@ function Invoke-BulkDeleteProcesses {
         # Anything the Hold phase pulled out of the archive has to go back, or
         # the tenant is left with live copies of processes that were archived.
         if ($tempGroup) {
-            $plan.Ledger = @(ConvertTo-PlanLedgerEntry -Snapshot $snapshot)
+            # Merged, not replaced. The snapshot covers the targets; the plan's
+            # own ledger is the only record that a dependency holder was
+            # un-archived for discovery. Overwriting it here left eleven such
+            # holders active with no results row for any of them, because the
+            # unwind below reads this ledger.
+            $plan.Ledger = @(Merge-PlanLedgerEntry -Ledger $plan.Ledger -Snapshot $snapshot)
             $runLedger = @($plan.Ledger)
             [void](Export-DependencyPlan -Plan $plan -Path $planPath)
             $results += @(Restore-ProcessPlanState -SiteURL $SiteURL -Token $Token -Plan $plan -PlanPath $planPath -ApprovalsEnabled $approvalsEnabled)
@@ -4148,17 +4153,30 @@ function Save-DeleteResults {
     $rows = @(ConvertTo-NpmResultRow -Rows $Results)
     $rows | Export-Csv -Path $outputPath -NoTypeInformation
 
+    Write-Host "`nResults saved to: $outputPath" -ForegroundColor Green
+    Show-DeleteResultsSummary -Results $Results
+}
+
+function Show-DeleteResultsSummary {
+    <#
+    .SYNOPSIS
+        What the run did, in the terms an operator has to act on.
+
+    .DESCRIPTION
+        Separate from writing the file so it can be exercised without one, and
+        because the two jobs are different: the file is the record, this is the
+        part somebody reads before deciding whether the run needs following up.
+    #>
+    param($Results)
+
     $failed = @($Results | Where-Object { $_.Status -eq 'Failed' })
     $accepted = @($Results | Where-Object { $_.Status -eq 'Accepted' })
-    $unreversed = @($Results | Where-Object { $_.Operation -eq 'ReverseCollateral' -and $_.Status -ne 'Success' })
-
     # Accepted rows are a record of a decision, not of damage the operator has
     # still to look at. Counting them in the list headed "this run changed
     # processes it was not asked to" would tell somebody to go and review what
     # they reviewed before the run started.
     $collateral = @($Results | Where-Object { $_.Operation -eq 'Collateral' -and $_.Status -ne 'Accepted' })
 
-    Write-Host "`nResults saved to: $outputPath" -ForegroundColor Green
     Write-Host "Total operations: $(@($Results).Count)" -ForegroundColor Cyan
     Write-Host "Successful: $(@($Results | Where-Object { $_.Status -eq 'Success' }).Count)" -ForegroundColor Green
     Write-Host "Skipped: $(@($Results | Where-Object { $_.Status -eq 'Skipped' }).Count)" -ForegroundColor Yellow
@@ -4183,23 +4201,40 @@ function Save-DeleteResults {
         Write-Host "$($byProcess.Count) process(es) affected without being targets:" -ForegroundColor Red
 
         foreach ($group in $byProcess) {
-            $rows = @($group.Group)
-            $id = $rows[0].ObjectID
+            $affected = @($group.Group)
+            $id = $affected[0].ObjectID
 
-            $label = Select-NpmDisplayName -Rows $rows -UniqueId ([string]$id)
+            $label = Select-NpmDisplayName -Rows $affected -UniqueId ([string]$id)
 
             Write-Host "  $label  ($id)" -ForegroundColor Red
-            foreach ($msg in @($rows | ForEach-Object { $_.Message } | Select-Object -Unique)) {
+            foreach ($msg in @($affected | ForEach-Object { $_.Message } | Select-Object -Unique)) {
                 Write-Host "      $msg" -ForegroundColor DarkGray
             }
         }
 
-        if ($unreversed.Count -gt 0) {
-            Write-Host "`n$($unreversed.Count) of these still need manual attention:" -ForegroundColor Red
-            foreach ($u in $unreversed) {
-                $label = Format-NpmProcessName -Name ([string]$u.Name) -UniqueId ([string]$u.ObjectID)
-                Write-Host "  $label - $($u.Message)" -ForegroundColor Red
-            }
+        Write-Host ""
+    }
+
+    # Anything the run un-archived and could not put back, whether it was a
+    # target, a dependency holder or a process nobody asked it to touch.
+    #
+    # This used to print only inside the collateral block, so a run that left a
+    # process active without any collateral to report said nothing at all beyond
+    # a number in the Failed line. The measured case was eleven of them.
+    $stranded = @($Results | Where-Object {
+        ($_.Operation -eq 'ReverseCollateral' -or $script:NpmReArchiveOperations -contains $_.Operation) -and
+        $_.Status -ne 'Success'
+    })
+
+    if ($stranded.Count -gt 0) {
+        Write-Host "`n========================================" -ForegroundColor Red
+        Write-Host "  STILL NEEDS MANUAL ATTENTION" -ForegroundColor Red
+        Write-Host "========================================" -ForegroundColor Red
+        Write-Host "$($stranded.Count) process(es) this run changed and could not put back:" -ForegroundColor Red
+        foreach ($u in $stranded) {
+            $label = Format-NpmProcessName -Name ([string]$u.Name) -UniqueId ([string]$u.ObjectID)
+            Write-Host "  $label  ($($u.ObjectID))" -ForegroundColor Red
+            Write-Host "      $($u.Message)" -ForegroundColor DarkGray
         }
         Write-Host ""
     }
