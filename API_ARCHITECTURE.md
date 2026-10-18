@@ -1480,3 +1480,33 @@ them doubled, so the doubling cannot be avoided by choosing flags.
 
 21 of the 24 mismatches are exactly this shape. The other three are not
 (`claimed 1, located 0` twice, `claimed 3, located 1` once) and are still unexplained.
+
+### The archived batch read takes at most 20 ids (18 Oct 2026)
+
+`GET /mobile/api/v1/processes?processUniqueIds=...` refuses 21 or more ids with **400**:
+`"The processUniqueIds parameter maximum size is 20."` Measured: 20 ids succeed, 21, 22,
+23 and 25 fail. It's a count limit, not URL length.
+
+The script (`Get-NpmArchivedProcessModel`, `$BatchSize = 25`) and the web port
+(`ARCHIVED_BATCH_SIZE = 25`) both use 25, and both **skip a failed batch silently**. So the
+archive-wide Input/Output scan, which exists to cover the dependency API's blind spot,
+reads only the last partial batch of the archive. Every full batch of 25 is refused and
+dropped. On the demo tenant that is 18 of 19 batches. Any other caller that batches more
+than 20 archived ids loses the same way.
+
+Done correctly (batches of 20) on R11's target set, the scan read all 463 archived
+processes and found one hidden Input reference. The plan already had it through another
+path, so that run lost nothing, but only by luck.
+
+### All 24 reconciliation mismatches on R11's set are over-claims (18 Oct 2026)
+
+For each of the 24 mismatched pairs, both raw models (all 34 read) were searched for
+every mention of the other process's id, in any field. **In all 24 pairs the raw count
+equals the number of sites the plan removes.** No reference was missed. The
+mismatches are the dependency API over-claiming:
+
+- 21 are links listed twice (above).
+- 2 are **Input** references the API reports as "Linked Process" (claimed 1 Link,
+  located 0 Link, 1 Input located and planned).
+- 1 is a variation record whose one `Decision[0]` link is claimed 3 times. The set's
+  other variation doesn't reference the target.

@@ -30,8 +30,15 @@ Maintained by the Cowork session. Claude Code reads this but does not edit it.
 - F4 verified live (18 Oct, no writes): an archived process is "Skipped. The process is
   archived ..." and named; an unknown-user row on a live process is named from the
   listing.
-- Next for Cowork: investigate the 3 unexplained mismatches before W5's delete phase;
-  review phase 3.
+- W5 phase 3 (hold) code reviewed and approved; phase 4 handed over. Hold writes stay off
+  the allowlist until the unwind phase, so live mutation testing waits for it.
+- Phase 3 live check passed (18 Oct). Found: the archived batch read caps at 20 ids and
+  both script and port used 25 with silent skips, so the archive-wide Input/Output scan
+  read almost nothing; fix handed to phase 4. All 24 mismatches on R11's set verified as
+  API over-claims (raw models match the plan in 24 of 24); gate relaxation handed to
+  phase 4.
+- Next for Cowork: review phase 4 (reference removal); live mutation testing waits for
+  the unwind phase.
 - Spikes S1 to S3 and the variation test are in `API_ARCHITECTURE.md`. One lasting change
   on the tenant: "SOC 2 Submission Review" and its Partner variation are published at 3.0.
 - Restricting sign-in to known Process Manager hosts is deferred by JB.

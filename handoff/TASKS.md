@@ -250,7 +250,59 @@ results row (report: project doc `claude/bulk-ops-r12-2026-10-18.md`). Three fix
 
 ## W5. Bulk Delete engine
 
-Status: Ready. Phases 1 and 2 done and **reviewed by Cowork**; phase 3 (hold) done in a3ee966; stopped for review before reference removal
+Status: Ready. Phases 1 to 3 done and **reviewed by Cowork**; phase 4 (reference
+removal) is next
+
+### Cowork's live check after phase 3 deployed (18 Oct)
+
+The dry run on R11's set shows exactly what it should: 21 double-counted, 3 mismatches, 11
+holders with no group (groups 227, 646, 647, 686, as R11 hit), 4 orphaned targets. Two
+things for phase 4, both in `API_ARCHITECTURE.md`:
+
+- **Bug, fix first: the archived batch read takes at most 20 ids.** The tenant answers
+  21 or more with 400 "The processUniqueIds parameter maximum size is 20." We use 25, and
+  `findHiddenInputOutputReferences` skips a failed batch silently, so the archive-wide
+  Input/Output scan reads only the last partial batch: 18 of 19 batches lost on the demo
+  tenant. The script has the same bug. Fix:
+  - `ARCHIVED_BATCH_SIZE = 20`, and the proxy's `processes.archivedModels` limit 20;
+  - a batch that fails with a 4xx is **not** skipped: the plan records which ids went
+    unread, names them, and comes back `PlannedIncomplete` with that reason (a dead
+    session still stops the run);
+  - a test with 45 archived ids that asserts every one is read, and one where a batch
+    fails that asserts the plan says so.
+- **Mismatches: safe to relax, with one rule.** Cowork searched both raw models of all 24
+  mismatched pairs for every mention of each other: the count equals the plan's sites in
+  24 of 24. Nothing was missed. So:
+  - **`doubleCounted` no longer blocks.** Make the one-line gate change. Keep the
+    separate section in the summary.
+  - **Reconcile a pair across categories before calling it a mismatch.** Two of the
+    three are Input references the API labels "Linked Process" (claimed 1 Link, 1 Input
+    located). Compare the pair's total claims with its total located sites, and only
+    report a mismatch when the located total is lower. Keep the per-category numbers in
+    the note.
+  - The third (a variation's single `Decision[0]` claimed 3 times) stays a mismatch.
+    Over-claims (located >= 1 but fewer than claimed) should need an explicit
+    acknowledgement on screen, not block outright. A pair with **nothing** located still
+    blocks.
+
+### Cowork's review of phase 3 (18 Oct)
+
+Code approved. Start phase 4.
+
+- **Keeping restore and create-group out of the allowlist until the unwind exists is the
+  right call.** It's exactly how R11 went wrong. It means the live test of hold, removal
+  and delete happens together once the orchestrator lands. Cowork will do that on
+  test content it builds, including an orphaned holder, and check every process ends
+  where it started.
+- **`doubleCounted` as a flag, the mismatch gate unchanged:** agreed. Cowork confirmed
+  the shape on one pair. Before the gate changes, Cowork will check all 21 pairs on the
+  R11 set against the holders' models after this PR deploys, and say so here. Then it's
+  your one-line change.
+- **Snapshot falling back to the listing's group UniqueId,** and **the extra dry-run
+  warnings:** both fine.
+- Live check still to do (Cowork, after deploy, read-only): the dry run on R11's set
+  should show 21 double-counted links, 3 mismatches, 11 named holders with no group and 4
+  orphaned targets.
 
 ### Cowork's review of phase 2 (18 Oct)
 
