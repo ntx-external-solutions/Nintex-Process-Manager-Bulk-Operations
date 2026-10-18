@@ -8,10 +8,12 @@
  * named only by a plan file. So it is left in place and every process in it is named.
  */
 
-import type { ResultRow } from '../exec/report.ts';
-import type { DeleteGateway, GroupRef } from './gateway.ts';
+import { failureOf } from '../archive/outcome.ts';
+import { resultRow, type ResultRow } from '../exec/report.ts';
+import { defaultIsFatal } from '../exec/runner.ts';
+import type { DeleteGateway, GroupProcess, GroupRef } from './gateway.ts';
 import type { OrphanedGroupProcess } from './groups.ts';
-import { notPorted } from './phases.ts';
+import { resolveCollateralName } from './names.ts';
 
 export interface HoldingGroupCleanupOptions {
   groupName: string;
@@ -28,12 +30,57 @@ export interface HoldingGroupCleanupOptions {
  * and was not already reported. A listing that cannot be read leaves the group in place.
  * Port of `Remove-HoldingGroup`.
  */
-export function removeHoldingGroup(
+export async function removeHoldingGroup(
   gateway: Pick<DeleteGateway, 'groupProcesses' | 'deleteGroup'>,
   group: GroupRef | null,
   options: HoldingGroupCleanupOptions,
+  isFatal: (error: unknown) => string | null = defaultIsFatal,
 ): Promise<ResultRow[]> {
-  return notPorted('unwind');
+  if (!group) return [];
+  const groupRow = (status: string, message: string, statusCode?: number | null) =>
+    resultRow({ objectType: 'ProcessGroup', objectId: group.uniqueId, name: options.groupName, operation: 'Cleanup', status, message, groupId: group.id, statusCode });
+
+  let remaining: GroupProcess[];
+  try {
+    remaining = await gateway.groupProcesses(group);
+  } catch (error) {
+    if (isFatal(error)) throw error;
+    // A group of unknown contents is not deleted.
+    return [groupRow('Skipped', 'Could not verify the group is empty; delete it manually after checking')];
+  }
+
+  if (remaining.length > 0) {
+    const rows = [groupRow('Skipped', `Still holds ${remaining.length} process(es): ${remaining.map((p) => p.processUniqueId).join(', ')}`)];
+    // A process stranded here was moved in by this run and left behind, which makes it
+    // collateral whatever the sweeps said. The checkpoints are the other producer of
+    // collateral rows, so what they reported is not reported twice (W2: 7 rows for 5).
+    const targets = new Set((options.targetUniqueIds ?? []).map((t) => t.toLowerCase()));
+    const reported = new Set((options.reportedUniqueIds ?? []).map((t) => t.toLowerCase()));
+    for (const proc of remaining) {
+      const id = proc.processUniqueId;
+      if (!id || targets.has(id.toLowerCase()) || reported.has(id.toLowerCase())) continue;
+      rows.push(
+        resultRow({
+          objectId: id,
+          // The listing shows a variation under its master's name; the baseline's wins.
+          name: resolveCollateralName(options.nameLookup ?? null, id, proc.processName),
+          operation: 'Collateral',
+          status: 'Failed',
+          message: `Left stranded in the holding group '${options.groupName}' and was not a target; move it back manually`,
+          groupId: group.id,
+        }),
+      );
+    }
+    return rows;
+  }
+
+  try {
+    await gateway.deleteGroup(group.uniqueId);
+  } catch (error) {
+    if (isFatal(error)) throw error;
+    return [groupRow('Failed', 'Delete failed; remove it manually', failureOf(error).status)];
+  }
+  return [groupRow('Success', 'Empty holding group deleted')];
 }
 
 /**

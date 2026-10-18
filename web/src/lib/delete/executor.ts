@@ -24,6 +24,7 @@ import { defaultIsFatal } from '../exec/runner.ts';
 import { buildUpdateEnvelope } from '../pm/processes.ts';
 import type { ProcessActions } from '../pm/types.ts';
 import { chooseWritePath, isOpenDraft, isWritePath, writeStateOf, type WriteRefusal } from '../pm/writePath.ts';
+import { readGroupExists } from '../select/archived.ts';
 import { loadProcessIndex, type ProcessIndex } from '../tenant/state.ts';
 import {
   ACCEPTANCE_AUTHORITY,
@@ -39,9 +40,9 @@ import {
 import type { DeleteEventSink } from './events.ts';
 import type { DeleteGateway } from './gateway.ts';
 import type { DependencyPlan } from './ledger.ts';
-import { nodeInt, type ProcessModel } from './model.ts';
+import { nodeInt, nodeString, type ProcessModel } from './model.ts';
 import { resolveClaimName } from './names.ts';
-import { notPorted } from './phases.ts';
+import { reArchiveOperation } from './runOutcome.ts';
 import { findProcessReferenceSites, removeProcessReferences, type ReferenceSite } from './references.ts';
 
 export interface EngineOptions {
@@ -614,13 +615,72 @@ export interface MoveOptions extends EngineOptions {
  * retries while the probe allows, otherwise archive and restore into the group. Port of
  * `Move-NpmProcessToGroup`.
  */
-export function moveProcessToGroup(
+export async function moveProcessToGroup(
   gateway: DeleteGateway,
   processUniqueId: string,
   targetGroupId: number | null,
   options: MoveOptions,
 ): Promise<MoveOutcome> {
-  return notPorted('unwind');
+  const isFatal = options.isFatal ?? defaultIsFatal;
+  const notMoved: MoveOutcome = { moved: false, actualGroupId: null, verified: false };
+  // A group that is gone is not somewhere to move to, and the fallback would archive the
+  // process on the way to finding that out.
+  if (targetGroupId === null || options.targetGroupExists === false) return notMoved;
+
+  // Asked once per run and with no retries: on the measured tenant RestoreProcess answers
+  // 500 for an active process every time, and the retry ladder spent 14 seconds per
+  // process learning it.
+  if (options.probe.state !== 'No') {
+    await restoreProcess(gateway, processUniqueId, targetGroupId, { retry: false, isFatal });
+    const actual = await currentGroupOf(gateway, processUniqueId, isFatal);
+    if (actual === targetGroupId) {
+      if (options.probe.state === 'Unknown') options.onEvent?.({ kind: 'relocationProbe', relocatesActive: true });
+      options.probe.state = 'Yes';
+      return { moved: true, actualGroupId: actual, verified: true };
+    }
+    if (options.probe.state === 'Unknown') {
+      options.probe.state = 'No';
+      options.onEvent?.({ kind: 'relocationProbe', relocatesActive: false });
+    }
+  }
+
+  // Documented behaviour only: archive, then restore into the group wanted.
+  const archive = await archiveOne(gateway, processUniqueId, RELOCATION_ARCHIVE_COMMENT, {
+    approvalOverride: options.approvalsEnabled ?? true,
+    isFatal,
+  });
+  // The restore is still attempted: ArchiveProcess can report failure and take effect,
+  // and the placement is read back either way.
+  if (!archive.success) options.onEvent?.({ kind: 'log', line: `Archive step of relocating ${processUniqueId} failed: ${archive.message}` });
+  await restoreProcess(gateway, processUniqueId, targetGroupId, { isFatal });
+
+  const actual = await currentGroupOf(gateway, processUniqueId, isFatal);
+  if (actual === null) return notMoved;
+  return { moved: actual === targetGroupId, actualGroupId: actual, verified: true };
+}
+
+const RELOCATION_ARCHIVE_COMMENT = 'Relocating to original group';
+export const RE_ARCHIVE_COMMENT = 'Re-archiving after dependency cleanup';
+
+/**
+ * The group a process is in now, from the active read or the archived batch read, or
+ * null when neither says. Port of `Get-NpmProcessGroupId`.
+ */
+export async function currentGroupOf(
+  gateway: Pick<DeleteGateway, 'readModel' | 'readArchivedModels'>,
+  processUniqueId: string,
+  isFatal: (error: unknown) => string | null = defaultIsFatal,
+): Promise<number | null> {
+  try {
+    const read = await gateway.readModel(processUniqueId);
+    if (read.kind === 'model') return nodeInt(read.model, 'GroupId');
+    const archived = await gateway.readArchivedModels([processUniqueId]);
+    const model = archived.find((m) => nodeString(m, 'UniqueId').toLowerCase() === processUniqueId.toLowerCase());
+    return model ? nodeInt(model, 'GroupId') : null;
+  } catch (error) {
+    if (isFatal(error)) throw error;
+    return null;
+  }
 }
 
 export interface RestorePlanStateOptions extends EngineOptions {
@@ -637,12 +697,95 @@ export interface RestorePlanStateOptions extends EngineOptions {
  * holder among them, is archived where it sits. Idempotent: an entry marked denormalised
  * is skipped. Port of `Restore-ProcessPlanState`.
  */
-export function restorePlanState(
+export async function restorePlanState(
   gateway: DeleteGateway,
   plan: Pick<DependencyPlan, 'ledger'>,
   options: RestorePlanStateOptions,
 ): Promise<ResultRow[]> {
-  return notPorted('unwind');
+  const isFatal = options.isFatal ?? defaultIsFatal;
+  const results: ResultRow[] = [];
+  // The ledger, not the target list: holders as well as targets (old T1).
+  const toRestore = plan.ledger.filter((e) => e.wasArchived && e.restoredByThisRun && !e.denormalized && !e.deleted);
+  if (toRestore.length === 0) return results;
+  options.onEvent?.({ kind: 'stage', stage: 'returning-processes' });
+
+  for (const [i, entry] of toRestore.entries()) {
+    options.onEvent?.({ kind: 'progress', label: 'Returning processes', done: i + 1, total: toRestore.length });
+    const homeGroupId = entry.originalGroupId;
+    let placement: string;
+    let movedOk = true;
+    // Where it is when the row is written; null only where no read could say.
+    let landed: number | null = null;
+
+    if (homeGroupId === null) {
+      landed = await currentGroupOf(gateway, entry.uniqueId, isFatal);
+      placement = 'no original group was recorded, so it was archived where it sat';
+      movedOk = false;
+    } else if (!readGroupExists(entry.originalGroupExists).exists) {
+      // Home is gone, so it is archived where it sits: archiving takes no group. This is
+      // also where a parked holder lands, which is why parking one is safe.
+      landed = await currentGroupOf(gateway, entry.uniqueId, isFatal);
+      const where = landed !== null ? `group ${landed}` : 'the group it currently sits in';
+      placement = `${where}; its original group ${homeGroupId} no longer exists`;
+      movedOk = false;
+    } else {
+      const current = await currentGroupOf(gateway, entry.uniqueId, isFatal);
+      if (current === homeGroupId) {
+        placement = `group ${homeGroupId}`;
+        landed = homeGroupId;
+      } else {
+        // ArchiveProcess archives where the process sits, which is the holding group.
+        const move = await moveProcessToGroup(gateway, entry.uniqueId, homeGroupId, {
+          probe: options.probe,
+          approvalsEnabled: options.approvalsEnabled,
+          isFatal,
+          onEvent: options.onEvent,
+        });
+        movedOk = move.moved;
+        if (move.moved) {
+          placement = `group ${homeGroupId}`;
+          landed = homeGroupId;
+        } else if (move.verified) {
+          placement = `group ${move.actualGroupId}, NOT the original group ${homeGroupId}`;
+          landed = move.actualGroupId;
+        } else {
+          placement = `an UNVERIFIED group; the move to ${homeGroupId} could not be confirmed`;
+        }
+      }
+    }
+
+    const outcome = await archiveOne(gateway, entry.uniqueId, RE_ARCHIVE_COMMENT, {
+      approvalOverride: options.approvalsEnabled ?? true,
+      isFatal,
+    });
+    entry.denormalized = outcome.success;
+
+    // A parked holder had no group of its own before the run either: archived where it
+    // sits is the state it was found in, so that is a success, not a compromise.
+    let status = outcome.success ? (movedOk ? 'Success' : 'Skipped') : 'Failed';
+    if (outcome.success && entry.parkedInHoldingGroup) status = 'Success';
+    let message = outcome.success
+      ? `Re-archived in ${placement}`
+      : `Re-archive failed; this process is still ACTIVE in ${placement}. ${outcome.message}`.trimEnd();
+    if (entry.parkedInHoldingGroup) {
+      // Old T2: it stays archived without a group, the state it was found in.
+      message = `${message}. This run held it here only so its references could be read; it was already orphaned before the run started, and stays archived without a group`;
+    }
+    results.push(
+      resultRow({
+        objectId: entry.uniqueId,
+        name: entry.name,
+        operation: reArchiveOperation(entry.role, entry.parkedInHoldingGroup),
+        status,
+        message,
+        groupId: landed,
+        statusCode: outcome.statusCode,
+      }),
+    );
+    // Saved after each, so an interrupted unwind can be finished from the plan.
+    await options.persist?.();
+  }
+  return results;
 }
 
 /**

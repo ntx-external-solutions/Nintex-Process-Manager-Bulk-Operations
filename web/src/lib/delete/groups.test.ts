@@ -13,7 +13,6 @@ import assert from 'node:assert/strict';
 import { readGroupExists } from '../select/archived.ts';
 import type { IndexEntry } from '../tenant/state.ts';
 import { findOrphanedGroupProcesses, groupDescendantIds, groupExistsCoverage, processesInGroups, type CoverageEntry } from './groups.ts';
-import { PHASE } from './phases.ts';
 import { orphanedGroupIndex } from './testing/index.ts';
 
 test('only an explicit false says the group is gone', () => {
