@@ -6,6 +6,36 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## F4. Fixes from the W4 live test
+
+Commit `ba4028b` on `claude/web-f4-ownership-fixes`, stacked on F3.
+
+**What changed.**
+
+- **Archived processes.** `getOwnership` (`pm/ownership.ts`) now reads through `readProcess`/`readProcessEnvelope`, the shared helper added in W5 phase 2. It returns `OwnershipRead`: `{ kind: 'process', state }`, or `{ kind: 'archived' }` for the 200 with no `processJson`.
+  - The plan skips an archived process: "Skipped. The process is archived. Restore it before changing its owner or expert (line N)". The model's own `isArchived` stays as a second signal.
+  - `setOwnership` returns `{ ok: false, archived: true }` if the process was archived after the preview. The run skips that row ("archived after the preview, so it was not saved") and saves nothing.
+  - A 404 on the read now says the process may have been deleted. It no longer says "an archived process cannot be read this way", which was wrong.
+- **Names.** `/ownership` reads both process listings (`loadProcessIndex`) before planning. `buildOwnershipPlan` takes them as `names`, and every row it does not write takes its name from there: unknown user, nothing provided, non-GUID, read failed, archived. "(name unavailable; not in any process list)" only appears when neither listing has the id. If the listings can't be read, planning carries on with the old wording; a dead session still stops it.
+
+**Results-file operations.** None new. `UpdateOwnership` rows are now named.
+
+**Tests.** 442 tests: 368 pass, 0 fail, 74 skipped (4 new):
+- an archived process is skipped and named;
+- each skipped row is named from the listings, falling back only when the id is in neither;
+- a save that finds the process archived is Skipped;
+- at the proxy, the ownership read and the write treat the archived envelope as archived, and nothing is saved.
+
+The existing tests were updated for the new read shape.
+
+**End-to-end, offline.** The ownership scenario now includes an archived process. "Not updating" names every row: "Disabled owner" (unknown user), "Old thing" (nothing provided), "Archived input" ("The process is archived"). The non-GUID id has no name to find. Three processes were still updated.
+
+**Decisions Cowork should check.**
+
+- **Names come from the listings only**, not from the ownership read: a skipped row is never read. A process neither listing returns (the R3 blind spot) still gets the fallback wording.
+
+---
+
 ## F3. Two small things from the W5 parity check
 
 Commit `c5c7933` on `claude/web-f3-parity`, stacked on W5 phase 2.

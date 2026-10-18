@@ -2,7 +2,8 @@
 // printing the plan and results. Start the app with SCIM_BASE_URL pointing at the mock.
 // Expect: Outright saved and published (one PUT, one Publish), Needs approval saved only
 // (it is in progress), Elsewhere set to the unassigned placeholder and published, and
-// rows skipped for an unknown username, a non-GUID id and a row with no owner or expert.
+// rows skipped for an unknown username, a non-GUID id, a row with no owner or expert, and
+// an archived process (F4). Each skipped row is named from the listings.
 
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -22,6 +23,7 @@ writeFileSync(
     `${id(5)},unassigned,`,
     '1234,ann@example.com,',
     `${id(6)},,`,
+    `${id(7)},ann@example.com,`,
   ].join('\r\n'),
 );
 
@@ -29,7 +31,7 @@ const b = await connect();
 await b.signIn();
 await b.go('/ownership', `!!document.querySelector('input[type=file]')`, 'upload');
 await b.upload('input[type=file]', csv);
-await b.until(`document.body.innerText.includes('owners.csv: 6 rows')`, 'file read');
+await b.until(`document.body.innerText.includes('owners.csv: 7 rows')`, 'file read');
 await b.js(`$set('#scim','scim-key'); true`);
 await b.js(`[...document.querySelectorAll('input[type=radio]')][1].click(); true`);
 await b.js(`$btn('Preview the changes')`);

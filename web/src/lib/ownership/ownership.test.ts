@@ -107,7 +107,10 @@ function state(over: Partial<OwnershipState> = {}): OwnershipState {
   };
 }
 
-function reads(states: Record<string, OwnershipState | Error>) {
+/** The tenant's answer for an archived process: 200 with no model (F4). */
+const ARCHIVED = 'archived' as const;
+
+function reads(states: Record<string, OwnershipState | Error | typeof ARCHIVED>) {
   const calls: string[] = [];
   return {
     calls,
@@ -117,15 +120,19 @@ function reads(states: Record<string, OwnershipState | Error>) {
         const s = states[id];
         if (s instanceof Error) throw s;
         if (!s) throw Object.assign(new Error('Not found'), { status: 404 });
-        return s;
+        return s === ARCHIVED ? { kind: 'archived' as const } : { kind: 'process' as const, state: s };
       },
       isFatal: (e: unknown) => ((e as { signedOut?: boolean }).signedOut ? 'Session ended.' : null),
     },
   };
 }
 
-const plan = (rows: OwnershipCsvRow[], states: Record<string, OwnershipState | Error>, publish: PublishChoice = 'match-state') =>
-  buildOwnershipPlan(rows, DIRECTORY, reads(states).reads, { publish });
+const plan = (
+  rows: OwnershipCsvRow[],
+  states: Record<string, OwnershipState | Error | typeof ARCHIVED>,
+  publish: PublishChoice = 'match-state',
+  names?: ReadonlyMap<string, { name: string }>,
+) => buildOwnershipPlan(rows, DIRECTORY, reads(states).reads, { publish, names });
 
 test('rows the script skips are skipped with its reasons, and never read', async () => {
   const r = reads({});
@@ -203,7 +210,7 @@ test('unreadable, missing and archived processes are reported, and a dead sessio
   ]);
   assert.match(p.skipped[0]!.message, /Process not found/);
   assert.match(p.skipped[1]!.message, /Server busy/);
-  assert.match(p.skipped[2]!.message, /Archived/);
+  assert.match(p.skipped[2]!.message, /archived/);
 
   await assert.rejects(
     plan([{ line: 2, processId: P1, owner: 'ann@example.com', expert: null }], { [P1]: Object.assign(new Error('gone'), { signedOut: true }) }),
@@ -399,4 +406,51 @@ test('a reported success the final read contradicts is Failed; a failed save tha
   assert.equal(settled[1]?.status, 'Failed');
   assert.match(settled[1]!.message, /final read shows Expert Old Expert \(id 8\)/);
   assert.equal(settled[2]?.status, 'Success');
+});
+
+// ---------------------------------------------------------------- F4, from the W4 live test
+
+test('an archived process, answered 200 with no model, is skipped and named, not failed', async () => {
+  const names = new Map([[P1.toLowerCase(), { name: 'Retired process' }]]);
+  const p = await plan([{ line: 2, processId: P1, owner: 'ann@example.com', expert: null }], { [P1]: ARCHIVED }, 'match-state', names);
+  assert.deepEqual(p.changes, []);
+  assert.equal(p.skipped[0]?.status, 'Skipped');
+  assert.match(p.skipped[0]?.message ?? '', /^The process is archived\./);
+  assert.equal(p.skipped[0]?.name, 'Retired process', 'named from the archived listing');
+});
+
+test('every row not written takes its name from the listings, and only falls back when neither has it', async () => {
+  const names = new Map([
+    [P1.toLowerCase(), { name: 'Pay a supplier' }],
+    [P2.toLowerCase(), { name: 'Approve an invoice' }],
+  ]);
+  const p = await plan(
+    [
+      { line: 2, processId: P1, owner: 'nobody@example.com', expert: null },
+      { line: 3, processId: P2, owner: null, expert: null },
+      { line: 4, processId: P3, owner: 'nobody@example.com', expert: null },
+    ],
+    {},
+    'match-state',
+    names,
+  );
+  assert.deepEqual(
+    p.skipped.map((r) => r.name),
+    ['Pay a supplier', 'Approve an invoice', '(name unavailable; not in any process list)'],
+  );
+});
+
+test('a save that finds the process archived since the preview is skipped, not failed', async () => {
+  const p = await threePlan();
+  const g: OwnershipGateway = {
+    async setOwnership() {
+      return { ok: false, archived: true };
+    },
+    async publishNow() {
+      return {};
+    },
+  };
+  const rows = await runOwnership(g, journal(), p, createControls(), { changeDescription: DESCRIPTION, concurrency: 1 });
+  assert.deepEqual([...new Set(rows.map((r) => r.status))], ['Skipped']);
+  assert.match(rows[0]!.message, /archived after the preview/);
 });

@@ -171,18 +171,31 @@ test('the ownership read is compact: roles, revision and permissions, not the mo
   Object.assign(response.processJson, { OwnerId: 7, Owner: 'Old Owner', ExpertId: 0, Expert: '' });
   const h = harness([response]);
   assert.deepEqual(await execute(h.ctx, { op: 'process.ownership', processUniqueId: PROCESS }), {
-    uniqueId: PROCESS,
-    name: 'First Process',
-    version: '2.0',
-    revisionEditId: 9180,
-    revisionStateId: 3,
-    isArchived: null,
-    owner: { id: 7, name: 'Old Owner' },
-    expert: null,
-    canSave: true,
-    canPublishAfterEdit: false,
-    canSubmitForApprovalAfterEdit: true,
+    kind: 'process',
+    state: {
+      uniqueId: PROCESS,
+      name: 'First Process',
+      version: '2.0',
+      revisionEditId: 9180,
+      revisionStateId: 3,
+      isArchived: null,
+      owner: { id: 7, name: 'Old Owner' },
+      expert: null,
+      canSave: true,
+      canPublishAfterEdit: false,
+      canSubmitForApprovalAfterEdit: true,
+    },
   });
+});
+
+test('the ownership read and write treat the 200 with no model as archived (F4)', async () => {
+  const read = harness([{ success: true, isArchived: true }]);
+  assert.deepEqual(await execute(read.ctx, { op: 'process.ownership', processUniqueId: PROCESS }), { kind: 'archived' });
+  const write = harness([{ success: true, isArchived: true }]);
+  const parsed = parseOperation(SET_OWNERSHIP);
+  assert.ok(parsed.ok);
+  assert.deepEqual(await execute(write.ctx, parsed.operation), { ok: false, archived: true });
+  assert.deepEqual(write.calls.map((c) => c.method), ['GET'], 'nothing is saved over an archived process');
 });
 
 // ----------------------------------------------------------------- moves
