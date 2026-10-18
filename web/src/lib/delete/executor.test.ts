@@ -34,7 +34,6 @@ import {
 import { findOrphanedGroupProcesses, groupExistsCoverage } from './groups.ts';
 import { parsePlan, serializePlan, type DependencyPlan, type PlanLedgerRow } from './ledger.ts';
 import type { DeleteIndex, DeleteIndexEntry, ProcessModel } from './model.ts';
-import { PHASE } from './phases.ts';
 import {
   buildDeletePlan,
   checkProcessDependencies,
@@ -200,7 +199,7 @@ test('an archived holder is restored so its hidden edges show, and its home is r
   assert.equal(p.workItems[0]?.sites.length, 3, 'all 3 sites are found once restored');
 });
 
-test('a restored holder is verified, then re-archived once, and only once', { skip: PHASE.unwind }, async () => {
+test('a restored holder is verified, then re-archived once, and only once', async () => {
   const { tenant, holder, target } = capturedTenant({ holderArchived: true });
   const index = await loadDeleteIndex(tenant);
   const p = await plan(tenant, { targetUniqueIds: [target.UniqueId], index, holdingGroupId: 999, allowRestore: true });
@@ -408,7 +407,7 @@ const heldTenant = (options: FakeTenantOptions = {}) =>
     ...options,
   });
 
-test('a cancelled run puts each target back in its own group, archived, and says where', { skip: PHASE.unwind }, async () => {
+test('a cancelled run puts each target back in its own group, archived, and says where', async () => {
   const tenant = heldTenant();
   const ledger = [
     ledgerRow({ uniqueId: R1, name: 'Alpha', numericId: 1, originalGroupUniqueId: 'g-134', originalGroupId: 134 }),
@@ -428,7 +427,7 @@ test('a cancelled run puts each target back in its own group, archived, and says
   assert.doesNotMatch(unwound[0]?.message ?? '', new RegExp(String(TEMP_GROUP)), 'and does not name the holding group');
 });
 
-test('a relocation that did not happen is reported as where the process really is', { skip: PHASE.unwind }, async () => {
+test('a relocation that did not happen is reported as where the process really is', async () => {
   // A tenant that accepts every relocation and moves nothing.
   const tenant = heldTenant({ noEffect: (call) => call.op === 'restore' });
   tenant.remove(R2);
@@ -441,7 +440,7 @@ test('a relocation that did not happen is reported as where the process really i
   assert.equal(stuck[0]?.status, 'Skipped', 'a failed relocation is not reported as a clean success');
 });
 
-test('with no recorded home group the row says so rather than inventing one', { skip: PHASE.unwind }, async () => {
+test('with no recorded home group the row says so rather than inventing one', async () => {
   const tenant = heldTenant();
   tenant.remove(R2);
   const ledger = [ledgerRow({ uniqueId: R1, name: 'Alpha', numericId: 1 })];
@@ -458,7 +457,7 @@ test('with no recorded home group the row says so rather than inventing one', { 
 const P1 = 'aa11bb22-0000-0000-0000-0000000000f1';
 const P2 = 'aa11bb22-0000-0000-0000-0000000000f2';
 
-test('the relocation probe is asked once, with no retries, and its answer kept', { skip: PHASE.unwind }, async () => {
+test('the relocation probe is asked once, with no retries, and its answer kept', async () => {
   // Only relocates a process that is currently archived.
   const tenant = new FakeTenant({
     processes: [
@@ -484,7 +483,7 @@ test('the relocation probe is asked once, with no retries, and its answer kept',
   assert.equal(tenant.callsTo('restore').length, attemptsAfterFirst + 1, 'no wasted call is made for it');
 });
 
-test('a tenant whose probe succeeds is not pushed down the fallback', { skip: PHASE.unwind }, async () => {
+test('a tenant whose probe succeeds is not pushed down the fallback', async () => {
   const tenant = new FakeTenant({ processes: [{ uniqueId: P1, name: 'P', archived: true, groupId: 834 }], restoreActive: 'refuse' });
   const probe = newRelocationProbe();
 
@@ -517,7 +516,7 @@ const moved = (uniqueId: string, name: string, from: number): CollateralChange =
 const manual = (objectId: string, name: string, operation: string, status: string, message: string): ResultRow =>
   resultRow({ objectId, name, operation, status, message });
 
-test('a collateral row already put right by the end of the run is cleared', { skip: PHASE.unwind }, async () => {
+test('a collateral row already put right by the end of the run is cleared', async () => {
   // By the end of the run the first sibling is home again; the second genuinely is not.
   const tenant = new FakeTenant({
     processes: [
@@ -639,7 +638,7 @@ test('a restore into a group that is gone is never sent', async () => {
   assert.equal(tenant.callsTo('restore').length, 1, 'a restore into a group that exists still goes through');
 });
 
-test('the unwind archives an orphan where it sits and says where, and sends the rest home', { skip: PHASE.unwind }, async () => {
+test('the unwind archives an orphan where it sits and says where, and sends the rest home', async () => {
   // Both were pulled into the holding group by the Hold phase. One can go home.
   const tenant = orphanTenant({ archived: [], groups: { [ORPHAN]: HOLDING_GROUP, [HOLDER]: HOLDING_GROUP, [LIVE]: 500 } });
   const ledger = [
@@ -777,7 +776,7 @@ const reported = (): ResultRow[] => [
   manual(ORPHAN, 'Orphan', 'ReArchive', 'Failed', 'Re-archive failed; this process is still ACTIVE in group 1'),
 ];
 
-test('a re-archive that reported failure is re-derived from the tenant', { skip: PHASE.unwind }, async () => {
+test('a re-archive that reported failure is re-derived from the tenant', async () => {
   const tenant = orphanTenant({ archived: [ORPHAN, HOLDER, LIVE], groups: { [ORPHAN]: 900, [HOLDER]: 500, [LIVE]: 777 } });
   const checked = await resolveTargetOutcome(tenant, outcomeLedger, reported());
 
@@ -795,7 +794,7 @@ test('a re-archive that reported failure is re-derived from the tenant', { skip:
   assert.match(orphanRow?.message ?? '', /no longer exists/, 'with the reason it is not in its original group');
 });
 
-test('a target that really is still active stays on the list', { skip: PHASE.unwind }, async () => {
+test('a target that really is still active stays on the list', async () => {
   const tenant = orphanTenant({ archived: [], groups: { [ORPHAN]: 900, [HOLDER]: 500, [LIVE]: 777 } });
   const stillActive = await resolveTargetOutcome(tenant, outcomeLedger, reported());
   assert.equal(
@@ -806,7 +805,7 @@ test('a target that really is still active stays on the list', { skip: PHASE.unw
   assert.match(stillActive.find((r) => r.objectId === HOLDER)?.message ?? '', /archive it manually/, 'and is still told to be archived manually');
 });
 
-test('rows already right, rows with no ledger entry, and other operations are left alone', { skip: PHASE.unwind }, async () => {
+test('rows already right, rows with no ledger entry, and other operations are left alone', async () => {
   const tenant = orphanTenant({ archived: [HOLDER], groups: { [ORPHAN]: 900, [HOLDER]: 500, [LIVE]: 777 } });
   const untouched = [
     manual(HOLDER, 'Fine', 'ReArchive', 'Success', 'Re-archived in group 500'),
@@ -819,7 +818,7 @@ test('rows already right, rows with no ledger entry, and other operations are le
   assert.equal(kept[2]?.status, 'Failed', 'and so is a row for a different operation');
 });
 
-test('a process absent from both sweeps does not get cleared', { skip: PHASE.unwind }, async () => {
+test('a process absent from both sweeps does not get cleared', async () => {
   // The sweeps are known to be incomplete, so a missing row cannot clear a warning.
   const absent = '88888888-0000-0000-0000-000000000000';
   const tenant = new FakeTenant();
@@ -828,7 +827,7 @@ test('a process absent from both sweeps does not get cleared', { skip: PHASE.unw
   assert.equal(rows[0]?.status, 'Failed', 'a process absent from both sweeps does not get cleared');
 });
 
-test('both lists are re-checked against one fresh read, and a clean run pays for none', { skip: PHASE.unwind }, async () => {
+test('both lists are re-checked against one fresh read, and a clean run pays for none', async () => {
   const tenant = orphanTenant({ archived: [HOLDER], groups: { [HOLDER]: 500, [LIVE]: 500 } });
   const bothLists = [
     manual(HOLDER, 'Target', 'ReArchive', 'Failed', 'Re-archive failed; this process is still ACTIVE in group 500'),
@@ -873,7 +872,7 @@ test('both lists are re-checked against one fresh read, and a clean run pays for
 // path, including a resumed run. A run that dies leaves only its plan file; uploaded
 // again, that plan alone must be enough to put back the holders as well as the targets,
 // one row each, under the operation that says which they were.
-test('NEW (T1): an uploaded plan alone puts back every process the run un-archived, one row each', { skip: PHASE.unwind }, async () => {
+test('NEW (T1): an uploaded plan alone puts back every process the run un-archived, one row each', async () => {
   const tenant = orphanTenant({ archived: [], groups: { [ORPHAN]: HOLDING_GROUP, [HOLDER]: 500, [LIVE]: HOLDING_GROUP } });
   const before: DependencyPlan = {
     schemaVersion: 1,

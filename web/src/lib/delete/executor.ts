@@ -23,7 +23,8 @@ import { resultRow, type ResultRow } from '../exec/report.ts';
 import { defaultIsFatal } from '../exec/runner.ts';
 import { buildUpdateEnvelope } from '../pm/processes.ts';
 import type { ProcessActions } from '../pm/types.ts';
-import { chooseWritePath, isWritePath, writeStateOf, type WriteRefusal } from '../pm/writePath.ts';
+import { chooseWritePath, isOpenDraft, isWritePath, writeStateOf, type WriteRefusal } from '../pm/writePath.ts';
+import { readGroupExists } from '../select/archived.ts';
 import { loadProcessIndex, type ProcessIndex } from '../tenant/state.ts';
 import {
   ACCEPTANCE_AUTHORITY,
@@ -39,9 +40,9 @@ import {
 import type { DeleteEventSink } from './events.ts';
 import type { DeleteGateway } from './gateway.ts';
 import type { DependencyPlan } from './ledger.ts';
-import { nodeInt, type ProcessModel } from './model.ts';
+import { nodeInt, nodeString, type ProcessModel } from './model.ts';
 import { resolveClaimName } from './names.ts';
-import { notPorted } from './phases.ts';
+import { reArchiveOperation } from './runOutcome.ts';
 import { findProcessReferenceSites, removeProcessReferences, type ReferenceSite } from './references.ts';
 
 export interface EngineOptions {
@@ -49,6 +50,24 @@ export interface EngineOptions {
   approvalsEnabled?: boolean | undefined;
   /** An error that ends the run (a dead session) is rethrown rather than reported. */
   isFatal?: ((error: unknown) => string | null) | undefined;
+  /**
+   * Each results row as it is made, not only in the array returned at the end: a run that
+   * dies part-way still knows every process it changed (old T1, found by the offline
+   * resume in W5 phase 7).
+   */
+  onRow?: ((row: ResultRow) => void) | undefined;
+}
+
+/** Rows that also go to `onRow` as each is added. */
+function reportingRows(onRow: ((row: ResultRow) => void) | undefined): ResultRow[] {
+  const rows: ResultRow[] = [];
+  if (!onRow) return rows;
+  const push = rows.push.bind(rows);
+  rows.push = (...items: ResultRow[]) => {
+    for (const item of items) onRow(item);
+    return push(...items);
+  };
+  return rows;
 }
 
 /** Why a restore did not happen. `MissingGroup`: never sent, because the group is known to be gone. */
@@ -271,7 +290,7 @@ export async function removePlanReferences(
   } = {},
 ): Promise<ReferenceRemovalRun> {
   const isFatal = options.isFatal ?? defaultIsFatal;
-  const results: ResultRow[] = [];
+  const results = reportingRows(options.onRow);
   const heldBack: HeldBackTarget[] = [];
   const ticked = new Set((options.publishDrafts ?? []).map((id) => id.toLowerCase()));
   const workItems = plan.workItems;
@@ -294,43 +313,74 @@ export async function removePlanReferences(
     }
   };
 
+  const heldBackIds = new Set<string>();
+  const refusedHolders = new Set<string>();
+  const holdBack = (holderId: string, targets: readonly string[], reason: string) => {
+    refusedHolders.add(holderId.toLowerCase());
+    for (const target of targets) {
+      if (heldBackIds.has(target.toLowerCase())) continue;
+      heldBackIds.add(target.toLowerCase());
+      heldBack.push({ targetUniqueId: target, holderUniqueId: holderId, reason });
+    }
+  };
+  const draftReason = (name: string) => `${name} has an unpublished draft; removing its reference would publish it`;
+  const keptOut = (n: number) => (n === 1 ? 'the target it holds is' : `the ${n} targets it holds are`);
+
+  // Every holder's write state before the first save (Cowork's review of W5 phase 6).
+  // Deciding at edit time meant a clean holder earlier in the list lost its link to a
+  // target that a draft holder later kept alive: a published change for nothing, and
+  // nothing puts references back.
   options.onEvent?.({ kind: 'stage', stage: 'removing-references' });
+  for (const [i, item] of workItems.entries()) {
+    options.onEvent?.({ kind: 'progress', label: 'Checking holders for open drafts', done: i + 1, total: workItems.length });
+    if (ticked.has(item.holderUniqueId.toLowerCase())) continue;
+    const { model, processActions } = await readForEdit(item.holderUniqueId);
+    // Unreadable here is left to the edit, which reports it.
+    if (model && isOpenDraft(writeStateOf(model, processActions))) {
+      holdBack(item.holderUniqueId, item.targetsAffected, draftReason(nameOf(item.holderUniqueId)));
+    }
+  }
+
+  /** Target to the holders whose references to it were removed, for the backstop's log line. */
+  const editedFor = new Map<string, string[]>();
   for (const [i, item] of workItems.entries()) {
     options.onEvent?.({ kind: 'progress', label: 'Removing references', done: i + 1, total: workItems.length });
     const holderId = item.holderUniqueId;
     const name = nameOf(holderId);
+    const row = (status: string, message: string, statusCode?: number | null) =>
+      resultRow({ objectId: holderId, name, operation: 'RemoveReferences', status, message, statusCode });
+
+    if (refusedHolders.has(holderId.toLowerCase())) {
+      results.push(
+        row(
+          'Failed',
+          `Not saved: ${SAVE_REFUSALS['open-draft']}. Its references remain, so ${keptOut(item.targetsAffected.length)} left out of the delete. Tick it to publish the draft with the removal.`,
+        ),
+      );
+      continue;
+    }
+    // Only references to targets still being deleted: a link to a kept target still works.
+    const deleting = item.targetsAffected.filter((t) => !heldBackIds.has(t.toLowerCase()));
+    if (deleting.length === 0) {
+      results.push(row('Skipped', 'Not edited: every target it references is being kept'));
+      continue;
+    }
+
     const { model, processActions, reason, status } = await readForEdit(holderId);
     if (!model) {
-      results.push(
-        resultRow({
-          objectId: holderId,
-          name,
-          operation: 'RemoveReferences',
-          status: 'Failed',
-          message: `Could not fetch process for editing (${reason})`,
-          statusCode: status,
-        }),
-      );
+      results.push(row('Failed', `Could not fetch process for editing (${reason})`, status));
       continue;
     }
 
     // Every target at once: one save and one publish per holder.
-    const removal = removeProcessReferences(model, item.targetsAffected);
+    const removal = removeProcessReferences(model, deleting);
     if (removal.referencesRemoved === 0 || !removal.cleaned) {
-      results.push(
-        resultRow({
-          objectId: holderId,
-          name,
-          operation: 'RemoveReferences',
-          status: 'Skipped',
-          message: 'No references found at edit time (already removed?)',
-        }),
-      );
+      results.push(row('Skipped', 'No references found at edit time (already removed?)'));
       continue;
     }
 
-    // Decided from this read, not the plan's: a draft opened since planning is refused
-    // just the same, and one published since needs no tick.
+    // Decided again from this read: the pre-pass is the decision, this is the backstop
+    // for a draft opened since.
     const save = await saveProcessModel(gateway, holderId, removal.cleaned, {
       processActions,
       changeDescription: options.changeDescription,
@@ -339,30 +389,39 @@ export async function removePlanReferences(
       suppressChangeNotification: true,
       isFatal,
     });
-    const openDraft = save.refusal === 'open-draft';
-    if (openDraft) {
-      const reason = `${name} has an unpublished draft; removing its reference would publish it`;
-      for (const target of item.targetsAffected) heldBack.push({ targetUniqueId: target, holderUniqueId: holderId, reason });
+    if (save.refusal === 'open-draft') {
+      holdBack(holderId, deleting, draftReason(name));
+      for (const target of deleting) {
+        const already = editedFor.get(target.toLowerCase()) ?? [];
+        if (already.length === 0) continue;
+        const line = `${name} opened a draft after the check, so ${nameOf(target)} (${target}) is kept, but its references were already removed from: ${already.join(', ')}`;
+        plan.log.push(line);
+        options.onEvent?.({ kind: 'log', line });
+      }
+      results.push(
+        row(
+          'Failed',
+          `Not saved: ${save.error ?? ''}. A draft was opened after the check; its references remain, so ${keptOut(deleting.length)} left out of the delete.`,
+          save.statusCode,
+        ),
+      );
+      continue;
+    }
+    if (save.success) {
+      for (const target of deleting) editedFor.set(target.toLowerCase(), [...(editedFor.get(target.toLowerCase()) ?? []), name]);
     }
     results.push(
-      resultRow({
-        objectId: holderId,
-        name,
-        operation: 'RemoveReferences',
-        status: save.success ? 'Success' : 'Failed',
-        message: save.success
+      row(
+        save.success ? 'Success' : 'Failed',
+        save.success
           ? `Removed ${removal.referencesRemoved} reference(s), ${save.stage}${save.draftPublished ? '; its open draft went live with the removal' : ''}`
-          : openDraft
-            ? `Not saved: ${save.error ?? ''}. Its references remain, so ${item.targetsAffected.length === 1 ? 'the target it holds is' : `the ${item.targetsAffected.length} targets it holds are`} left out of the delete. Tick it to publish the draft with the removal.`
-            : save.stage === 'Refused'
-              ? `Not saved: ${save.error ?? ''}. Its references to the targets remain.`
-              : `${save.stage} failed: ${save.error ?? ''}`.trimEnd(),
-        statusCode: save.success ? null : save.statusCode,
-      }),
+          : save.stage === 'Refused'
+            ? `Not saved: ${save.error ?? ''}. Its references to the targets remain.`
+            : `${save.stage} failed: ${save.error ?? ''}`.trimEnd(),
+        save.success ? null : save.statusCode,
+      ),
     );
   }
-  const heldBackIds = new Set(heldBack.map((h) => h.targetUniqueId.toLowerCase()));
-  const refusedHolders = new Set(heldBack.map((h) => h.holderUniqueId.toLowerCase()));
 
   // Verify while everything is still active, by walking each holder's saved model:
   // archiving suppresses the very rows that would reveal a missed reference, so asking the
@@ -427,7 +486,7 @@ export async function deletePlanTargets(
   options: TargetDeletionOptions = {},
 ): Promise<ResultRow[]> {
   const isFatal = options.isFatal ?? defaultIsFatal;
-  const results: ResultRow[] = [];
+  const results = reportingRows(options.onRow);
   const targets = plan.targetUniqueIds;
   const recordOf = (uniqueId: string) => plan.ledger.find((r) => r.uniqueId.toLowerCase() === uniqueId.toLowerCase());
   const nameOf = (uniqueId: string) => recordOf(uniqueId)?.name || resolveClaimName(plan.claims, uniqueId);
@@ -488,7 +547,10 @@ export async function deletePlanTargets(
         count: collateral.length,
       });
       // An unwanted archive can be undone; a delete cannot. So no gate means stop.
-      if (!decision.proceed) return [...results, ...decision.rows];
+      if (!decision.proceed) {
+        results.push(...decision.rows);
+        return results;
+      }
       results.push(...collateralAcceptanceRows(collateral, PRE_DELETE_PHASE, authority));
     }
   }
@@ -574,13 +636,72 @@ export interface MoveOptions extends EngineOptions {
  * retries while the probe allows, otherwise archive and restore into the group. Port of
  * `Move-NpmProcessToGroup`.
  */
-export function moveProcessToGroup(
+export async function moveProcessToGroup(
   gateway: DeleteGateway,
   processUniqueId: string,
   targetGroupId: number | null,
   options: MoveOptions,
 ): Promise<MoveOutcome> {
-  return notPorted('unwind');
+  const isFatal = options.isFatal ?? defaultIsFatal;
+  const notMoved: MoveOutcome = { moved: false, actualGroupId: null, verified: false };
+  // A group that is gone is not somewhere to move to, and the fallback would archive the
+  // process on the way to finding that out.
+  if (targetGroupId === null || options.targetGroupExists === false) return notMoved;
+
+  // Asked once per run and with no retries: on the measured tenant RestoreProcess answers
+  // 500 for an active process every time, and the retry ladder spent 14 seconds per
+  // process learning it.
+  if (options.probe.state !== 'No') {
+    await restoreProcess(gateway, processUniqueId, targetGroupId, { retry: false, isFatal });
+    const actual = await currentGroupOf(gateway, processUniqueId, isFatal);
+    if (actual === targetGroupId) {
+      if (options.probe.state === 'Unknown') options.onEvent?.({ kind: 'relocationProbe', relocatesActive: true });
+      options.probe.state = 'Yes';
+      return { moved: true, actualGroupId: actual, verified: true };
+    }
+    if (options.probe.state === 'Unknown') {
+      options.probe.state = 'No';
+      options.onEvent?.({ kind: 'relocationProbe', relocatesActive: false });
+    }
+  }
+
+  // Documented behaviour only: archive, then restore into the group wanted.
+  const archive = await archiveOne(gateway, processUniqueId, RELOCATION_ARCHIVE_COMMENT, {
+    approvalOverride: options.approvalsEnabled ?? true,
+    isFatal,
+  });
+  // The restore is still attempted: ArchiveProcess can report failure and take effect,
+  // and the placement is read back either way.
+  if (!archive.success) options.onEvent?.({ kind: 'log', line: `Archive step of relocating ${processUniqueId} failed: ${archive.message}` });
+  await restoreProcess(gateway, processUniqueId, targetGroupId, { isFatal });
+
+  const actual = await currentGroupOf(gateway, processUniqueId, isFatal);
+  if (actual === null) return notMoved;
+  return { moved: actual === targetGroupId, actualGroupId: actual, verified: true };
+}
+
+const RELOCATION_ARCHIVE_COMMENT = 'Relocating to original group';
+export const RE_ARCHIVE_COMMENT = 'Re-archiving after dependency cleanup';
+
+/**
+ * The group a process is in now, from the active read or the archived batch read, or
+ * null when neither says. Port of `Get-NpmProcessGroupId`.
+ */
+export async function currentGroupOf(
+  gateway: Pick<DeleteGateway, 'readModel' | 'readArchivedModels'>,
+  processUniqueId: string,
+  isFatal: (error: unknown) => string | null = defaultIsFatal,
+): Promise<number | null> {
+  try {
+    const read = await gateway.readModel(processUniqueId);
+    if (read.kind === 'model') return nodeInt(read.model, 'GroupId');
+    const archived = await gateway.readArchivedModels([processUniqueId]);
+    const model = archived.find((m) => nodeString(m, 'UniqueId').toLowerCase() === processUniqueId.toLowerCase());
+    return model ? nodeInt(model, 'GroupId') : null;
+  } catch (error) {
+    if (isFatal(error)) throw error;
+    return null;
+  }
 }
 
 export interface RestorePlanStateOptions extends EngineOptions {
@@ -597,12 +718,95 @@ export interface RestorePlanStateOptions extends EngineOptions {
  * holder among them, is archived where it sits. Idempotent: an entry marked denormalised
  * is skipped. Port of `Restore-ProcessPlanState`.
  */
-export function restorePlanState(
+export async function restorePlanState(
   gateway: DeleteGateway,
   plan: Pick<DependencyPlan, 'ledger'>,
   options: RestorePlanStateOptions,
 ): Promise<ResultRow[]> {
-  return notPorted('unwind');
+  const isFatal = options.isFatal ?? defaultIsFatal;
+  const results = reportingRows(options.onRow);
+  // The ledger, not the target list: holders as well as targets (old T1).
+  const toRestore = plan.ledger.filter((e) => e.wasArchived && e.restoredByThisRun && !e.denormalized && !e.deleted);
+  if (toRestore.length === 0) return results;
+  options.onEvent?.({ kind: 'stage', stage: 'returning-processes' });
+
+  for (const [i, entry] of toRestore.entries()) {
+    options.onEvent?.({ kind: 'progress', label: 'Returning processes', done: i + 1, total: toRestore.length });
+    const homeGroupId = entry.originalGroupId;
+    let placement: string;
+    let movedOk = true;
+    // Where it is when the row is written; null only where no read could say.
+    let landed: number | null = null;
+
+    if (homeGroupId === null) {
+      landed = await currentGroupOf(gateway, entry.uniqueId, isFatal);
+      placement = 'no original group was recorded, so it was archived where it sat';
+      movedOk = false;
+    } else if (!readGroupExists(entry.originalGroupExists).exists) {
+      // Home is gone, so it is archived where it sits: archiving takes no group. This is
+      // also where a parked holder lands, which is why parking one is safe.
+      landed = await currentGroupOf(gateway, entry.uniqueId, isFatal);
+      const where = landed !== null ? `group ${landed}` : 'the group it currently sits in';
+      placement = `${where}; its original group ${homeGroupId} no longer exists`;
+      movedOk = false;
+    } else {
+      const current = await currentGroupOf(gateway, entry.uniqueId, isFatal);
+      if (current === homeGroupId) {
+        placement = `group ${homeGroupId}`;
+        landed = homeGroupId;
+      } else {
+        // ArchiveProcess archives where the process sits, which is the holding group.
+        const move = await moveProcessToGroup(gateway, entry.uniqueId, homeGroupId, {
+          probe: options.probe,
+          approvalsEnabled: options.approvalsEnabled,
+          isFatal,
+          onEvent: options.onEvent,
+        });
+        movedOk = move.moved;
+        if (move.moved) {
+          placement = `group ${homeGroupId}`;
+          landed = homeGroupId;
+        } else if (move.verified) {
+          placement = `group ${move.actualGroupId}, NOT the original group ${homeGroupId}`;
+          landed = move.actualGroupId;
+        } else {
+          placement = `an UNVERIFIED group; the move to ${homeGroupId} could not be confirmed`;
+        }
+      }
+    }
+
+    const outcome = await archiveOne(gateway, entry.uniqueId, RE_ARCHIVE_COMMENT, {
+      approvalOverride: options.approvalsEnabled ?? true,
+      isFatal,
+    });
+    entry.denormalized = outcome.success;
+
+    // A parked holder had no group of its own before the run either: archived where it
+    // sits is the state it was found in, so that is a success, not a compromise.
+    let status = outcome.success ? (movedOk ? 'Success' : 'Skipped') : 'Failed';
+    if (outcome.success && entry.parkedInHoldingGroup) status = 'Success';
+    let message = outcome.success
+      ? `Re-archived in ${placement}`
+      : `Re-archive failed; this process is still ACTIVE in ${placement}. ${outcome.message}`.trimEnd();
+    if (entry.parkedInHoldingGroup) {
+      // Old T2: it stays archived without a group, the state it was found in.
+      message = `${message}. This run held it here only so its references could be read; it was already orphaned before the run started, and stays archived without a group`;
+    }
+    results.push(
+      resultRow({
+        objectId: entry.uniqueId,
+        name: entry.name,
+        operation: reArchiveOperation(entry.role, entry.parkedInHoldingGroup),
+        status,
+        message,
+        groupId: landed,
+        statusCode: outcome.statusCode,
+      }),
+    );
+    // Saved after each, so an interrupted unwind can be finished from the plan.
+    await options.persist?.();
+  }
+  return results;
 }
 
 /**

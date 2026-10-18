@@ -17,8 +17,10 @@
 
 import type { PmContext } from './client.ts';
 import {
+  createTopLevelGroup,
   deleteGroup,
   getChildGroups,
+  getGroupProcesses,
   getGroupBreadcrumb,
   getGroupViewerCounts,
   MOVABLE_NODE_TYPES,
@@ -28,17 +30,21 @@ import {
 } from './groups.ts';
 import {
   archiveProcess,
+  buildUpdateEnvelope,
+  deleteProcess,
   getArchiveState,
   getGroupDocuments,
   getProcess,
   getVariationSet,
   listProcesses,
   publishProcess,
+  restoreProcess,
+  updateProcess,
 } from './processes.ts';
 import { ARCHIVED_BATCH_SIZE, checkDependencies, readActiveModel, readArchivedModels } from './dependencies.ts';
 import { getOwnership, setOwnership, type UserRef } from './ownership.ts';
 import { listDirectoryUsers, scimBaseUrl } from './scim.ts';
-import type { ProcessRevisionStateId } from './types.ts';
+import type { ProcessJson, ProcessRevisionStateId } from './types.ts';
 
 export type Operation =
   | { op: 'groups.tree'; parentUniqueId: string | null }
@@ -113,7 +119,28 @@ export type Operation =
       processUniqueId: string;
       processRevisionEditId: number;
       publishMessage: string;
-    };
+    }
+  /**
+   * Save one process's model, edited in the browser (Bulk Delete removes references
+   * there). The model's own UniqueId must be the id named, so one call can only ever
+   * write the process it says. Never publishes; that is `process.publishNow`.
+   */
+  | {
+      op: 'process.save';
+      processUniqueId: string;
+      processJson: string;
+      changeDescription: string;
+      submitForApproval: boolean;
+      suppressChangeNotification: boolean;
+    }
+  /** Un-archive one process into one group. `once`: no retry (the relocation probe). */
+  | { op: 'process.restore'; processUniqueId: string; processGroupId: number; once: boolean }
+  /** Delete one process, permanently. The group is sent when the run knows it. */
+  | { op: 'process.delete'; processUniqueId: string; processGroupUniqueId: string | null }
+  /** Make one group at the top level: the delete run's holding group. Takes no id. */
+  | { op: 'group.create' }
+  /** The live processes directly in one group. */
+  | { op: 'group.processes'; groupUniqueId: string };
 
 export type OperationName = Operation['op'];
 
@@ -137,6 +164,11 @@ export const OPERATION_NAMES: readonly OperationName[] = [
   'process.dependencies',
   'process.model',
   'processes.archivedModels',
+  'process.save',
+  'process.restore',
+  'process.delete',
+  'group.create',
+  'group.processes',
 ];
 
 /**
@@ -149,6 +181,12 @@ export const WRITE_OPERATIONS: readonly OperationName[] = [
   'group.delete',
   'node.move',
   'process.setOwnership',
+  // W5 phase 7: the delete run. Kept off until the unwind existed, so nothing could
+  // un-archive or delete a process without a way to put it back (Cowork, phase 3).
+  'process.save',
+  'process.restore',
+  'process.delete',
+  'group.create',
 ];
 
 /**
@@ -247,6 +285,32 @@ export async function execute(ctx: PmContext, operation: Operation): Promise<unk
         operation.processRevisionEditId,
         operation.publishMessage,
       );
+
+    case 'process.save':
+      await updateProcess(
+        ctx,
+        operation.processUniqueId,
+        buildUpdateEnvelope(JSON.parse(operation.processJson) as ProcessJson, {
+          changeDescription: operation.changeDescription,
+          submitForApproval: operation.submitForApproval,
+          suppressChangeNotification: operation.suppressChangeNotification,
+        }),
+      );
+      return { saved: true };
+
+    case 'process.restore':
+      await restoreProcess(ctx, operation.processUniqueId, operation.processGroupId, { once: operation.once });
+      return { restored: true };
+
+    case 'process.delete':
+      await deleteProcess(ctx, operation.processUniqueId, operation.processGroupUniqueId);
+      return { deleted: true };
+
+    case 'group.create':
+      return createTopLevelGroup(ctx);
+
+    case 'group.processes':
+      return getGroupProcesses(ctx, operation.groupUniqueId);
   }
 }
 
@@ -296,6 +360,7 @@ export function parseOperation(input: unknown): ParseResult {
 
     case 'group.breadcrumb':
     case 'group.documents':
+    case 'group.processes':
     case 'group.delete': {
       const groupUniqueId = singleId(body, op, 'groupUniqueId', ['groupUniqueId']);
       if (typeof groupUniqueId !== 'string') return groupUniqueId;
@@ -498,12 +563,83 @@ export function parseOperation(input: unknown): ParseResult {
       };
     }
 
+    case 'process.save': {
+      const processUniqueId = singleProcessId(body, op, [
+        'processUniqueId',
+        'processJson',
+        'changeDescription',
+        'submitForApproval',
+        'suppressChangeNotification',
+      ]);
+      if (typeof processUniqueId !== 'string') return processUniqueId;
+      const processJson = body['processJson'];
+      if (typeof processJson !== 'string' || processJson.length > MAX_PROCESS_JSON_LENGTH) {
+        return { ok: false, error: `${op}: "processJson" must be the model as a string.` };
+      }
+      let model: unknown;
+      try {
+        model = JSON.parse(processJson);
+      } catch {
+        return { ok: false, error: `${op}: "processJson" is not JSON.` };
+      }
+      const modelId = typeof model === 'object' && model !== null ? (model as Record<string, unknown>)['UniqueId'] : undefined;
+      if (typeof modelId !== 'string' || modelId.toLowerCase() !== processUniqueId.toLowerCase()) {
+        // The one-id rule for a body that carries a whole model: it may only be the model
+        // of the process named.
+        return { ok: false, error: `${op}: the model's UniqueId must be the process named.` };
+      }
+      const changeDescription = requiredString(body['changeDescription']);
+      if (!changeDescription) {
+        return { ok: false, error: `${op}: "changeDescription" is required. It is the run's change description.` };
+      }
+      const submitForApproval = body['submitForApproval'];
+      const suppressChangeNotification = body['suppressChangeNotification'];
+      if (typeof submitForApproval !== 'boolean' || typeof suppressChangeNotification !== 'boolean') {
+        return { ok: false, error: `${op}: "submitForApproval" and "suppressChangeNotification" must be true or false.` };
+      }
+      return {
+        ok: true,
+        operation: { op, processUniqueId, processJson, changeDescription: changeDescription.trim(), submitForApproval, suppressChangeNotification },
+      };
+    }
+
+    case 'process.restore': {
+      const processUniqueId = singleProcessId(body, op, ['processUniqueId', 'processGroupId', 'once']);
+      if (typeof processUniqueId !== 'string') return processUniqueId;
+      const processGroupId = body['processGroupId'];
+      if (typeof processGroupId !== 'number' || !Number.isInteger(processGroupId) || processGroupId <= 0) {
+        return { ok: false, error: `${op}: "processGroupId" must be one positive integer.` };
+      }
+      const once = body['once'] ?? false;
+      if (typeof once !== 'boolean') return { ok: false, error: `${op}: "once" must be true or false.` };
+      return { ok: true, operation: { op, processUniqueId, processGroupId, once } };
+    }
+
+    case 'process.delete': {
+      const processUniqueId = singleProcessId(body, op, ['processUniqueId', 'processGroupUniqueId']);
+      if (typeof processUniqueId !== 'string') return processUniqueId;
+      const processGroupUniqueId = nullableGuid(body['processGroupUniqueId']);
+      if (processGroupUniqueId === undefined) {
+        return { ok: false, error: `${op}: "processGroupUniqueId" must be one group id or null.` };
+      }
+      return { ok: true, operation: { op, processUniqueId, processGroupUniqueId } };
+    }
+
+    case 'group.create': {
+      const extra = Object.keys(body).filter((key) => key !== 'op');
+      if (extra.length > 0) return { ok: false, error: `${op}: takes nothing; it makes one group at the top level.` };
+      return { ok: true, operation: { op } };
+    }
+
     default:
       return { ok: false, error: `Unknown operation "${op}".` };
   }
 }
 
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** A large process model is a few hundred KB; this is well past any measured one. */
+const MAX_PROCESS_JSON_LENGTH = 8_000_000;
 
 /** Longer than any real key, short enough that a body cannot smuggle much in. */
 const MAX_KEY_LENGTH = 4_096;

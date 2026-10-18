@@ -424,3 +424,45 @@ export async function getGroupDocuments(ctx: PmContext, groupUniqueId: string): 
     names: [...live.names, ...archived.names.map((name) => `${name} (archived)`)],
   };
 }
+
+/**
+ * Un-archive one process into one group (`Restore-NpmProcess`). HTTP 500 for a group that
+ * does not exist, and on the measured tenant for a process that is already active.
+ *
+ * `once` is the relocation probe: a 500 there is the endpoint declining something it
+ * never claimed to do, so it is not retried (API_ARCHITECTURE.md, RestoreProcess).
+ */
+export function restoreProcess(
+  ctx: PmContext,
+  processUniqueId: string,
+  processGroupId: number,
+  options: { once?: boolean } = {},
+): Promise<unknown> {
+  return pmRequest<unknown>(ctx, {
+    path: '/Process/Edit/RestoreProcess',
+    method: 'POST',
+    // The script sent the group id as a string; kept, since that is what was measured.
+    body: { processUniqueId, processGroupId: String(processGroupId) },
+    retry: 'write',
+    ...(options.once ? { attempts: 1 } : {}),
+  });
+}
+
+/**
+ * Delete one process, permanently (`Remove-NpmProcess`). The group is sent when the
+ * ledger knows it; without one the tenant still deleted an orphan (API_ARCHITECTURE.md,
+ * "Deleting an orphan"). A GET afterwards answers 404.
+ */
+export function deleteProcess(
+  ctx: PmContext,
+  processUniqueId: string,
+  processGroupUniqueId: string | null,
+): Promise<unknown> {
+  return pmRequest<unknown>(ctx, {
+    path: '/Process/Edit/DeleteProcess',
+    method: 'POST',
+    body: processGroupUniqueId ? { processUniqueId, processGroupUniqueId } : { processUniqueId },
+    // Never sent twice: a dropped connection may have deleted it.
+    retry: 'write',
+  });
+}

@@ -10,6 +10,7 @@
 import type { ArchiveGateway, ArchiveState } from '../archive/outcome.ts';
 import type { FactsGateway } from '../cleanup/facts.ts';
 import type { CleanupGateway } from '../cleanup/run.ts';
+import type { DeleteGateway, GroupProcess, GroupRef } from '../delete/gateway.ts';
 import type { PlanningGateway } from '../delete/planner.ts';
 import type { MovePlanReads } from '../move/plan.ts';
 import type { MoveGateway } from '../move/run.ts';
@@ -188,6 +189,45 @@ export function browserPlanningGateway(): PlanningGateway {
     restore: async () => {
       throw new Error('A dry run does not restore anything.');
     },
+  };
+}
+
+/**
+ * Everything a real Bulk Delete run calls (W5 phase 7). Each write names one process or
+ * group, and the proxy refuses anything else (lib/pm/operations.ts).
+ */
+export function browserDeleteGateway(): DeleteGateway {
+  const planning = browserPlanningGateway();
+  const archive = browserArchiveGateway();
+  return {
+    ...planning,
+    ...archive,
+    saveModel: async (processUniqueId, envelope) => {
+      await callPm({
+        op: 'process.save',
+        processUniqueId,
+        // Already a string (buildUpdateEnvelope); the server rebuilds the envelope around it.
+        processJson: envelope.ProcessJson,
+        changeDescription: envelope.ChangeDescription,
+        submitForApproval: envelope.DoSubmitForApproval,
+        suppressChangeNotification: envelope.SuppressChangeNotification,
+      });
+    },
+    restore: (processUniqueId, processGroupId, options) =>
+      callPm({ op: 'process.restore', processUniqueId, processGroupId, once: options?.retry === false }),
+    deleteProcess: (processUniqueId, processGroupUniqueId) =>
+      callPm({ op: 'process.delete', processUniqueId, processGroupUniqueId }),
+    // The listing carries each process's group UniqueId (tenant/state.ts), which is all
+    // the snapshot uses this map for. Walking the whole tree costs a call per group.
+    listGroups: async () => [],
+    createGroup: async (name, parentGroupUniqueId) => {
+      if (parentGroupUniqueId !== null) throw new Error('The holding group is made at the top level only.');
+      const created = await callPm<{ id: number; uniqueId: string }>({ op: 'group.create' });
+      // The tenant gives a new group its default name; the run reports it by this one.
+      return { id: created.id, uniqueId: created.uniqueId, name } satisfies GroupRef;
+    },
+    deleteGroup: (groupUniqueId) => callPm({ op: 'group.delete', groupUniqueId }),
+    groupProcesses: (group) => callPm<GroupProcess[]>({ op: 'group.processes', groupUniqueId: group.uniqueId }),
   };
 }
 

@@ -31,7 +31,6 @@ import { HOLDING_GROUP_NAME, type GroupRef } from './gateway.ts';
 import { removeHoldingGroup, orphanedTargetWarningLines } from './holdingGroup.ts';
 import { mergePlanLedger, type PlanLedgerRow, type ProcessStateSnapshot } from './ledger.ts';
 import { resolveCollateralName } from './names.ts';
-import { PHASE } from './phases.ts';
 import { idFromCsvRow } from './targets.ts';
 import { FakeTenant, PROCESS_MUTATIONS, type FakeProcessSeed, type FakeTenantOptions } from './testing/fakeTenant.ts';
 import { FakePlanStore } from './testing/planStore.ts';
@@ -88,7 +87,7 @@ function threeArchived(overrides: Readonly<Record<string, Partial<FakeProcessSee
   return scenario([seed(T1, 1001, 'Alpha'), seed(T2, 1002, 'Bravo'), seed(T3, 1003, 'Charlie')]);
 }
 
-test('archived targets are held, deleted, and the ledger tells the truth', { skip: PHASE.unwind }, async () => {
+test('archived targets are held, deleted, and the ledger tells the truth', async () => {
   const tenant = threeArchived();
   const { rows, store, plan } = await run(tenant);
 
@@ -125,7 +124,7 @@ test('archived targets are held, deleted, and the ledger tells the truth', { ski
 // do is go home if the run stops short, and the operator wants that before the first
 // mutation rather than out of the results file afterwards.
 
-test('a target whose group is gone is named before the first mutation, and still deleted', { skip: PHASE.unwind }, async () => {
+test('a target whose group is gone is named before the first mutation, and still deleted', async () => {
   const tenant = threeArchived({ [T3]: { groupId: 1, groupExists: false } });
   const { events } = await run(tenant);
 
@@ -143,7 +142,7 @@ test('a target whose group is gone is named before the first mutation, and still
   assert.equal(holdingGroupDeleted(tenant), true, 'and the holding group is still cleaned up');
 });
 
-test('a run with no orphaned target says nothing about orphans', { skip: PHASE.unwind }, async () => {
+test('a run with no orphaned target says nothing about orphans', async () => {
   const tenant = threeArchived();
   const { events } = await run(tenant);
   assert.equal(events.filter((e) => e.kind === 'orphanedTargets').length, 0, 'a tenant with no orphaned targets gets no orphan warning');
@@ -167,7 +166,7 @@ test('a collateral name comes from the index, then the listing, then says it is 
 
 // ---------------------------------------------------------------- a holding group that still holds processes is NOT deleted
 
-test('a holding group that still holds processes is not deleted, and the leftover is named', { skip: PHASE.unwind }, async () => {
+test('a holding group that still holds processes is not deleted, and the leftover is named', async () => {
   const tenant = scenario([{ uniqueId: T2, name: 'Bravo', groupId: TEMP.id }], { groups: [HOME, TEMP] });
 
   const cleanup = await removeHoldingGroup(tenant, TEMP, { groupName: HOLDING_GROUP_NAME });
@@ -188,7 +187,7 @@ test('a holding group that still holds processes is not deleted, and the leftove
 
 const M1 = '99999999-9999-9999-9999-999999999999';
 
-test('a variation that drags its master out at the Hold stops the run, and both are put back', { skip: PHASE.unwind }, async () => {
+test('a variation that drags its master out at the Hold stops the run, and both are put back', async () => {
   const tenant = scenario(
     [
       { uniqueId: T1, numericId: 1, name: 'Order Handling (AU)', archived: true, groupId: 100 },
@@ -219,7 +218,7 @@ test('a variation that drags its master out at the Hold stops the run, and both 
 // pre-delete archive is itself a mutation, and the last point at which stopping still
 // costs nothing: an unwanted archive can be undone, a delete cannot.
 
-test('a variation that drags its master in at the archive pass stops before any delete', { skip: PHASE.unwind }, async () => {
+test('a variation that drags its master in at the archive pass stops before any delete', async () => {
   const tenant = scenario(
     [
       { uniqueId: T1, numericId: 1, name: 'Order Handling (AU)', groupId: 100, batchReadable: false },
@@ -252,7 +251,7 @@ const deleteTimeTenant = (masterName: string) =>
     { after: (call, t) => call.op === 'deleteProcess' && call.uniqueId === T1 && t.setArchived(M2, true) },
   );
 
-test('the coupling fires on delete: reported as a failure, and the master put back', { skip: PHASE.unwind }, async () => {
+test('the coupling fires on delete: reported as a failure, and the master put back', async () => {
   // The master has an unrelated name, so the pre-flight heuristic stays quiet and the
   // post-delete checkpoint is what has to catch it.
   const tenant = deleteTimeTenant('Something Unrelated');
@@ -274,7 +273,7 @@ test('the coupling fires on delete: reported as a failure, and the master put ba
   assert.match(plan?.log.join(' ') ?? '', /after delete phase/, 'the log says which phase found it');
 });
 
-test('the variation pre-flight stops an unattended run before it changes anything', { skip: PHASE.unwind }, async () => {
+test('the variation pre-flight stops an unattended run before it changes anything', async () => {
   const tenant = deleteTimeTenant('Order Handling'); // now the heuristic matches
   const { rows } = await run(tenant);
 
@@ -298,7 +297,7 @@ test('the variation pre-flight stops an unattended run before it changes anythin
 
 const STRANDED = 'eeee1111-0000-0000-0000-0000000000aa';
 
-test('a process stranded by the delete is caught by the checkpoint and reported once', { skip: PHASE.unwind }, async () => {
+test('a process stranded by the delete is caught by the checkpoint and reported once', async () => {
   const tenant = scenario(
     [{ uniqueId: T1, numericId: 1, name: 'Raise invoice', archived: true, groupId: 333, batchReadable: false }],
     {
@@ -347,7 +346,7 @@ const holdFailTenant = () =>
     { fail: (call) => (call.op === 'restore' && call.uniqueId === STUCK ? { status: 500, message: 'server error' } : null) },
   );
 
-test('a target whose Hold fails is not deleted, and says why', { skip: PHASE.unwind }, async () => {
+test('a target whose Hold fails is not deleted, and says why', async () => {
   const tenant = holdFailTenant();
   const { rows } = await run(tenant);
 
@@ -367,7 +366,7 @@ test('a target whose Hold fails is not deleted, and says why', { skip: PHASE.unw
   );
 });
 
-test('allowUnheldTargets is the only way to delete it unchecked, and the plan says so', { skip: PHASE.unwind }, async () => {
+test('allowUnheldTargets is the only way to delete it unchecked, and the plan says so', async () => {
   const tenant = holdFailTenant();
   const { plan } = await run(tenant, { allowUnheldTargets: true });
 
@@ -380,7 +379,7 @@ test('allowUnheldTargets is the only way to delete it unchecked, and the plan sa
 // Naming used to be applied where rows were printed, so the console said "(name
 // unavailable)" while the CSV, written from the same rows, carried a bare GUID.
 
-test('no process row has its id, or nothing, in the Name column', { skip: PHASE.unwind }, async () => {
+test('no process row has its id, or nothing, in the Name column', async () => {
   const { rows } = await run(threeArchived());
   assert.ok(rows.length > 0, 'the run produced results rows');
   assert.equal(rows.filter((r) => r.objectType === 'Process' && r.name === r.objectId).length, 0, 'no process row has its id in the Name column');
@@ -411,14 +410,14 @@ const acceptTenant = (variationName = 'Order Handling (AU)') =>
     { after: (call, t) => call.op === 'restore' && call.uniqueId === T1 && t.setArchived(MA, true) },
   );
 
-test('unattended alone still stops at the collateral gate and approves nothing', { skip: PHASE.unwind }, async () => {
+test('unattended alone still stops at the collateral gate and approves nothing', async () => {
   const tenant = acceptTenant();
   const { rows } = await run(tenant);
   assert.equal(tenant.deleted.length, 0, 'an unattended run alone still stops at the collateral gate');
   assert.equal(rows.filter((r) => r.status === 'Accepted').length, 0, 'and approves nothing');
 });
 
-test('approved in advance, the run deletes, records the approval once, and still puts the collateral back', { skip: PHASE.unwind }, async () => {
+test('approved in advance, the run deletes, records the approval once, and still puts the collateral back', async () => {
   const tenant = acceptTenant();
   const { rows, events } = await run(tenant, { acceptCollateral: true });
 
@@ -459,7 +458,7 @@ test('approved in advance, the run deletes, records the approval once, and still
   assert.equal(holdingGroupDeleted(tenant), true, 'the holding group is still cleaned up');
 });
 
-test('acceptCollateral also answers the variation pre-flight, as an authorisation', { skip: PHASE.unwind }, async () => {
+test('acceptCollateral also answers the variation pre-flight, as an authorisation', async () => {
   const tenant = acceptTenant('Order Handling :: AU'); // now the heuristic matches
   const { rows } = await run(tenant, { acceptCollateral: true });
 
@@ -475,7 +474,7 @@ test('acceptCollateral also answers the variation pre-flight, as an authorisatio
 // GroupId and StatusCode exist so the manual-review companion can be built from the rows
 // rather than by parsing Message back apart. ReArchive is the row that carries it.
 
-test('the unwind rows carry the group each process landed in', { skip: PHASE.unwind }, async () => {
+test('the unwind rows carry the group each process landed in', async () => {
   // Not approved, so the gate stops the run and the target goes home and is re-archived.
   const { rows } = await run(acceptTenant());
 
@@ -526,7 +525,7 @@ test('ObjectID and its spellings are read as an id', () => {
   assert.equal(idFromCsvRow({ Name: 'Alpha', Status: 'Failed' }), null, 'a row with no id column at all still yields nothing');
 });
 
-test('the failures out of a results file are run again, and nothing else', { skip: PHASE.unwind }, async () => {
+test('the failures out of a results file are run again, and nothing else', async () => {
   const tenant = threeArchived();
   // Shaped exactly like a file this tool writes.
   const results = [
@@ -542,7 +541,7 @@ test('the failures out of a results file are run again, and nothing else', { ski
   assert.equal(tenant.deleted.includes(T3), false, 'and nothing that was not in the file');
 });
 
-test('an unreadable header does not look like an empty file', { skip: PHASE.unwind }, async () => {
+test('an unreadable header does not look like an empty file', async () => {
   const tenant = threeArchived();
   const csv = ['Process Name,Owner', 'Alpha,someone', 'Bravo,someone else'].join('\n');
   const { events } = await run(tenant, { source: { kind: 'csv', text: csv } });
@@ -610,7 +609,7 @@ function holderTenant(refuseHold: boolean): FakeTenant {
 // target as archived; here the selection names it.)
 const r11Source = { kind: 'ids', ids: [R11_TARGET] } as const;
 
-test('a blocked plan still puts back the holders it restored, each with its own row', { skip: PHASE.unwind }, async () => {
+test('a blocked plan still puts back the holders it restored, each with its own row', async () => {
   const tenant = holderTenant(true);
   const { rows, plan } = await run(tenant, { source: r11Source, acceptCollateral: true });
 
@@ -645,7 +644,7 @@ test('a blocked plan still puts back the holders it restored, each with its own 
 // a group that had been deleted. The run named them and told the operator to move them by
 // hand, so no delete could complete. A holder is the same problem as an orphaned target.
 
-test('a holder whose group is gone is held, read, archived again, and its row says so', { skip: PHASE.unwind }, async () => {
+test('a holder whose group is gone is held, read, archived again, and its row says so', async () => {
   const tenant = holderTenant(false); // the holding group will take the orphan
   const { rows, events, plan } = await run(tenant, { source: r11Source, acceptCollateral: true });
 
@@ -685,7 +684,7 @@ test('a holder whose group is gone is held, read, archived again, and its row sa
 // A process the run could not put back is NAMED, not just counted. It used to be listed
 // only inside the collateral block, so a run that left a holder active with no collateral
 // to report said nothing beyond a number on the Failed line.
-test('the summary names every process the run left needing attention, and only then', { skip: PHASE.unwind }, () => {
+test('the summary names every process the run left needing attention, and only then', () => {
   const stranded = deleteResultsSummary([
     resultRow({
       objectId: R11_HOLDER,
@@ -756,7 +755,7 @@ test('the listing reads at a page size of 200', () => {
   assert.equal(LIST_PAGE_SIZE, 200, 'that page size is 200, not 20');
 });
 
-test('the archived source reads every page, as the index does', { skip: PHASE.unwind }, async () => {
+test('the archived source reads every page, as the index does', async () => {
   const many = Array.from({ length: LIST_PAGE_SIZE + 50 }, (_, i): FakeProcessSeed => ({
     uniqueId: `abcd0000-0000-0000-0000-${String(i).padStart(12, '0')}`,
     name: `Archived ${i}`,
@@ -777,7 +776,7 @@ const pastMismatches = { mismatches: () => true } as const;
 // NEW (T1): the operator declines the delete at the last confirmation, after the run has
 // un-archived two holders for discovery, one of them parked. That exit, too, puts back
 // holders and target with a row each.
-test('NEW (T1): declining the delete puts back every process the run un-archived', { skip: PHASE.unwind }, async () => {
+test('NEW (T1): declining the delete puts back every process the run un-archived', async () => {
   const tenant = holderTenant(false);
   const { rows } = await run(tenant, {
     source: r11Source,
@@ -795,7 +794,7 @@ test('NEW (T1): declining the delete puts back every process the run un-archived
 
 // NEW (T1): "a results file never omits a process the run changed". Every process that
 // received a call changing it has at least one row, on a run that restores holders.
-test('NEW (T1): every process the run changed has a results row', { skip: PHASE.unwind }, async () => {
+test('NEW (T1): every process the run changed has a results row', async () => {
   const tenant = holderTenant(false);
   const { rows } = await run(tenant, { source: r11Source, acceptCollateral: true, decisions: pastMismatches });
   assert.ok(tenant.deleted.includes(R11_TARGET), 'the run went all the way to the delete');
@@ -815,7 +814,7 @@ test('NEW (T1): every process the run changed has a results row', { skip: PHASE.
 // the Hold phase and planning have un-archived three processes) can do nothing more
 // against the tenant. What it must leave is a saved plan naming every process
 // it un-archived, holders included, and that plan, uploaded again, must finish the job.
-test('NEW (T1): a run that dies leaves a plan that a resumed unwind finishes', { skip: PHASE.unwind }, async () => {
+test('NEW (T1): a run that dies leaves a plan that a resumed unwind finishes', async () => {
   const tenant = holderTenant(false);
   tenant.fail = (call) => (call.op === 'archive' ? { status: 401, message: 'session ended' } : null);
   const store = new FakePlanStore().watch(tenant);
@@ -855,7 +854,7 @@ test('NEW (T1): a run that dies leaves a plan that a resumed unwind finishes', {
 // NEW (T2): an orphaned holder is restored into the holding group, read there, and
 // re-archived before the holding group is removed. The PowerShell checks the end state;
 // this checks the order, from the call log.
-test('NEW (T2): a parked holder is read while held and archived before the holding group goes', { skip: PHASE.unwind }, async () => {
+test('NEW (T2): a parked holder is read while held and archived before the holding group goes', async () => {
   const tenant = holderTenant(false);
   const { rows } = await run(tenant, { source: r11Source, acceptCollateral: true });
 

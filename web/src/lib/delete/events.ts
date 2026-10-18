@@ -32,6 +32,11 @@ export type DeleteEvent =
   /** A CSV that parsed but had no column an id is read from (`Show-NpmCsvIdColumnMiss`). */
   | { kind: 'csvNoIdColumn'; rowCount: number; headers: string[]; accepted: readonly string[] }
   | { kind: 'noTargets'; reason: string }
+  /**
+   * The run stopped short of deleting, and why. What follows is the unwind. The script
+   * said this in red on the console; the page shows it as the run's outcome.
+   */
+  | { kind: 'stopped'; reason: string }
   /** `Show-VariationWarning`, before the first mutation. */
   | { kind: 'variationWarning'; warning: VariationWarning }
   /** `Show-OrphanedGroupWarning`: targets that can be deleted but not sent home if the run stops. */

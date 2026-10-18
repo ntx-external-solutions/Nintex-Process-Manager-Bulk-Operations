@@ -69,6 +69,11 @@ export function chooseWritePath(state: WriteState, options: WritePathOptions): W
   return { refused: 'cannot-publish' };
 }
 
+/** An open draft over a published version: the draft a write would publish. */
+export function isOpenDraft(state: Pick<WriteState, 'revisionStateId' | 'publishedVersionExists'>): boolean {
+  return state.revisionStateId === 1 && state.publishedVersionExists !== false;
+}
+
 export function isWritePath(value: WritePath | { refused: WriteRefusal }): value is WritePath {
   return typeof value === 'string';
 }

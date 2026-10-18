@@ -259,15 +259,17 @@ test('a save the tenant answers but drops is caught by verification', async () =
   assert.equal(run.verificationFailed[0]?.remaining.length, 2, 'both references are still there, and verification says so');
 });
 
-test('skipping verification reads each holder once', async () => {
+test('skipping verification reads each holder only for the draft check and the edit', async () => {
+  // The pre-pass read decides held-back targets before any save (Cowork's review of W5
+  // phase 6); the edit reads again so it never saves over a draft opened in between.
   const published = tenantWith('2.0');
   await removePlanReferences(published, planFor(published), { skipVerification: true });
-  assert.equal(published.callsTo('readModel', H).length, 2, 'the read for the edit and the save\'s re-read, nothing more');
+  assert.equal(published.callsTo('readModel', H).length, 3, 'the draft check, the read for the edit and the save\'s re-read, nothing more');
 
   // A save that will not be published has no revision to read back.
   const draft = tenantWith('0.1');
   await removePlanReferences(draft, planFor(draft), { skipVerification: true });
-  assert.equal(draft.callsTo('readModel', H).length, 1, 'only the read for the edit');
+  assert.equal(draft.callsTo('readModel', H).length, 2, 'the draft check and the read for the edit');
 });
 
 test('a dead session during the removal ends the run', async () => {

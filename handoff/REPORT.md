@@ -6,6 +6,122 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## W5 phase 7. Unwind, orchestrator, run page and the allowlist writes
+
+Commits on `claude/web-w5-7-unwind`, branched from `claude/main` after PR #67:
+- `38eb4c4`: the ordering fix from the phase 6 review;
+- `b638b88`: unwind and orchestrator;
+- `32585a1`: two engine defects found by the offline run;
+- `8e918dd`: proxy writes and the run page;
+- `89372a5`: the plan is saved after each restore during planning.
+
+W5 is now fully ported, so this is the end of the engine. I stopped here for review before R13.
+
+**What changed.**
+
+- **Held-back targets decided before any removal (the phase 6 fix).**
+  - `removePlanReferences` now reads every holder before the first save. A holder with an open draft (`isOpenDraft`, new in `pm/writePath.ts`) that isn't ticked holds back every target it references.
+  - It then removes references only to targets still being deleted. A holder whose every target is kept is not edited; its row is `RemoveReferences`/`Skipped`, "Not edited: every target it references is being kept".
+  - The edit-time refusal stays as a backstop. If it fires, the row is Failed ("A draft was opened after the check…"), and the plan log names the holders already edited for that target ("… is kept, but its references were already removed from: …").
+  - The cost is one extra read per holder.
+- **Unwind ported:**
+  - `moveProcessToGroup`: the probe asks once per run with no retries, then falls back to archive-and-restore. It reports where the process really is.
+  - `restorePlanState`:
+    - uses the ledger, not the target list;
+    - archives in place where the group is gone or no group was recorded;
+    - saves after each entry, and is idempotent;
+    - writes `ReArchive`, `ReArchiveHolder` or `ReArchiveOrphanedHolder` (the last one's message ends "…and stays archived without a group").
+  - `currentGroupOf`: the active read, then the archived batch read.
+  - `removeHoldingGroup`: deletes the group only when it lists nothing. Each stranded non-target gets a `Collateral`/`Failed` row, and nothing is raised twice.
+  - `resolveCollateralOutcome`, `resolveTargetOutcome`, `resolveRunOutcome`: one fresh sweep, and none for a clean run.
+- **Orchestrator ported:** `runBulkDelete`, `resumeUnwind`, `deleteResultsSummary`.
+  - Same order as `Invoke-BulkDeleteProcesses`:
+    1. gather and resolve targets (`Resolve` rows);
+    2. snapshot and baseline;
+    3. the variation pre-flight (`VariationWarning` Accepted/Failed);
+    4. the orphaned-target and coverage warnings;
+    5. hold, with the pre-mutation plan saved first (B4), `Hold` rows, and unheld targets excluded unless `allowUnheldTargets`;
+    6. the hold checkpoint;
+    7. the plan;
+    8. the gates: Blocked, `PlannedIncomplete` (hard stop), unresolved, blocking mismatches, over-claims needing acknowledgement, draft-holder ticks, verification, and the final confirmation;
+    9. removal;
+    10. delete;
+    11. unwind;
+    12. cleanup;
+    13. `finish`: reverse collateral not yet reversed, then re-check.
+  - Every stop raises a new `stopped` event with the reason, then unwinds.
+  - `resumeUnwind`:
+    - restores from the plan alone;
+    - reverses only collateral a fresh read shows is still changed (restoring an active process isn't harmless on this tenant);
+    - removes the holding group unless the plan says it already went;
+    - re-checks.
+  - The `phases.ts` stubs and every `notPorted` are gone. No test is skipped.
+- **Two engine defects the offline run found:**
+  - **An archived holder that only the archive scan finds was never restored.** The script has the same defect. The scan put it on the ledger, but nothing un-archived it, so the removal couldn't edit it ("Could not fetch process for editing (it is archived)") and verification stopped the run. No live round had reached removal, so it was never seen. It's now restored in place, or parked when its group is gone, and archived again by the unwind.
+  - **A dead run's rows were lost.** The engine functions take `onRow` and report each row as they make it. A run that dies saves them into `plan.interruptedResults`, and `resumeUnwind` puts them first in its results. So the results file still names every process the run changed (T1).
+- **Mid-planning death.** The planner calls `onRestored` after each restore and the run saves the plan, so holders restored before a dead session are on record. The script has the same gap.
+- **Proxy writes added** to the allowlist and `WRITE_OPERATIONS`. Each names at most one process or group:
+  - `process.save`: the model as a string. The server parses it and refuses a model whose `UniqueId` isn't the process named. The server rebuilds the envelope, with `DoPublish` always false.
+  - `process.restore`: `processGroupId` a positive integer, with `once` for the probe.
+  - `process.delete`: optional group GUID.
+  - `group.create`: no fields; top level only.
+  - Also new, a read: `group.processes` (breadcrumb children).
+  - New pm functions: `restoreProcess` and `deleteProcess` (`pm/processes.ts`), `createTopLevelGroup` and `getGroupProcesses` (`pm/groups.ts`).
+  - The browser side is `browserDeleteGateway`. Its `listGroups` returns `[]`, because the listing's own group UniqueId is all the snapshot needs.
+- **Run page (`/delete`):**
+  - the dry run as before;
+  - then "Delete for real", with the change description, the approval override, accept collateral in advance, allow unheld targets, and a typed DELETE;
+  - the run asks each question in a panel (draft holders as ticks). An unanswered question waits; it never answers yes;
+  - a live log; the results summary and CSV; the plan download.
+  - The plan is kept in IndexedDB (`lib/ui/planStore.ts`). After a dead session the page offers "Finish it", or a downloaded plan can be uploaded.
+- **Mock and drivers:**
+  - `dev/mock-pm.mjs` answers RestoreProcess (500 for an active process or a missing group), DeleteProcess, CreateGroup and breadcrumb children, keeps references a save removes, and can expire the session at a chosen call (`/_expire?on=…`, `/_revive`).
+  - Tree group ids now equal the listing's numeric group ids.
+  - New drivers `drive-delete-run.mjs` and `drive-delete-resume.mjs`.
+
+**Results-file operations.** All are now written by the web app: `Resolve`, `VariationWarning`, `Hold`, `DependencyCheck`, `ReArchive`, `ReArchiveHolder`, `ReArchiveOrphanedHolder` (new, from the phase 1 review), `Cleanup` (ObjectType ProcessGroup), and `Collateral` "Left stranded in the holding group…". There are new messages for `Delete`/`Skipped` (hold failed, or held back) and `RemoveReferences`/`Skipped` ("Not edited: …").
+
+**Tests.** 530 tests: 530 pass, 0 fail, 0 skipped (was 514 / 474 / 40). The 40 unwind tests are turned on, and they passed against the port with no assertion changes. The stub test is removed, and 17 tests are new, so passing went up by 56.
+- **`deletion.test.ts` (+3):**
+  - a clean holder listed before a draft holder keeps its link to the target the draft keeps;
+  - a holder whose every target is kept is not edited;
+  - a draft opened between the check and the save is refused and logged.
+- **New `orchestrator.test.ts` (10):**
+  - a holding group even with only active targets;
+  - a stop states its reason;
+  - draft ticks reach the run, ticked and unticked;
+  - an incomplete plan stops before any write and names what went unread;
+  - a resume reverses only collateral that is still changed;
+  - the summary merges producers;
+  - a scan-found archived holder is restored, edited and archived again (fails without the fix; I checked);
+  - a dead run's rows reach the resumed results;
+  - a death mid-planning leaves its restored holders on record (fails without the fix; I checked).
+- **`operations.test.ts` (+4):** the write list; save carries only the named process's model; the save envelope; restore, delete and create each name at most one thing, and the new group's numeric id is read from the tree.
+- **`removal.test.ts`:** the read-count test now counts the draft-check read.
+
+Typecheck and production build are clean. Offline, against the mock:
+- `drive-delete.mjs` (dry run) sends no writes;
+- `drive-delete-run.mjs` gives 5 rows, all Success, and sends exactly these writes in order: create group, restore the archived holder, save and publish both holders, pre-delete archive, delete, re-archive the holder, delete the group;
+- `drive-delete-resume.mjs`: the session dies at the pre-delete archive, sign-in returns, the page offers "Finish it", and the resume gives 4 rows, all Success, including the two removals the dead run made.
+- The other drivers (archive, move, ownership, expired) still pass after the mock's tree-id change.
+
+I didn't run `Tests/Run-AllTests.ps1`, because the PowerShell is frozen and unchanged.
+
+**Deliberate differences and things for R13.**
+
+- **A holding group is made for every real run**, not only one with archived targets. Otherwise a holder whose group is gone blocks any run whose targets are all active, which is one of the R13 cases. An empty group is deleted at cleanup.
+- **The holding group has the tenant's default name.** CreateGroup takes no name, and the script never renamed it either. On the tenant, look for a new top-level group with the default name; the plan file records its UniqueId and numeric id.
+- **RestoreProcess retries.** It uses the write policy, so it's not resent after a 5xx (the script resent up to three times). The probe sends it once. A refused hold is read from its status.
+- **Variation siblings from `variationSetData` are not read yet.** The pre-flight uses the name heuristic, and the checkpoints are the backstop, as in the script. The tree and archived-view entry points (W6) carry `variationSetId`, which is the cheap way to know which targets to read. Reading the set for every target here would be one call per target. I propose doing it in W6.
+- **Not here, deliberately (W6):** the tree and archived-view entry points, delete by group, and empty-group cleanup.
+- **For the live test:**
+  - whether the tenant refuses a delete when only the draft is clean;
+  - editing over a revision awaiting approval;
+  - whether `breadcrumb/children` lists a process restored into a brand-new top-level group (the holding-group sweep depends on it);
+  - the CreateGroup response's `groupid` and the new group appearing at the top level of `GetChildProcessGroupTreeItems` (measured by the script, never from the web app).
+
+---
+
 ## W5 phase 6. Delete
 
 Commit `69c657c` on `claude/web-w5-6-delete`, branched from `claude/main` after PR #66. I stopped after this PR, as the task asks.

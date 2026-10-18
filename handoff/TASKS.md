@@ -250,8 +250,44 @@ results row (report: project doc `claude/bulk-ops-r12-2026-10-18.md`). Three fix
 
 ## W5. Bulk Delete engine
 
-Status: Ready. Phases 1 to 5 done and **reviewed by Cowork**; phase 6 (delete, with the
-two phase 5 follow-ups) done in 69c657c; stopped for review before unwind
+Status: Ready. Phases 1 to 6 done and **reviewed by Cowork**; phase 7 (the ordering fix,
+unwind, orchestrator, run page, allowlist writes) done in 38eb4c4, b638b88, 32585a1, 8e918dd
+and 89372a5; stopped for review before R13
+
+### Cowork's review of phase 6 (18 Oct)
+
+Approved, with one ordering fix to make at the start of phase 7.
+
+- **Fix: decide what's held back before removing any reference.** Today a holder's draft
+  is detected at edit time, inside the removal loop. If target T is held by H1 (open
+  draft, refused) and H2 (clean), and H2 comes first, H2 has its link to T removed and a
+  new version published, then T is held back by H1 and survives. H2 has lost a working
+  link for nothing, and nothing puts references back (the unwind restores archive state,
+  not references). Fix:
+  - before the first save, read every holder's write state (fresh reads, the same ones
+    the removal would make) and compute the full held-back target set;
+  - then remove references only for targets still being deleted. A holder whose only
+    targets are held back is not edited at all; its row is Skipped, "every target it
+    references is being kept";
+  - keep the edit-time check as the backstop for a draft opened between that pre-pass
+    and the save. If it fires, the row is Failed as now, and the plan log names the
+    holders already edited for that target, so the operator knows which links went for
+    nothing;
+  - tests: H2-before-H1 ordering leaves H2 unedited; a draft opened between pre-pass and
+    save is still refused and logged.
+- **Not archiving a held-back target in the pre-delete pass:** agreed.
+- **A failed pre-delete archive is logged and the delete still goes ahead:** agreed. A
+  failed archive call can still take effect, and the delete's own result settles it.
+- **Draft detection by revision state at edit time, unknown version counts as
+  published:** agreed.
+- **Logging the failed holding-group read:** good.
+- **Count line and the draft-holder heading:** what was asked. Cowork will see them on
+  the next dry run.
+
+Phase 7 is the one that first writes to the tenant from the browser. Before it lands,
+Cowork will build the R13 test content (see `CONTEXT.md`). The live test covers the two
+open questions you listed: whether a delete is refused when only the draft is clean, and
+editing over a revision awaiting approval.
 
 ### Cowork's review of phase 5 (18 Oct)
 

@@ -10,6 +10,7 @@ import {
 } from './operations.ts';
 
 const PROCESS = '00000001-0000-4000-8000-000000000001';
+const OTHER_ID = '00000003-0000-4000-8000-000000000003';
 
 function processResponse() {
   return {
@@ -92,15 +93,79 @@ test('there is no way to name a URL', () => {
   }
 });
 
-test('the only writes are archive, the approval override, deleting a group, moving a node and setting ownership', () => {
-  // Adding a write has to be a decision made here, not a side effect of a new case.
+test('the only writes are archive, publish, group delete, move, ownership, and the delete run\'s four', () => {
+  // Adding a write has to be a decision made here, not a side effect of a new case. The
+  // delete run's writes arrived with the unwind (W5 phase 7), not before.
   assert.deepEqual([...WRITE_OPERATIONS].sort(), [
+    'group.create',
     'group.delete',
     'node.move',
     'process.archive',
+    'process.delete',
     'process.publishNow',
+    'process.restore',
+    'process.save',
     'process.setOwnership',
   ]);
+});
+
+// ----------------------------------------------------------------- the delete run's writes
+
+const SAVE = {
+  op: 'process.save',
+  processUniqueId: PROCESS,
+  processJson: JSON.stringify({ UniqueId: PROCESS, Name: 'First Process' }),
+  changeDescription: 'Automated dependency removal',
+  submitForApproval: false,
+  suppressChangeNotification: true,
+};
+
+test('a save may only carry the model of the process it names', () => {
+  assert.equal(parseOperation(SAVE).ok, true);
+  const other = parseOperation({ ...SAVE, processJson: JSON.stringify({ UniqueId: OTHER_ID }) });
+  assert.ok(!other.ok);
+  assert.match(other.error, /UniqueId must be the process named/);
+  assert.equal(parseOperation({ ...SAVE, processJson: '{not json' }).ok, false);
+  assert.equal(parseOperation({ ...SAVE, processJson: { UniqueId: PROCESS } }).ok, false, 'an object, which the tenant would drop');
+  assert.equal(parseOperation({ ...SAVE, extra: 1 }).ok, false);
+});
+
+test('a save is sent as the update envelope, the model as a string, never published', async () => {
+  const h = harness([undefined]);
+  const parsed = parseOperation(SAVE);
+  assert.ok(parsed.ok);
+  await execute(h.ctx, parsed.operation);
+  assert.equal(h.calls[0]?.method, 'PUT');
+  assert.match(h.calls[0]?.url ?? '', new RegExp(`/Api/v1/Processes/${PROCESS}$`));
+  const body = JSON.parse(h.calls[0]?.body ?? '{}') as Record<string, unknown>;
+  assert.equal(typeof body['ProcessJson'], 'string');
+  assert.equal(body['DoPublish'], false);
+  assert.equal(body['SuppressChangeNotification'], true);
+});
+
+test('restore, delete and create each name at most one thing', async () => {
+  assert.equal(parseOperation({ op: 'process.restore', processUniqueId: PROCESS, processGroupId: 830 }).ok, true);
+  assert.equal(parseOperation({ op: 'process.restore', processUniqueId: PROCESS, processGroupId: '830' }).ok, false);
+  assert.equal(parseOperation({ op: 'process.restore', processUniqueId: `${PROCESS},${OTHER_ID}`, processGroupId: 830 }).ok, false);
+  assert.equal(parseOperation({ op: 'process.delete', processUniqueId: PROCESS, processGroupUniqueId: null }).ok, true);
+  assert.equal(parseOperation({ op: 'process.delete', processUniqueId: PROCESS, processGroupUniqueId: 'not-a-guid' }).ok, false);
+  assert.equal(parseOperation({ op: 'group.create' }).ok, true);
+  assert.equal(parseOperation({ op: 'group.create', parentUniqueId: OTHER_ID }).ok, false, 'top level only');
+
+  const h = harness([undefined]);
+  await execute(h.ctx, { op: 'process.delete', processUniqueId: PROCESS, processGroupUniqueId: null });
+  assert.match(h.calls[0]?.url ?? '', /\/Process\/Edit\/DeleteProcess$/);
+  assert.deepEqual(JSON.parse(h.calls[0]?.body ?? '{}'), { processUniqueId: PROCESS }, 'no group key when none is known');
+
+  const r = harness([undefined]);
+  await execute(r.ctx, { op: 'process.restore', processUniqueId: PROCESS, processGroupId: 830, once: true });
+  assert.deepEqual(JSON.parse(r.calls[0]?.body ?? '{}'), { processUniqueId: PROCESS, processGroupId: '830' }, 'the group id as a string, as the script sent it');
+});
+
+test('a new group\'s numeric id is read from the top level of the tree', async () => {
+  const h = harness([{ groupid: OTHER_ID }, { treeItems: [{ id: 830, uniqueId: OTHER_ID, title: 'New group' }], parentUniqueId: null }]);
+  assert.deepEqual(await execute(h.ctx, { op: 'group.create' }), { id: 830, uniqueId: OTHER_ID });
+  assert.deepEqual(JSON.parse(h.calls[0]?.body ?? '{}'), { parentProcessGroupUniqueId: '' });
 });
 
 // ----------------------------------------------------------------- ownership

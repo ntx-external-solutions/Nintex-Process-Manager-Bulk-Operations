@@ -409,3 +409,95 @@ test('the summary says how many pairs reconciled across categories, near the top
   assert.ok(lines.slice(0, 5).some((l) => l.includes('2 pair(s) reconciled across categories')), 'on the count line');
   assert.ok(lines.some((l) => l.startsWith('PAIRS RECONCILED ACROSS CATEGORIES (2)')));
 });
+
+// ---------------------------------------------------------------- held back before anything is removed (Cowork's review of phase 6)
+
+const H1 = 'dede0000-0000-0000-0000-0000000000c1';
+const H2 = 'dede0000-0000-0000-0000-0000000000c2';
+const T3 = 'dede0000-0000-0000-0000-000000000003';
+
+/** A holder linking to each given target once, published at 2.0 or carrying a draft over it. */
+function linker(uniqueId: string, targets: readonly string[], draft: boolean): ProcessModel {
+  return {
+    UniqueId: uniqueId,
+    Name: uniqueId === H1 ? 'Draft holder' : 'Clean holder',
+    Version: draft ? '2.1' : '2.0',
+    ProcessRevisionStateId: draft ? 1 : 3,
+    ProcessProcedures: { ProcessLink: targets.map((t, i) => ({ Id: i + 1, LinkedProcessUniqueId: t })) },
+  };
+}
+
+/** H2 (clean) comes first in the work list and holds T1 and T3; H1 (draft) holds T1. */
+function orderingCase(options: FakeTenantOptions = {}) {
+  const tenant = new FakeTenant({
+    processes: [
+      { uniqueId: H2, name: 'Clean holder', model: linker(H2, [T1, T3], false) },
+      { uniqueId: H1, name: 'Draft holder', model: linker(H1, [T1], true) },
+      { uniqueId: T1, name: 'Raise invoice' },
+      { uniqueId: T3, name: 'Send reminder' },
+    ],
+    ...options,
+  });
+  const plan = planFor([
+    { uniqueId: T1, name: 'Raise invoice' },
+    { uniqueId: T3, name: 'Send reminder' },
+  ]);
+  const holderRow = (uniqueId: string, name: string) => ({ ...plan.ledger[0]!, uniqueId, name, role: 'Holder' as const });
+  plan.ledger.push(holderRow(H2, 'Clean holder'), holderRow(H1, 'Draft holder'));
+  plan.workItems = [
+    { holderUniqueId: H2, sites: [], targetsAffected: [T1, T3] },
+    { holderUniqueId: H1, sites: [], targetsAffected: [T1] },
+  ];
+  return { tenant, plan };
+}
+
+const links = (tenant: FakeTenant, holder: string) =>
+  ((tenant.modelOf(holder)?.['ProcessProcedures'] as { ProcessLink: { LinkedProcessUniqueId: string }[] }).ProcessLink ?? []).map(
+    (l) => l.LinkedProcessUniqueId,
+  );
+
+test('a clean holder listed before a draft holder keeps its link to the target the draft keeps alive', async () => {
+  const { tenant, plan } = orderingCase();
+  const removal = await removePlanReferences(tenant, plan);
+
+  assert.deepEqual(removal.heldBack.map((h) => h.targetUniqueId), [T1], 'T1 is held back before any save');
+  assert.deepEqual(links(tenant, H2), [T1], 'H2 lost its link to T3, which is deleted, and kept its link to T1, which is not');
+  assert.equal(tenant.callsTo('saveModel', H1).length, 0, 'the draft holder is not saved');
+  assert.equal(removal.results.find((r) => r.objectId === H1)?.status, 'Failed');
+  assert.equal(removal.verificationFailed.length, 0);
+
+  const rows = await deletePlanTargets(tenant, plan, { heldBack: removal.heldBack });
+  assert.deepEqual(tenant.deleted, [T3]);
+  assert.equal(rowsOf(rows, 'Delete').find((r) => r.objectId === T1)?.status, 'Skipped');
+});
+
+test('a holder whose every target is kept is not edited at all', async () => {
+  const { tenant, plan } = orderingCase();
+  plan.workItems[0] = { holderUniqueId: H2, sites: [], targetsAffected: [T1] };
+  const removal = await removePlanReferences(tenant, plan);
+  const row = removal.results.find((r) => r.objectId === H2);
+  assert.equal(row?.status, 'Skipped');
+  assert.equal(row?.message, 'Not edited: every target it references is being kept');
+  assert.equal(tenant.callsTo('saveModel').length, 0);
+});
+
+test('a draft opened between the check and the save is still refused, and the log names what was edited for nothing', async () => {
+  // Both holders clean at the check; H1 opens a draft once H2 has been saved.
+  const { tenant, plan } = orderingCase({
+    after: (call, t) => {
+      if (call.op !== 'publishNow' || call.uniqueId !== H2) return;
+      const model = t.process(H1)?.model;
+      if (model) Object.assign(model, { ProcessRevisionStateId: 1, Version: '2.1' });
+    },
+  });
+  const h1 = tenant.process(H1)?.model;
+  if (h1) Object.assign(h1, { ProcessRevisionStateId: 3, Version: '2.0' });
+
+  const removal = await removePlanReferences(tenant, plan);
+  assert.equal(tenant.callsTo('saveModel', H1).length, 0, 'the backstop sends nothing');
+  const row = removal.results.find((r) => r.objectId === H1);
+  assert.equal(row?.status, 'Failed');
+  assert.match(row?.message ?? '', /A draft was opened after the check/);
+  assert.deepEqual(removal.heldBack.map((h) => h.targetUniqueId), [T1]);
+  assert.match(plan.log.join(' '), /Draft holder opened a draft after the check, so Raise invoice .* is kept, but its references were already removed from: Clean holder/);
+});

@@ -19,7 +19,6 @@ import {
 } from './claims.ts';
 import type { ProcessModel } from './model.ts';
 import type { ReferenceSite } from './references.ts';
-import { PHASE } from './phases.ts';
 import { findProcessReferenceSites } from './references.ts';
 import { readFixture } from './testing/fixtures.ts';
 

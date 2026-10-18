@@ -13,6 +13,7 @@
  * can upload again, so `Export-`/`Import-DependencyPlan` become serialize and parse.
  */
 
+import type { ResultRow } from '../exec/report.ts';
 import type { DependencyClaim, HolderWorkItem, Reconciliation } from './claims.ts';
 import type { CollateralChange } from './collateral.ts';
 import type { GroupRef } from './gateway.ts';
@@ -340,6 +341,13 @@ export interface DependencyPlan {
    * a plan uploaded to finish an interrupted run needs it to remove the group.
    */
   holdingGroup?: GroupRef | null;
+  /** True once the holding group was deleted, so a saved plan has nothing left to clean up. */
+  holdingGroupRemoved?: boolean;
+  /**
+   * The rows a run had made when it died, so the resumed unwind's results name every
+   * process the run changed, not only what the unwind did (old T1).
+   */
+  interruptedResults?: ResultRow[];
   /**
    * Processes the archive-wide Input/Output scan could not read. Absent in a plan file
    * from before it was recorded.
