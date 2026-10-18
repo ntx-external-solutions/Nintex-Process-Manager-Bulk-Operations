@@ -6,6 +6,115 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## W5 phase 1. Tests and fixtures first
+
+Commits `9d70974` and `d09159a` on `claude/web-w5-1-tests`, stacked on F2. `9d70974` was
+not mine: it was committed and pushed from outside this session partway through, with
+an auto-generated message ("implement bulk delete engine…") over half-written stubs.
+Squash-merge the PR so that message does not land on `claude/main`. Per the task, I
+stopped after this PR for Cowork's review.
+
+**Approach.** Every test of the three engine suites is ported to TypeScript, written
+against **typed stubs**: real signatures and types, with bodies that throw
+`notPorted('<phase>')` (`delete/phases.ts`). Each ported test is marked
+`{ skip: PHASE.<phase> }` with its full assertions, so it typechecks now and runs when
+that phase removes the skip. Skip rather than todo: a failing todo prints its stack, and
+a hundred of those would bury a real failure. Where the app already has the port
+(`compareTenantState`, `findVariationMasters`, `readGroupExists`, `resultRow` naming,
+the archive path), the test runs now against it.
+
+**Fixtures.** `Tests/Fixtures` holds real captured tenant payloads. They are read in
+place by `delete/testing/fixtures.ts`, never copied. Ids and names come from the fixture
+objects at run time, and test titles say "the holder" and "the target". The PowerShell
+suites also inline tenant ids and names (dependency responses, variation names, group
+names). Those are rebuilt from fixture values or replaced with synthetic ones. A grep of
+`web/src` for the known ids and names is empty.
+
+**What was built.**
+
+- Pure-function stubs, from `Test-Dependencies.ps1`:
+  - `delete/model.ts`: models, the delete index, case-insensitive field access.
+  - `references.ts`: the reference finders and removers. Its bucket tables are real
+    data.
+  - `claims.ts`: dependency claims, holder work items, reconciliation.
+  - `ledger.ts`: ledger entries, snapshots, plan ledger rows, plan serialize/parse.
+  - `collateral.ts`, `groups.ts`, `names.ts`.
+- `delete/gateway.ts`: `DeleteGateway`, one method per proxy operation the engine
+  needs. It extends `ArchiveGateway` with listing, dependency check, batch and single
+  model reads, save, publish, restore (with a no-retry option for the relocation probe),
+  delete, and the holding-group calls. Failures carry status and tenant message, as
+  `PmRequestError` does.
+- Planner, executor and orchestrator stubs: `planner.ts`, `executor.ts`,
+  `runOutcome.ts`, `holdingGroup.ts`, `targets.ts`, `bulkDelete.ts`, plus `events.ts`.
+  The console output becomes typed events, so tests check what was said and in what
+  order. Prompts and switches (`-AcceptCollateral`, `-AllowUnheldTargets`, the
+  collateral gate, `OnFailedTargets`) become explicit options and `decisions`
+  callbacks. Module globals (the model cache, the relocation probe, the last-restore
+  status) become explicit values. `resumeUnwind` finishes a run from an uploaded plan.
+  `planStore.ts`: the plan must be saved before the first mutation.
+- Working test infrastructure (not stubs, with 8 passing tests of their own):
+  - `testing/fakeTenant.ts`: implements `DeleteGateway` with state, a call log and
+    per-scenario hooks (`fail`, `noEffect`, `after`, `restoreActive`,
+    `missingGroupIds`, and more).
+  - `testing/planStore.ts`: records what was saved at the first mutation.
+- `archive/parity.test.ts`: the uncovered assertions of `Test-BulkArchive.ps1` against
+  the existing archive code. All pass.
+
+**Assertion accounting.**
+
+| PowerShell suite | Assertions | Ported | TS assertions | Run now | Skipped (phase) |
+|---|---|---|---|---|---|
+| Test-Dependencies | 194 | 194 (2 disk checks as 1 serialize check) | 195 | 47 | discovery 56, references 35, hold 30, checkpoints 26 |
+| Test-Executor | 156 | 156 | 163 | 0 | tests: discovery 5, hold 11, references 1, checkpoints 1, delete 1, unwind 14 |
+| Test-BulkDelete | 170 | 170 | 190 | 3 tests | tests: discovery 1, hold 1, checkpoints 1, unwind 26 |
+| Test-BulkArchive | 150 | 53 already covered, 67 added, 21 not applicable (console and menu), 9 differ | 92 | all | none |
+
+Disk and console checks are ported by intent: "plan on disk before the first restore" is
+"plan saved to the store before the first mutation", and console order is event order.
+
+**Tests.** 424 tests: 322 pass, 0 fail, 102 skipped until their phase (was 281). About
+680 TS assertions added. Typecheck and production build are clean.
+
+**New tests for T1 and T2** (skipped, unwind phase), marked `// NEW (T1)` / `// NEW (T2)`:
+
+- **T1:** an uploaded plan alone puts back every process the run un-archived.
+- **T1:** declining the final confirmation puts them all back.
+- **T1:** every process that took a successful mutating call has a row.
+- **T1:** a fatal 401 leaves a saved plan that `resumeUnwind` finishes.
+- **T2:** the parked holder is restored into the holding group, discovery runs again
+  while it is held, and it is re-archived before the group is removed.
+
+**Decisions Cowork should check.**
+
+- **Phase boundaries.** The planner's scenario tests are tagged `hold`, not
+  `discovery`, because `buildDeletePlan` returns its plan through `newDependencyPlan`
+  and `ledgerToPlanRows`, which are tagged `hold`. If the discovery PR should prove the
+  planner, those two move into discovery. Every orchestrator scenario is tagged `unwind`,
+  because `runBulkDelete` runs the end-of-run re-check on every exit path.
+- **T2's "own results operation".** The script writes `ReArchiveHolder` for ordinary
+  and parked holders alike. The tests keep that. Say if parked holders should get a
+  distinct operation (e.g. `ReArchiveOrphanedHolder`).
+- **The plan file is camelCase**, so it will not read the script's `Delete_Plan_*.json`.
+  I assumed web plans only need to round-trip with the web app.
+- **The fake tenant follows the tenant as measured** where the PowerShell mocks were
+  loose: the active read 404s for archived processes, and `StateId` follows state. Two
+  executor tests opt into the mocks' looser behaviour.
+- **Fatal errors reject `runBulkDelete`** rather than returning a stopped result. The
+  T1 resume test relies on the plan saved before that.
+
+**Found in the archive parity check** (not fixed: outside W5; your call):
+
+- **`resolveSelection` overflows the stack** if the tenant ever lists a group as its own
+  descendant. The PowerShell test expects a cycle to finish. It fails before any write,
+  so it is safe, but it is an exception, not an answer. W1 did not document it.
+- **The `/archive` variation warning** does not say that a dragged-in master lands in the
+  archived list, which is where a later Delete takes targets from. The script said so.
+- Smaller documented differences remain as W2 recorded them: collateral reported, not
+  reversed; a link column in the review file; a checked group always means its whole
+  subtree.
+
+---
+
 ## F2. Fixes from live round R12
 
 Commit `809966c` on `claude/web-f2-r12`, stacked on W4.

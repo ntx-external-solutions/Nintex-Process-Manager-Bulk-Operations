@@ -15,6 +15,7 @@
 
 import type { DependencyClaim, HolderWorkItem, Reconciliation } from './claims.ts';
 import type { CollateralChange } from './collateral.ts';
+import type { GroupRef } from './gateway.ts';
 import type { DeleteIndex, ProcessModel } from './model.ts';
 import { notPorted } from './phases.ts';
 import type { ReferenceSite } from './references.ts';
@@ -157,7 +158,28 @@ export function mergePlanLedger(
   return notPorted('hold');
 }
 
-export type PlanStatus = 'Draft' | 'Planned' | 'PlannedIncomplete' | 'Blocked';
+/**
+ * The planner writes the first four. The orchestrator writes the rest over the same
+ * plan: `Holding` on the pre-mutation plan, an `Aborted*` when it stops before deleting,
+ * `Completed` at the end (`Invoke-BulkDeleteProcesses`).
+ */
+export type PlanStatus =
+  | 'Draft'
+  | 'Planned'
+  | 'PlannedIncomplete'
+  | 'Blocked'
+  | 'Holding'
+  | 'AbortedCollateral'
+  | 'AbortedNoHeldTargets'
+  | 'Completed';
+
+/** A target whose dependency check still failed after one retry. */
+export interface FailedTarget {
+  uniqueId: string;
+  /** The failing call's HTTP status, 0 when there was no response. */
+  status: number;
+  error: string | null;
+}
 
 /** A participant the plan could not read at all, so any reference it holds stays. */
 export interface UnresolvedParticipant {
@@ -187,12 +209,17 @@ export interface DependencyPlan {
   sites: ReferenceSite[];
   workItems: HolderWorkItem[];
   reconciliation: Reconciliation[];
-  /** Targets whose dependency check failed after a retry. */
-  failedTargets: string[];
+  /** Targets whose dependency check failed after a retry, with why, for the results rows. */
+  failedTargets: FailedTarget[];
   unresolved: UnresolvedParticipant[];
   orphanedHolders: OrphanedHolder[];
   collateral: CollateralChange[];
   log: string[];
+  /**
+   * The holding group, once the run has made one. The script only wrote it into the log;
+   * a plan uploaded to finish an interrupted run needs it to remove the group.
+   */
+  holdingGroup?: GroupRef | null;
 }
 
 /** An empty `Draft` plan. Port of `New-DependencyPlan`. */

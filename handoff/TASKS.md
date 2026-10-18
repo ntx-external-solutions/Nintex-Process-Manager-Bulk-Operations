@@ -250,7 +250,7 @@ results row (report: project doc `claude/bulk-ops-r12-2026-10-18.md`). Three fix
 
 ## W5. Bulk Delete engine
 
-Status: Ready (after F2; start by porting the tests)
+Status: Ready. Phase 1 (tests and fixtures) done in d09159a; stopped for review before discovery
 
 This is the big one, so break it up: one PR per phase (tests and fixtures first, then
 discovery, hold, reference removal, checkpoints, delete, unwind), each green on its own.

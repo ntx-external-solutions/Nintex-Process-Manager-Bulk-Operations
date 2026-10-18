@@ -36,3 +36,17 @@ export function resolveClaimName(
 ): string {
   return notPorted('discovery');
 }
+
+/**
+ * One name per process whoever reports it: the lookup (the run's baseline), then the
+ * fallback when it is a real name, then the marker. The holding-group listing names a
+ * variation by its master, so two producers could print one id under two names. Port of
+ * `Resolve-CollateralName` (Nintex-BulkOperations.ps1).
+ */
+export function resolveCollateralName(
+  nameLookup: ReadonlyMap<string, { name: string }> | null,
+  uniqueId: string,
+  fallback?: string,
+): string {
+  return notPorted('checkpoints');
+}
