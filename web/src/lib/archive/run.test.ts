@@ -8,7 +8,7 @@ import type { VariationSet } from '../pm/processes.ts';
 import type { IndexEntry, ProcessIndex } from '../tenant/state.ts';
 import type { ArchiveGateway, ArchiveState } from './outcome.ts';
 import { buildArchivePlan, targetsInVariationSets, type ArchivePlan } from './plan.ts';
-import { collateralRows, manualReviewCsvRows, processLink, runArchive, settleFromFinalRead } from './run.ts';
+import { collateralRows, groupLink, itemLink, manualReviewCsvRows, processLink, runArchive, settleFromFinalRead } from './run.ts';
 
 function entry(uniqueId: string, name: string, isArchived: boolean, groupId = 10): IndexEntry {
   return { uniqueId, name, isArchived, groupId, groupUniqueId: `g-${groupId}`, groupName: 'G', groupExists: true };
@@ -219,6 +219,18 @@ test('the manual review file lists refusals with a link to each process', () => 
     ['a', 'A', '10', '400', 'HTTP 400 refused by the tenant: disabled owner', 'https://demo.promapp.com/tenant/Process/a'],
   ]);
   assert.equal(processLink('', 'a'), '');
+});
+
+test('group rows link to the group page, documents to nothing', () => {
+  const row = (objectType: ResultRow['objectType']): ResultRow => ({
+    objectType, objectId: 'g-1', name: 'G', operation: 'DeleteGroup', status: 'Blocked', message: '', groupId: '', statusCode: '409',
+  });
+  const site = 'https://demo.promapp.com/tenant/';
+  assert.equal(itemLink(site, row('ProcessGroup')), 'https://demo.promapp.com/tenant/Process/Group/g-1');
+  assert.equal(itemLink(site, row('Process')), 'https://demo.promapp.com/tenant/Process/g-1');
+  assert.equal(itemLink(site, row('Document')), '');
+  assert.equal(groupLink('', 'g-1'), '');
+  assert.equal(manualReviewCsvRows([row('ProcessGroup')], site)[1]?.[5], 'https://demo.promapp.com/tenant/Process/Group/g-1');
 });
 
 // ----------------------------------------------------------- plan

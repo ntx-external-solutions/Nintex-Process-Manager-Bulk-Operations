@@ -245,7 +245,7 @@ export function manualReviewCsvRows(rows: readonly ResultRow[], siteUrl: string)
   const out = [['ObjectID', 'Name', 'GroupId', 'StatusCode', 'Reason', 'Link']];
   for (const row of rows) {
     if (row.status !== 'Blocked') continue;
-    out.push([row.objectId, row.name, row.groupId, row.statusCode, row.message, processLink(siteUrl, row.objectId)]);
+    out.push([row.objectId, row.name, row.groupId, row.statusCode, row.message, itemLink(siteUrl, row)]);
   }
   return out;
 }
@@ -253,4 +253,22 @@ export function manualReviewCsvRows(rows: readonly ResultRow[], siteUrl: string)
 /** Where the process opens in Process Manager, or '' when the site is not known. */
 export function processLink(siteUrl: string, processUniqueId: string): string {
   return siteUrl === '' ? '' : `${siteUrl.replace(/\/+$/, '')}/Process/${processUniqueId}`;
+}
+
+/**
+ * Where the group opens in Process Manager, or '' when the site is not known. The format
+ * is the product's group page and the breadcrumb items' own `url` (F1).
+ */
+export function groupLink(siteUrl: string, groupUniqueId: string): string {
+  return siteUrl === '' ? '' : `${siteUrl.replace(/\/+$/, '')}/Process/Group/${groupUniqueId}`;
+}
+
+/**
+ * Where a results row's item opens. Documents get no link: their URL format has not been
+ * recorded, and a guessed link that opens the wrong page is worse than none.
+ */
+export function itemLink(siteUrl: string, row: ResultRow): string {
+  if (row.objectType === 'Process') return processLink(siteUrl, row.objectId);
+  if (row.objectType === 'ProcessGroup') return groupLink(siteUrl, row.objectId);
+  return '';
 }

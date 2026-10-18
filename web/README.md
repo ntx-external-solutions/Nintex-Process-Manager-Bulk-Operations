@@ -63,6 +63,9 @@ npm run typecheck
 npm run build
 ```
 
+`dev/` holds a mock Process Manager and a headless Chrome driver for running the built
+app end to end with no tenant. See `dev/README.md`. Nothing in `src/` imports it.
+
 ## Deploying
 
 Create a Vercel project from this repository with **Root Directory** set to `web`. The

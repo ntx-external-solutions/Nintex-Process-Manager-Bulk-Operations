@@ -241,10 +241,10 @@ export function readAssociatedContents(bodyText: string | null): AssociatedConte
 /**
  * Titles of a group's ancestors and the group itself, top first, without the tenant.
  *
- * The breadcrumb endpoint returns the chain root first (the tenant) and the group last
- * (spike S3). Its item shape was recorded only loosely, so the title is taken from
- * whichever of the usual fields carries one. A deleted group's chain is sometimes empty,
- * which comes back as an empty path rather than a guess.
+ * The response shape was captured in Cowork's review of W2b (F1):
+ * `{ isChildren, breadcrumbItems: [{ id, parentId, name, position, type, url, version }] }`,
+ * the tenant first and the group itself last. A deleted group's list can be empty, which
+ * means "path unknown" and comes back as an empty path, not an error.
  */
 export async function getGroupBreadcrumb(ctx: PmContext, groupUniqueId: string): Promise<string[]> {
   const response = await pmRequest<unknown>(ctx, {
@@ -255,20 +255,13 @@ export async function getGroupBreadcrumb(ctx: PmContext, groupUniqueId: string):
 }
 
 export function breadcrumbTitles(response: unknown): string[] {
-  let items: unknown = response;
-  if (!Array.isArray(items) && typeof items === 'object' && items !== null) {
-    const record = items as Record<string, unknown>;
-    items = record['items'] ?? record['breadcrumbs'] ?? record['data'] ?? record['breadcrumb'] ?? [];
-  }
+  if (typeof response !== 'object' || response === null) return [];
+  const items = (response as Record<string, unknown>)['breadcrumbItems'];
   if (!Array.isArray(items)) return [];
-  const titles = items
-    .map((item) => {
-      if (typeof item !== 'object' || item === null) return '';
-      const record = item as Record<string, unknown>;
-      const title = record['name'] ?? record['title'] ?? record['Name'] ?? record['Title'] ?? record['text'];
-      return typeof title === 'string' ? title : '';
-    })
-    .filter((title) => title !== '');
+  const titles = items.map((item) => {
+    const name = typeof item === 'object' && item !== null ? (item as Record<string, unknown>)['name'] : undefined;
+    return typeof name === 'string' ? name : '';
+  });
   // The first entry is the tenant itself, which no group path in this app includes.
-  return titles.slice(1);
+  return titles.slice(1).filter((title) => title !== '');
 }

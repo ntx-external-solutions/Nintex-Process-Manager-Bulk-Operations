@@ -7,21 +7,11 @@
 
 import type { ReactNode } from 'react';
 
-import { processLink } from '@/lib/archive/run.ts';
+import { itemLink } from '@/lib/archive/run.ts';
 import { countByStatus, resultsToCsv, type ResultRow } from '@/lib/exec/report.ts';
 import { datedFilename, downloadCsv } from '@/lib/ui/download.ts';
 
 const NEEDS_ATTENTION: ReadonlySet<string> = new Set(['Blocked', 'Failed', 'Pending', 'Unverified', 'Unreversed']);
-
-/**
- * Where a process opens in Process Manager, or '' when the site is not known. Groups and
- * documents get no link: their URL format has not been recorded, and a guessed link that
- * opens the wrong page is worse than none.
- */
-export function itemLink(siteUrl: string, row: ResultRow): string {
-  if (siteUrl === '' || row.objectType !== 'Process') return '';
-  return processLink(siteUrl, row.objectId);
-}
 
 export function ResultsSummary({
   rows,

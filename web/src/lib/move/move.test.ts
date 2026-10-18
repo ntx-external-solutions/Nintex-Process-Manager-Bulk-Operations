@@ -9,7 +9,7 @@ import { addBrowseLevel, emptyBrowseTree, type BrowseTree } from '../select/brow
 import { TREE_LEVELS } from '../select/fixtures.ts';
 import { EMPTY_SELECTION, toggle, type Selection } from '../select/selection.ts';
 import type { IndexEntry } from '../tenant/state.ts';
-import { buildMovePlan, classifyValidation, movePreviewRows, type MovePlan, type MovePlanReads } from './plan.ts';
+import { buildMovePlan, classifyValidation, isDraftOverPublished, movePreviewRows, type MovePlan, type MovePlanReads } from './plan.ts';
 import { itemsToMove, runMoves, settleMoves, type MoveGateway } from './run.ts';
 import { destinationOf, resolveMoveSelection } from './select.ts';
 
@@ -116,7 +116,16 @@ test('the pre-flight decides the cost of each process move', () => {
   assert.equal(classifyValidation(null).cost, 'unknown');
 });
 
-function fakeReads(options: { validations?: Record<string, ValidateActionResponse | Error>; sets?: Record<string, VariationSet>; viewers?: Error } = {}) {
+type Revision = { version: string; revisionStateId: 1 | 2 | 3 };
+
+function fakeReads(
+  options: {
+    validations?: Record<string, ValidateActionResponse | Error>;
+    revisions?: Record<string, Revision | Error>;
+    sets?: Record<string, VariationSet>;
+    viewers?: Error;
+  } = {},
+) {
   const calls: string[] = [];
   const reads: MovePlanReads = {
     async validateMove(id, dest) {
@@ -124,6 +133,12 @@ function fakeReads(options: { validations?: Record<string, ValidateActionRespons
       const v = options.validations?.[id];
       if (v instanceof Error) throw v;
       return v ?? validation({});
+    },
+    async revision(id) {
+      calls.push(`revision ${id}`);
+      const r = options.revisions?.[id];
+      if (r instanceof Error) throw r;
+      return r ?? { version: '2.0', revisionStateId: 2 };
     },
     async variationSet(id) {
       calls.push(`set ${id}`);
@@ -159,6 +174,36 @@ test('drafts that would go live are set aside, unchosen, with the tenant message
   const preview = movePreviewRows(plan, new Set());
   assert.equal(preview.find((r) => r.objectId === 'p-exp')?.status, 'Skipped');
   assert.equal(movePreviewRows(plan, new Set(['p-exp'])).find((r) => r.objectId === 'p-exp')?.status, 'Preview');
+});
+
+test('the revision state is a draft signal of its own', () => {
+  assert.equal(isDraftOverPublished({ version: '1.1', revisionStateId: 1 }), true);
+  assert.equal(isDraftOverPublished({ version: '3.2', revisionStateId: 1 }), true);
+  // Never published: 0.x in progress.
+  assert.equal(isDraftOverPublished({ version: '0.4', revisionStateId: 1 }), false);
+  // Published with no draft open.
+  assert.equal(isDraftOverPublished({ version: '2.0', revisionStateId: 2 }), false);
+  assert.equal(isDraftOverPublished({ version: '', revisionStateId: 1 }), false);
+});
+
+test('a draft the pre-flight words differently is still set aside by its revision', async () => {
+  const { plan, calls } = await planFor(['g-fin>p-close', 'g-fin>p-exp', 'g-ap>p-pay'], 'g-hr', {
+    validations: { 'p-close': PROMPT, 'p-exp': DRAFT },
+    revisions: { 'p-close': { version: '1.1', revisionStateId: 1 } },
+  });
+  assert.deepEqual(plan.needsChoice.map((m) => [m.uniqueId, m.cost]).sort(), [['p-close', 'draft'], ['p-exp', 'draft']]);
+  assert.deepEqual(plan.moves.map((m) => m.uniqueId), ['p-pay']);
+  // Only the prompted move the wording did not catch is read: not the clean one, not the worded draft.
+  assert.deepEqual(calls.filter((c) => c.startsWith('revision')), ['revision p-close']);
+});
+
+test('a republish whose revision cannot be read needs a choice', async () => {
+  const { plan } = await planFor(['g-fin>p-close'], 'g-hr', {
+    validations: { 'p-close': PROMPT },
+    revisions: { 'p-close': new Error('HTTP 500') },
+  });
+  assert.deepEqual(plan.needsChoice.map((m) => [m.uniqueId, m.cost]), [['p-close', 'unknown']]);
+  assert.match(plan.needsChoice[0]?.tenantMessage ?? '', /open draft could not be read/);
 });
 
 test('a pre-flight the tenant refuses is Blocked; one that cannot be read needs a choice', async () => {
