@@ -310,7 +310,7 @@ to resume or unwind.
 
 ## F3. Two small things from the W5 parity check
 
-Status: Ready (after W5 phase 2)
+Status: Done (c5c7933)
 
 - `resolveSelection` overflows the stack if the tenant ever lists a group as its own
   descendant. Keep a visited set and report the cycle as an excluded item with a reason,
