@@ -16,7 +16,7 @@
  */
 
 import { childrenOf, groupPathOf, isWithin, type BrowseNode, type BrowseTree } from '../select/browse.ts';
-import type { ExcludedItem } from '../select/resolve.ts';
+import { cycleExclusion, type ExcludedItem } from '../select/resolve.ts';
 import { effectiveMark, type Selection } from '../select/selection.ts';
 
 export interface MoveCandidate {
@@ -46,6 +46,7 @@ export function resolveMoveSelection(tree: BrowseTree, selection: Selection): Mo
   const excluded: ExcludedItem[] = [];
   const unloaded: string[] = [];
   const seen = new Set<string>();
+  const walked = new Set<string>();
 
   const exclude = (node: BrowseNode, reason: string): void => {
     excluded.push({ uniqueId: node.uniqueId, title: node.title, itemType: node.itemType, path: groupPathOf(tree, node), reason });
@@ -60,6 +61,12 @@ export function resolveMoveSelection(tree: BrowseTree, selection: Selection): Mo
         return;
       }
       if (!included && !marksBelow(tree, selection, node, 'include')) return;
+      // A tenant that lists a group inside its own subtree closes a loop (F3).
+      if (walked.has(node.key)) {
+        excluded.push(cycleExclusion(tree, node));
+        return;
+      }
+      walked.add(node.key);
       if (!node.childrenLoaded) {
         unloaded.push(node.uniqueId);
         return;

@@ -60,3 +60,10 @@ test('rows carry the tri-state check', () => {
   assert.equal(check('g-ap>p-inv'), 'checked');
   assert.equal(check('g-hr'), 'unchecked');
 });
+
+test('a group listed inside its own subtree is drawn, not opened forever (F3)', () => {
+  const looped = addBrowseLevel(tree(null, 'g-fin'), 'g-ap', [...TREE_LEVELS['g-ap']!, TREE_LEVELS['']![0]!]);
+  const rows = visibleRows(looped, EMPTY_SELECTION, new Set(['g-fin', 'g-ap']));
+  assert.ok(rows.length < 50, 'the walk ends');
+  assert.equal(rows.filter((r) => r.node.key === 'g-fin' && r.expanded).length, 1, 'opened once');
+});

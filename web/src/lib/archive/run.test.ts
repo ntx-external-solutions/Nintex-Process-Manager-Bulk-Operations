@@ -7,7 +7,7 @@ import { createControls } from '../exec/runner.ts';
 import type { VariationSet } from '../pm/processes.ts';
 import type { IndexEntry, ProcessIndex } from '../tenant/state.ts';
 import type { ArchiveGateway, ArchiveState } from './outcome.ts';
-import { buildArchivePlan, targetsInVariationSets, type ArchivePlan } from './plan.ts';
+import { buildArchivePlan, targetsInVariationSets, VARIATION_ARCHIVE_LIST_NOTE, type ArchivePlan } from './plan.ts';
 import { collateralRows, groupLink, itemLink, manualReviewCsvRows, processLink, runArchive, settleFromFinalRead } from './run.ts';
 
 function entry(uniqueId: string, name: string, isArchived: boolean, groupId = 10): IndexEntry {
@@ -291,4 +291,9 @@ test('a target whose variation set could not be read is listed as such', () => {
   assert.deepEqual(targetsInVariationSets(resolved.processes), ['v']);
   const p = buildArchivePlan(resolved, index(entry('v', 'V', false)), new Map(), new Map([['v', 'HTTP 500']]));
   assert.deepEqual(p.unreadVariationSets, [{ uniqueId: 'v', name: 'V', error: 'HTTP 500' }]);
+});
+
+test('the variation warning says where a dragged-in master ends up, as the script did (F3)', () => {
+  assert.match(VARIATION_ARCHIVE_LIST_NOTE, /archived list/);
+  assert.match(VARIATION_ARCHIVE_LIST_NOTE, /later Bulk Delete takes its targets from/);
 });

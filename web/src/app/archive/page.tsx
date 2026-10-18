@@ -18,6 +18,7 @@ import {
   describeGroup,
   previewRows,
   targetsInVariationSets,
+  VARIATION_ARCHIVE_LIST_NOTE,
   variationMessage,
 } from '@/lib/archive/plan.ts';
 import type { VariationSet } from '@/lib/pm/processes.ts';
@@ -404,6 +405,7 @@ function PlanView(props: {
             like one by its name, and is not itself a target. Archiving the target can affect it.
             Variation siblings are not shown in the tree, so this is the only place they appear.
           </p>
+          <p>{VARIATION_ARCHIVE_LIST_NOTE}</p>
           <ul className="checklist">
             {plan.variations.map((m) => (
               <li key={`${m.targetUniqueId}|${m.relativeUniqueId}`}>

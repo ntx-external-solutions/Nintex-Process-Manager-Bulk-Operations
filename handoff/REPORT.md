@@ -6,6 +6,28 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## F3. Two small things from the W5 parity check
+
+Commit `c5c7933` on `claude/web-f3-parity`, stacked on W5 phase 2.
+
+**What changed.**
+
+- **Cycles.** `resolveSelection` (`select/resolve.ts`) keeps a set of groups walked. A group reached a second time is reported as an excluded item with `CYCLE_REASON` and not followed (`cycleExclusion`). I found the same unguarded walk in two more places and fixed both:
+  - `resolveMoveSelection` (`move/select.ts`).
+  - `visibleRows` (`select/rows.ts`). With both groups of a loop expanded, the tree view itself would have recursed until the page crashed.
+  - The parent-chain helpers (`groupPathOf`, `isWithin`, `effectiveMark`) already had hop limits.
+- **Archive warning.** `VARIATION_ARCHIVE_LIST_NOTE` (`archive/plan.ts`) is shown in the `/archive` variation panel. It says a master archived this way ends up in the archived list, where a later Bulk Delete takes its targets from, and suggests checking that list before deleting from it.
+
+**Results-file operations.** None.
+
+**Tests.** 438 tests: 364 pass, 0 fail, 74 skipped. That is 3 new tests (the looped tree in the archive resolver, the move resolver and the tree view) plus the warning-text test. The resolver test fails with `RangeError: Maximum call stack size exceeded` on the old code, which I checked.
+
+**Decisions Cowork should check.**
+
+- **A looped group is walked where it is first reached.** That is under its original parent, since the walk starts at the top level, and it is reported once. Nothing under it is counted twice.
+
+---
+
 ## W5 phase 2. Discovery, and a read-only plan
 
 Commit `13fdfe5` on `claude/web-w5-2-discovery`. Stopped after this PR, as the task asks.

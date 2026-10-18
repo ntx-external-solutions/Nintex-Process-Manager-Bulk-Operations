@@ -248,6 +248,15 @@ export function previewRows(plan: ArchivePlan): ResultRow[] {
   ];
 }
 
+/**
+ * Why a dragged-in master matters beyond this run, in the script's words
+ * (`Invoke-BulkArchiveProcesses`): once archived it is an ordinary member of the archived
+ * list, and Bulk Delete takes its targets from that list, so a master nobody named can
+ * end up in front of a delete. Restored to the warning by F3.
+ */
+export const VARIATION_ARCHIVE_LIST_NOTE =
+  'A master archived this way ends up in the archived list like any other process, and that list is where a later Bulk Delete takes its targets from. Check the archived list after the run, before deleting from it.';
+
 export function variationMessage(m: VariationMatch): string {
   return m.signal === 'name'
     ? `Possibly the master of target '${m.targetName}', going by its name, and not itself a target`
