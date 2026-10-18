@@ -29,6 +29,7 @@ import {
 } from '@/lib/ownership/plan.ts';
 import { OWNERSHIP_STATUSES, runOwnership, settleOwnership } from '@/lib/ownership/run.ts';
 import type { OwnershipState } from '@/lib/pm/ownership.ts';
+import { loadProcessIndex, type ProcessIndex } from '@/lib/tenant/state.ts';
 import { datedFilename, downloadCsv } from '@/lib/ui/download.ts';
 import { browserOwnershipGateway, PmRequestError, type SessionInfo } from '@/lib/ui/gateway.ts';
 import { ResultsSummary } from '../components/ResultsSummary.tsx';
@@ -115,6 +116,16 @@ function OwnershipFlow({ session, onSignedOut }: { session: SessionInfo; onSigne
         setDirectory(users);
         setScimKey('');
       }
+      // Names for every row the plan will not write. Without them a skipped process reads
+      // "(name unavailable)" even when it is in a list (F4). Not having them is not a reason
+      // to stop: the rows fall back to that wording.
+      setStage({ kind: 'planning', progress: 'Reading both process lists for names…' });
+      let names: ProcessIndex | undefined;
+      try {
+        names = await loadProcessIndex(gateway.processesList);
+      } catch (cause) {
+        if (cause instanceof PmRequestError && cause.signedOut) throw cause;
+      }
       const plan = await buildOwnershipPlan(
         loaded.rows,
         users,
@@ -123,7 +134,7 @@ function OwnershipFlow({ session, onSignedOut }: { session: SessionInfo; onSigne
           isFatal: defaultIsFatal,
           onProgress: (done, total) => setStage({ kind: 'planning', progress: `Reading process ${done} of ${total}…` }),
         },
-        { publish },
+        { publish, names },
       );
       setStage({ kind: 'plan', plan, unresolved: unresolvedUsernames(loaded.rows, users), nonGuidIds: loaded.nonGuidIds });
     } catch (cause) {
@@ -151,7 +162,8 @@ function OwnershipFlow({ session, onSignedOut }: { session: SessionInfo; onSigne
       const after = new Map<string, OwnershipState | null>();
       for (const change of plan.changes) {
         try {
-          after.set(change.uniqueId.toLowerCase(), await gateway.ownership(change.uniqueId));
+          const read = await gateway.ownership(change.uniqueId);
+          after.set(change.uniqueId.toLowerCase(), read.kind === 'process' ? read.state : null);
         } catch {
           after.set(change.uniqueId.toLowerCase(), null);
         }

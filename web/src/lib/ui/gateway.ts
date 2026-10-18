@@ -14,7 +14,7 @@ import type { PlanningGateway } from '../delete/planner.ts';
 import type { MovePlanReads } from '../move/plan.ts';
 import type { MoveGateway } from '../move/run.ts';
 import type { OwnershipGateway } from '../ownership/run.ts';
-import type { OwnershipState, SetOwnershipResult } from '../pm/ownership.ts';
+import type { OwnershipRead, SetOwnershipResult } from '../pm/ownership.ts';
 import type { ActiveRead } from '../pm/dependencies.ts';
 import type { DirectoryUser } from '../pm/scim.ts';
 import type { GroupViewerCount, MovableNodeType } from '../pm/groups.ts';
@@ -160,14 +160,16 @@ export function browserMoveGateway(): MoveGateway & Omit<MovePlanReads, 'isFatal
  * SCIM key goes to the server for one directory read and is kept nowhere.
  */
 export function browserOwnershipGateway(): OwnershipGateway & {
-  ownership(processUniqueId: string): Promise<OwnershipState>;
+  ownership(processUniqueId: string): Promise<OwnershipRead>;
+  processesList(page: number, listType: number): Promise<ProcessListPage>;
   directory(scimApiKey: string): Promise<DirectoryUser[]>;
 } {
   return {
     setOwnership: (request) => callPm<SetOwnershipResult>({ op: 'process.setOwnership', ...request }),
     publishNow: (processUniqueId, processRevisionEditId, publishMessage) =>
       callPm({ op: 'process.publishNow', processUniqueId, processRevisionEditId, publishMessage }),
-    ownership: (processUniqueId) => callPm<OwnershipState>({ op: 'process.ownership', processUniqueId }),
+    ownership: (processUniqueId) => callPm<OwnershipRead>({ op: 'process.ownership', processUniqueId }),
+    processesList: (page, listType) => callPm<ProcessListPage>({ op: 'processes.list', page, listType }),
     directory: (scimApiKey) => callPm<DirectoryUser[]>({ op: 'users.directory', scimApiKey }),
   };
 }

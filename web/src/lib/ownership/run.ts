@@ -82,6 +82,10 @@ export async function runOwnership(
           changeDescription,
           submitForApproval: change.writePath === 'submit-then-publish',
         });
+        if (!result.ok && 'archived' in result) {
+          journal.append({ step: saveStep, kind: 'process.update', phase: 'skip' });
+          return row(change, 'Skipped', 'The process was archived after the preview, so it was not saved.');
+        }
         if (!result.ok) {
           journal.append({ step: saveStep, kind: 'process.update', phase: 'skip' });
           return row(

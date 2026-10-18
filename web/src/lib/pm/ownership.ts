@@ -9,8 +9,8 @@
  */
 
 import type { PmContext } from './client.ts';
-import { buildUpdateEnvelope, getLatestRevision, getProcess, updateProcess } from './processes.ts';
-import type { ProcessJson, ProcessRevisionStateId } from './types.ts';
+import { buildUpdateEnvelope, getLatestRevision, readProcess, updateProcess } from './processes.ts';
+import type { ProcessJson, ProcessResponse, ProcessRevisionStateId } from './types.ts';
 
 /** The built-in "Needs to be reassigned N/A" placeholder. Always id 2. */
 export const UNASSIGNED_USER = { id: 2, name: 'Needs to be reassigned N/A' } as const;
@@ -42,8 +42,20 @@ function role(model: ProcessJson, idField: string, nameField: string): UserRef |
   return { id, name: typeof name === 'string' ? name : '' };
 }
 
-export async function getOwnership(ctx: PmContext, processUniqueId: string): Promise<OwnershipState> {
-  const { processJson, processActions } = await getProcess(ctx, processUniqueId);
+/**
+ * The ownership read: the process, or that it is archived. An archived process answers
+ * 200 with only `{success, isArchived}` and no model, which read as a model crashed into
+ * "Unexpected error" in the W4 live test (F4). `readProcessEnvelope` tells them apart.
+ */
+export type OwnershipRead = { kind: 'process'; state: OwnershipState } | { kind: 'archived' };
+
+export async function getOwnership(ctx: PmContext, processUniqueId: string): Promise<OwnershipRead> {
+  const read = await readProcess(ctx, processUniqueId);
+  if (read.kind === 'archived') return { kind: 'archived' };
+  return { kind: 'process', state: ownershipState(read.response) };
+}
+
+function ownershipState({ processJson, processActions }: ProcessResponse): OwnershipState {
   const archived = processJson['isArchived'] ?? processJson['IsArchived'];
   return {
     uniqueId: processJson.UniqueId,
@@ -86,7 +98,8 @@ export interface SetOwnershipRequest {
 
 export type SetOwnershipResult =
   | { ok: true; revisionEditId: number | null }
-  | { ok: false; conflict: { expected: number; actual: number } };
+  | { ok: false; conflict: { expected: number; actual: number } }
+  | { ok: false; archived: true };
 
 /**
  * Save the new owner and expert.
@@ -97,7 +110,10 @@ export type SetOwnershipResult =
  * publish needs. A null id means the save landed but the follow-up read did not.
  */
 export async function setOwnership(ctx: PmContext, request: SetOwnershipRequest): Promise<SetOwnershipResult> {
-  const { processJson } = await getProcess(ctx, request.processUniqueId);
+  const read = await readProcess(ctx, request.processUniqueId);
+  // Archived since the preview: there is no model to save over.
+  if (read.kind === 'archived') return { ok: false, archived: true };
+  const { processJson } = read.response;
   if (processJson.ProcessRevisionEditId !== request.expectedRevisionEditId) {
     return { ok: false, conflict: { expected: request.expectedRevisionEditId, actual: processJson.ProcessRevisionEditId } };
   }

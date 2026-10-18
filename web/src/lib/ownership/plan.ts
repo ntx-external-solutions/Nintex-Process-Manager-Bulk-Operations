@@ -20,7 +20,7 @@
  */
 
 import { resultRow, type ResultRow } from '../exec/report.ts';
-import { UNASSIGNED_USER, type OwnershipState, type UserRef } from '../pm/ownership.ts';
+import { UNASSIGNED_USER, type OwnershipRead, type OwnershipState, type UserRef } from '../pm/ownership.ts';
 import { indexUsersByLogon, type DirectoryLookup, type DirectoryUser } from '../pm/scim.ts';
 import { isGuid, type OwnershipCsvRow } from './csv.ts';
 
@@ -121,17 +121,13 @@ export interface OwnershipPlan {
 }
 
 export interface OwnershipReads {
-  ownership(processUniqueId: string): Promise<OwnershipState>;
+  ownership(processUniqueId: string): Promise<OwnershipRead>;
   isFatal?: ((error: unknown) => string | null) | undefined;
   onProgress?: ((done: number, total: number, label: string) => void) | undefined;
 }
 
 function at(lines: readonly number[]): string {
   return lines.length === 1 ? `line ${lines[0]}` : `lines ${lines.join(', ')}`;
-}
-
-function skip(objectId: string, name: string, status: string, message: string, statusCode = 0): ResultRow {
-  return resultRow({ objectId, name, operation: OPERATION, status, message, statusCode });
 }
 
 /** Returns a WritePath, or the reason the process cannot be written. PGM's rules. */
@@ -168,9 +164,21 @@ export async function buildOwnershipPlan(
   rows: readonly OwnershipCsvRow[],
   directory: Directory,
   reads: OwnershipReads,
-  options: { publish: PublishChoice },
+  options: {
+    publish: PublishChoice;
+    /**
+     * Names from both process listings, keyed by lowercased id. Every row that is not
+     * written takes its name from here, so a skipped or failed process is named. The W4
+     * live test found every one of them reading "(name unavailable; not in any process
+     * list)", for processes that were in a list (F4).
+     */
+    names?: ReadonlyMap<string, { name: string }> | undefined;
+  },
 ): Promise<OwnershipPlan> {
   const skipped: ResultRow[] = [];
+  const named = (id: string, known = ''): string => known || options.names?.get(id.toLowerCase())?.name || '';
+  const skip = (objectId: string, name: string, status: string, message: string, statusCode = 0): ResultRow =>
+    resultRow({ objectId, name: objectId === '' ? name : named(objectId, name), operation: OPERATION, status, message, statusCode });
   /** Keyed by lowercased id, in the order the file first names each process. */
   const pending = new Map<string, { processId: string; lines: number[]; owner: Cell; expert: Cell }>();
 
@@ -225,9 +233,9 @@ export async function buildOwnershipPlan(
   for (const entry of pending.values()) {
     reads.onProgress?.(++done, pending.size, entry.processId);
 
-    let state: OwnershipState;
+    let read: OwnershipRead;
     try {
-      state = await reads.ownership(entry.processId);
+      read = await reads.ownership(entry.processId);
     } catch (error) {
       if (reads.isFatal?.(error)) throw error;
       const status = errorStatus(error);
@@ -237,7 +245,7 @@ export async function buildOwnershipPlan(
           '',
           'Failed',
           status === 404
-            ? `Process not found or definition unavailable. An archived process cannot be read this way (${at(entry.lines)})`
+            ? `Process not found. It may have been deleted (${at(entry.lines)})`
             : `Could not be read (${status > 0 ? `HTTP ${status}` : 'no response'}): ${errorText(error)} (${at(entry.lines)})`,
           status,
         ),
@@ -245,10 +253,14 @@ export async function buildOwnershipPlan(
       continue;
     }
 
-    if (state.isArchived === true) {
-      skipped.push(skip(entry.processId, state.name, 'Skipped', `Archived. Restore it before changing its owner or expert (${at(entry.lines)})`));
+    // The tenant answers an archived process with 200 and no model (F4). The model's own
+    // flag is kept as a second signal.
+    if (read.kind === 'archived' || read.state.isArchived === true) {
+      const name = read.kind === 'process' ? read.state.name : '';
+      skipped.push(skip(entry.processId, name, 'Skipped', `The process is archived. Restore it before changing its owner or expert (${at(entry.lines)})`));
       continue;
     }
+    const state = read.state;
 
     const owner = roleChange(state.owner, entry.owner);
     const expert = roleChange(state.expert, entry.expert);
