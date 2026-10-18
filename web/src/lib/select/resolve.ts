@@ -56,6 +56,18 @@ export type Resolution =
   /** Group ids whose children must be read before the selection can be resolved. */
   | { status: 'incomplete'; unloaded: string[] };
 
+export const CYCLE_REASON =
+  'The tenant lists this group inside its own subtree. It is walked once, where it was first reached, so nothing under it is counted twice.';
+
+/**
+ * A group reached a second time. The tree is keyed by group id, so a tenant that lists an
+ * ancestor as a child closes a loop, and walking it overflowed the stack (found by the W5
+ * parity check against the PowerShell, F3). It is reported, not followed.
+ */
+export function cycleExclusion(tree: BrowseTree, node: BrowseNode): ExcludedItem {
+  return { uniqueId: node.uniqueId, title: node.title, itemType: node.itemType, path: groupPathOf(tree, node), reason: CYCLE_REASON };
+}
+
 /** True when any mark at or below this group is `include`. */
 function includesAnythingBelow(tree: BrowseTree, selection: Selection, group: BrowseNode): boolean {
   if (effectiveMark(tree, selection, group) === 'include') return true;
@@ -79,10 +91,16 @@ export function resolveSelection(tree: BrowseTree, selection: Selection): Resolu
   const groups: CoveredGroup[] = [];
   /** First placement of each process, so a second appearance can say where the first was. */
   const seen = new Map<string, string[]>();
+  const walked = new Set<string>();
 
   const visit = (node: BrowseNode): void => {
     if (node.kind === 'group') {
       if (!includesAnythingBelow(tree, selection, node)) return;
+      if (walked.has(node.key)) {
+        excluded.push(cycleExclusion(tree, node));
+        return;
+      }
+      walked.add(node.key);
       if (effectiveMark(tree, selection, node) === 'include') {
         const path = groupPathOf(tree, node);
         groups.push({

@@ -240,3 +240,27 @@ test('a group that is only partly selected from outside is not covered', () => {
   if (resolution.status !== 'complete') return;
   assert.deepEqual(resolution.groups, []);
 });
+
+// ---------------------------------------------------------------- a tenant tree that loops
+// Found by the W5 parity check (F3): the PowerShell finishes on a cycle, and this
+// overflowed the stack. A group listed inside its own subtree is reported, not followed.
+
+function loopedTree(): BrowseTree {
+  const finance = TREE_LEVELS['']![0]!;
+  // Accounts Payable lists Finance, its own parent, among its children.
+  return addBrowseLevel(treeWith(null, 'g-fin'), 'g-ap', [...TREE_LEVELS['g-ap']!, finance]);
+}
+
+test('a group listed inside its own subtree is walked once and reported', () => {
+  const tree = loopedTree();
+  const selection = click(tree, EMPTY_SELECTION, 'g-fin');
+  const resolution = resolveSelection(addBrowseLevel(addBrowseLevel(tree, 'g-empty', []), 'g-fin', TREE_LEVELS['g-fin']!), selection);
+  assert.equal(resolution.status, 'complete');
+  if (resolution.status !== 'complete') return;
+  const looped = resolution.excluded.filter((e) => e.uniqueId === 'g-fin');
+  assert.equal(looped.length, 1, 'the loop is reported once');
+  assert.match(looped[0]!.reason, /inside its own subtree/);
+  const processIds = resolution.processes.map((p) => p.uniqueId);
+  assert.equal(new Set(processIds).size, processIds.length, 'nothing under it is counted twice');
+  assert.ok(processIds.includes('p-pay'), 'what is under it is still found');
+});

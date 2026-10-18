@@ -367,3 +367,13 @@ test('the final read settles each move, and siblings get their own rows', async 
   assert.equal(status('p-exp-s'), 'Success');
   assert.match(settled.find((r) => r.objectId === 'p-exp-s')?.message ?? '', /with its variation set/);
 });
+
+test('a group listed inside its own subtree is reported once, not walked forever (F3)', () => {
+  const finance = TREE_LEVELS['']![0]!;
+  const looped = addBrowseLevel(tree(), 'g-ap', [...TREE_LEVELS['g-ap']!, finance]);
+  // Finance checked with one process inside unchecked, so the walk has to go inside.
+  const r = resolveMoveSelection(looped, click(looped, 'g-fin', 'g-ap>p-pay'));
+  assert.equal(r.status, 'complete');
+  if (r.status !== 'complete') return;
+  assert.equal(r.excluded.filter((e) => e.uniqueId === 'g-fin' && /inside its own subtree/.test(e.reason)).length, 1);
+});

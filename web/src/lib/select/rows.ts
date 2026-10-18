@@ -35,11 +35,14 @@ export function visibleRows(
   expanded: ReadonlySet<string>,
 ): TreeRow[] {
   const rows: TreeRow[] = [];
+  // A tenant can list a group inside its own subtree (F3); drawn once, it is not opened again.
+  const opened = new Set<string>();
 
   const walk = (nodes: readonly BrowseNode[], depth: number): void => {
     for (const node of nodes) {
       const isGroup = node.kind === 'group';
-      const open = isGroup && expanded.has(node.key);
+      const open = isGroup && expanded.has(node.key) && !opened.has(node.key);
+      if (open) opened.add(node.key);
       rows.push({
         node,
         depth,
