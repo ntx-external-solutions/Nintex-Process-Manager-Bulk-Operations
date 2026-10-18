@@ -12,7 +12,7 @@ The PowerShell is frozen at v4.11: don't change it.
 
 ## W0. Scaffold `web/` from process-group-manager
 
-Status: Ready
+Status: Done (624b9ae)
 
 Create a Next.js app in `web/`, lifting the foundation from
 `github.com/ntx-external-solutions/process-group-manager` (public): auth route and
