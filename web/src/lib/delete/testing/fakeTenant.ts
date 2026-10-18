@@ -31,7 +31,7 @@ import { LIST_PAGE_SIZE, type ProcessListItem, type ProcessListPage } from '../.
 import type { ProcessUpdateEnvelope } from '../../pm/types.ts';
 import { ARCHIVED_LIST_TYPE } from '../../tenant/state.ts';
 import { PmRequestError } from '../../ui/gateway.ts';
-import { ARCHIVED_BATCH_SIZE, type DeleteGateway, type GroupProcess, type GroupRef, type RestoreCallOptions } from '../gateway.ts';
+import { ARCHIVED_BATCH_SIZE, type ActiveRead, type DeleteGateway, type GroupProcess, type GroupRef, type RestoreCallOptions } from '../gateway.ts';
 import type { ProcessModel } from '../model.ts';
 
 export interface FakeProcessSeed {
@@ -293,10 +293,13 @@ export class FakeTenant implements DeleteGateway {
     return out;
   }
 
-  async readModel(processUniqueId: string): Promise<ProcessModel> {
+  async readModel(processUniqueId: string): Promise<ActiveRead> {
     const process = this.process(processUniqueId);
-    this.#begin({ op: 'readModel', uniqueId: processUniqueId }, () => (process && this.#onActiveSide(process) ? null : notFound()));
-    return this.#view(process!);
+    // 404 is for a deleted process. An archived one answers 200 with only
+    // `{success, isArchived}` and no model, as the tenant was measured to (S1, S2).
+    this.#begin({ op: 'readModel', uniqueId: processUniqueId }, () => (process ? null : notFound()));
+    if (!this.#onActiveSide(process!)) return { kind: 'archived' };
+    return { kind: 'model', model: this.#view(process!) };
   }
 
   async saveModel(processUniqueId: string, envelope: ProcessUpdateEnvelope): Promise<void> {
@@ -331,9 +334,9 @@ export class FakeTenant implements DeleteGateway {
   async archiveState(processUniqueId: string): Promise<ArchiveState> {
     this.#begin({ op: 'archiveState', uniqueId: processUniqueId });
     const process = this.process(processUniqueId);
-    // The active read no longer returns an archived process, which is how a 200 that
-    // archived is told from one that is pending.
-    if (!process || !this.#onActiveSide(process)) return { found: false, isArchived: null, revisionEditId: null };
+    if (!process) return { found: false, isArchived: null, revisionEditId: null };
+    // What the live getArchiveState reads off the archived envelope: archived, no revision.
+    if (!this.#onActiveSide(process)) return { found: true, isArchived: true, revisionEditId: null };
     return { found: true, isArchived: process.archived, revisionEditId: process.revisionEditId };
   }
 

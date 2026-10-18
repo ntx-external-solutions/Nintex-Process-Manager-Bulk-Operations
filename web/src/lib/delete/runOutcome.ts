@@ -21,18 +21,24 @@ import type { LedgerRole, PlanLedgerRow } from './ledger.ts';
 import { notPorted } from './phases.ts';
 
 /**
- * The unwind's two operations. A `ReArchive` row is one of the run's targets going home;
- * a `ReArchiveHolder` row is a process that was never a target, un-archived only so its
+ * The unwind's operations. A `ReArchive` row is one of the run's targets going home; a
+ * `ReArchiveHolder` row is a process that was never a target, un-archived only so its
  * references could be read, then put back. One name for both left no way to see that a
  * holder had been moved at all (R11). Port of `$script:NpmReArchiveOperations`.
+ *
+ * `ReArchiveOrphanedHolder` is new (old T2, named in Cowork's review of phase 1): a holder
+ * parked in the holding group because its own group is gone. It is archived where it sits
+ * and stays archived without a group, which is the state it was found in, and its row
+ * should not read like a holder that went home.
  */
-export const RE_ARCHIVE_OPERATIONS = ['ReArchive', 'ReArchiveHolder'] as const;
+export const RE_ARCHIVE_OPERATIONS = ['ReArchive', 'ReArchiveHolder', 'ReArchiveOrphanedHolder'] as const;
 
 export type ReArchiveOperation = (typeof RE_ARCHIVE_OPERATIONS)[number];
 
-/** Port of `Get-NpmReArchiveOperation`. */
-export function reArchiveOperation(role: LedgerRole): ReArchiveOperation {
-  return role === 'Holder' ? 'ReArchiveHolder' : 'ReArchive';
+/** Port of `Get-NpmReArchiveOperation`, plus the parked holder. */
+export function reArchiveOperation(role: LedgerRole, parkedInHoldingGroup = false): ReArchiveOperation {
+  if (role !== 'Holder') return 'ReArchive';
+  return parkedInHoldingGroup ? 'ReArchiveOrphanedHolder' : 'ReArchiveHolder';
 }
 
 /** What the target re-check needs from a ledger row. */

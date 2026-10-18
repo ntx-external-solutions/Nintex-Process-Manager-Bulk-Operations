@@ -7,7 +7,7 @@
  * is never mutated.
  */
 
-import type { ProcessModel, ProcessNode } from './model.ts';
+import { nodeArray, nodeString, nodeValue, type ProcessModel, type ProcessNode } from './model.ts';
 import { notPorted } from './phases.ts';
 
 export type SiteCategory = 'Link' | 'Input' | 'Output' | 'Group';
@@ -120,7 +120,16 @@ export function copyProcessObject(model: ProcessModel | null | undefined): Proce
  * field or no match. Port of `Test-TargetMatch`.
  */
 export function matchTarget(node: unknown, field: string, targetUniqueIds: readonly string[]): string | null {
-  return notPorted('discovery');
+  const value = nodeString(node, field);
+  if (value.trim() === '') return null;
+  const lower = value.toLowerCase();
+  // The first target that matches, in the caller's order, as the script's loop returns it.
+  return targetUniqueIds.find((t) => t.toLowerCase() === lower) ?? null;
+}
+
+function elementId(node: unknown): number | string | null {
+  const id = nodeValue(node, 'Id');
+  return typeof id === 'number' || typeof id === 'string' ? id : null;
 }
 
 /** Sites under a node's `ChildProcessProcedures`, recursively. Port of `Find-ChildReferenceSite`. */
@@ -130,7 +139,35 @@ export function findChildReferenceSites(
   holderUniqueId: string,
   targetUniqueIds: readonly string[],
 ): ReferenceSite[] {
-  return notPorted('discovery');
+  const sites: ReferenceSite[] = [];
+  const children = nodeValue(node, 'ChildProcessProcedures');
+  if (children === null) return sites;
+
+  for (const childType of CHILD_PROCEDURE_TYPES) {
+    const items = nodeArray(children, childType);
+    items.forEach((child, i) => {
+      if (child === null || child === undefined) return;
+      const path = `${parentPath}.ChildProcessProcedures.${childType}[${i}]`;
+      const matched = matchTarget(child, 'LinkedProcessUniqueId', targetUniqueIds);
+      if (matched) {
+        // Children are always orphaned: they carry their own text, which has nothing to
+        // do with the link being cleared.
+        sites.push({
+          holderUniqueId,
+          targetUniqueId: matched,
+          path,
+          bucket: childType,
+          category: 'Link',
+          action: 'Orphan',
+          matchedField: 'LinkedProcessUniqueId',
+          elementId: elementId(child),
+          isChild: true,
+        });
+      }
+      sites.push(...findChildReferenceSites(child, path, holderUniqueId, targetUniqueIds));
+    });
+  }
+  return sites;
 }
 
 /**
@@ -144,7 +181,41 @@ export function findProcessReferenceSites(
   targetUniqueIds: readonly string[],
   targetGroupUniqueIds: readonly string[] = [],
 ): ReferenceSite[] {
-  return notPorted('discovery');
+  const sites: ReferenceSite[] = [];
+  if (model === null || model === undefined) return sites;
+
+  const holder = nodeString(model, 'UniqueId');
+  const procedures = nodeValue(model, 'ProcessProcedures');
+
+  if (procedures !== null) {
+    for (const spec of PROCEDURE_BUCKETS) {
+      nodeArray(procedures, spec.bucket).forEach((node, i) => {
+        if (node === null || node === undefined) return;
+        const path = `ProcessProcedures.${spec.bucket}[${i}]`;
+        // Group link buckets match group ids, not process ids, and are only reported.
+        const report = spec.action === 'Report';
+        const matched = matchTarget(node, spec.field, report ? targetGroupUniqueIds : targetUniqueIds);
+        if (matched) {
+          sites.push({
+            holderUniqueId: holder,
+            targetUniqueId: matched,
+            path,
+            bucket: spec.bucket,
+            category: report ? 'Group' : 'Link',
+            action: spec.action,
+            matchedField: spec.field,
+            elementId: elementId(node),
+            isChild: false,
+          });
+        }
+        // Every procedure node can carry children, not just Activity.
+        sites.push(...findChildReferenceSites(node, path, holder, targetUniqueIds));
+      });
+    }
+  }
+
+  sites.push(...findInputOutputReferenceSites(model, targetUniqueIds));
+  return sites;
 }
 
 /**
@@ -155,7 +226,32 @@ export function findInputOutputReferenceSites(
   model: ProcessModel | null | undefined,
   targetUniqueIds: readonly string[],
 ): ReferenceSite[] {
-  return notPorted('discovery');
+  const sites: ReferenceSite[] = [];
+  if (model === null || model === undefined) return sites;
+
+  const holder = nodeString(model, 'UniqueId');
+  for (const spec of IO_BUCKETS) {
+    // Live payloads use null, not [], when unused.
+    const container = nodeValue(model, spec.container);
+    if (container === null) continue;
+    nodeArray(container, spec.bucket).forEach((node, i) => {
+      if (node === null || node === undefined) return;
+      const matched = matchTarget(node, spec.field, targetUniqueIds);
+      if (!matched) return;
+      sites.push({
+        holderUniqueId: holder,
+        targetUniqueId: matched,
+        path: `${spec.container}.${spec.bucket}[${i}]`,
+        bucket: spec.bucket,
+        category: spec.category,
+        action: 'Remove',
+        matchedField: spec.field,
+        elementId: elementId(node),
+        isChild: false,
+      });
+    });
+  }
+  return sites;
 }
 
 /**

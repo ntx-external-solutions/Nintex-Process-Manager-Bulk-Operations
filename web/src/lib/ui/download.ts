@@ -30,12 +30,12 @@ export function downloadCsv(filename: string, text: string): void {
 }
 
 /** `archive-results-2026-10-18.csv`, dated, because operators keep several. */
-export function datedFilename(stem: string): string {
+export function datedFilename(stem: string, extension = 'csv'): string {
   const now = new Date();
   const date = [
     now.getFullYear(),
     String(now.getMonth() + 1).padStart(2, '0'),
     String(now.getDate()).padStart(2, '0'),
   ].join('-');
-  return `${stem}-${date}.csv`;
+  return `${stem}-${date}.${extension}`;
 }

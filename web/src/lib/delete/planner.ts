@@ -11,13 +11,33 @@
  * Planning reads; the only writes are those restores, through `restoreProcess`.
  */
 
-import type { DependencyClaim } from './claims.ts';
+import { failureOf } from '../archive/outcome.ts';
+import { defaultIsFatal } from '../exec/runner.ts';
+import { readGroupExists } from '../select/archived.ts';
+import { ACTIVE_LIST_TYPE, ARCHIVED_LIST_TYPE, INDEX_PAGE_SIZE } from '../tenant/state.ts';
+import {
+  dependencyCandidates,
+  groupSitesByHolder,
+  parseDependencyResponse,
+  reconcileDependencies,
+  type DependencyClaim,
+  type Reconciliation,
+} from './claims.ts';
 import type { DeleteEventSink } from './events.ts';
-import type { DeleteGateway } from './gateway.ts';
-import type { DependencyPlan, FailedTarget, ProcessStateSnapshot } from './ledger.ts';
-import type { DeleteIndex, DeleteIndexEntry, ProcessModel } from './model.ts';
-import { notPorted } from './phases.ts';
-import type { ReferenceSite } from './references.ts';
+import { restoreProcess } from './executor.ts';
+import { ARCHIVED_BATCH_SIZE, type DeleteGateway } from './gateway.ts';
+import {
+  ledgerToPlanRows,
+  newDependencyPlan,
+  type DependencyPlan,
+  type FailedTarget,
+  type OrphanedHolder,
+  type ParticipantRecord,
+  type ProcessStateSnapshot,
+} from './ledger.ts';
+import { nodeArray, nodeInt, nodeString, nodeValue, type DeleteIndex, type DeleteIndexEntry, type ProcessModel } from './model.ts';
+import { resolveClaimName } from './names.ts';
+import { findInputOutputReferenceSites, findProcessReferenceSites, type ReferenceSite } from './references.ts';
 
 /**
  * One dependency check, never a bare array. The script carries success in a field because
@@ -34,12 +54,23 @@ export interface DependencyCheck {
   error: string | null;
 }
 
+/** A dead session ends planning; anything else is that one read failing. */
+type FatalCheck = (error: unknown) => string | null;
+
 /** `CheckProcessDependencies` for one process. Port of `Get-ProcessDependencyClaim`. */
-export function checkProcessDependencies(
+export async function checkProcessDependencies(
   gateway: Pick<DeleteGateway, 'checkDependencies'>,
   processUniqueId: string,
+  isFatal: FatalCheck = defaultIsFatal,
 ): Promise<DependencyCheck> {
-  return notPorted('discovery');
+  try {
+    const response = await gateway.checkDependencies(processUniqueId);
+    return { success: true, claims: parseDependencyResponse(response, processUniqueId), status: 200, error: null };
+  } catch (error) {
+    if (isFatal(error)) throw error;
+    const failure = failureOf(error);
+    return { success: false, claims: [], status: failure.status, error: failure.detail ?? failure.error };
+  }
 }
 
 /**
@@ -47,10 +78,40 @@ export function checkProcessDependencies(
  * whether the row reported `groupExists` at all. Active first, then archived. Port of
  * `Get-NpmProcessIndex`.
  */
-export function loadDeleteIndex(
+export async function loadDeleteIndex(
   gateway: Pick<DeleteGateway, 'listProcesses'>,
+  options: { maxPages?: number; onProgress?: (loaded: number) => void } = {},
 ): Promise<Map<string, DeleteIndexEntry>> {
-  return notPorted('discovery');
+  const index = new Map<string, DeleteIndexEntry>();
+  const maxPages = options.maxPages ?? 500;
+
+  for (const listType of [ACTIVE_LIST_TYPE, ARCHIVED_LIST_TYPE]) {
+    for (let page = 1; page <= maxPages; page++) {
+      const items = nodeArray(await gateway.listProcesses(page, listType), 'items');
+      for (const item of items) {
+        const uniqueId = nodeString(item, 'processUniqueId');
+        if (!uniqueId) continue;
+        const flag = readGroupExists(nodeValue(item, 'groupExists'));
+        index.set(uniqueId.toLowerCase(), {
+          uniqueId,
+          // The script reads `id`; the typed listing calls it `processId`.
+          numericId: nodeInt(item, 'id') ?? nodeInt(item, 'processId'),
+          name: nodeString(item, 'processName'),
+          isArchived: listType === ARCHIVED_LIST_TYPE,
+          groupId: nodeInt(item, 'groupId'),
+          groupUniqueId: nodeString(item, 'groupUniqueId') || null,
+          groupName: nodeString(item, 'groupName'),
+          groupExists: flag.exists,
+          // Absent and false are not the same claim: control flow treats absence as "the
+          // group is there", but reporting has to be able to say the listing never answered.
+          groupExistsReported: flag.reported,
+        });
+      }
+      options.onProgress?.(index.size);
+      if (items.length < INDEX_PAGE_SIZE) break;
+    }
+  }
+  return index;
 }
 
 /**
@@ -62,19 +123,55 @@ export function loadDeleteIndex(
  */
 export type ModelCache = Map<string, ProcessModel>;
 
+async function readActive(
+  gateway: Pick<DeleteGateway, 'readModel' | 'readArchivedModels'>,
+  processUniqueId: string,
+  isFatal: FatalCheck,
+): Promise<ProcessModel | null> {
+  try {
+    const read = await gateway.readModel(processUniqueId);
+    if (read.kind === 'model') return read.model;
+  } catch (error) {
+    if (isFatal(error)) throw error;
+    return null;
+  }
+  // The active read says it is archived (200, no model). The script took that envelope
+  // for the model and walked an empty process; the batch read is where an archived one is.
+  return readArchived(gateway, processUniqueId, isFatal);
+}
+
+async function readArchived(
+  gateway: Pick<DeleteGateway, 'readArchivedModels'>,
+  processUniqueId: string,
+  isFatal: FatalCheck,
+): Promise<ProcessModel | null> {
+  try {
+    return (await gateway.readArchivedModels([processUniqueId]))[0] ?? null;
+  } catch (error) {
+    if (isFatal(error)) throw error;
+    return null;
+  }
+}
+
 /**
  * A model from the endpoint matching the process's state, the batch read for archived and
  * the active read otherwise; null when it cannot be read. The wrong endpoint returns
  * nothing, which a caller would read as "no references". Port of
  * `Get-NpmProcessModelAnyState`.
  */
-export function readModelAnyState(
+export async function readModelAnyState(
   gateway: Pick<DeleteGateway, 'readModel' | 'readArchivedModels'>,
   processUniqueId: string,
   isArchived: boolean,
   cache?: ModelCache | null,
+  isFatal: FatalCheck = defaultIsFatal,
 ): Promise<ProcessModel | null> {
-  return notPorted('discovery');
+  const key = processUniqueId.toLowerCase();
+  const cached = cache?.get(key);
+  if (cached) return cached;
+  const model = isArchived ? await readArchived(gateway, processUniqueId, isFatal) : await readActive(gateway, processUniqueId, isFatal);
+  if (model && cache) cache.set(key, model);
+  return model;
 }
 
 export interface HiddenReferenceScanOptions {
@@ -82,6 +179,8 @@ export interface HiddenReferenceScanOptions {
   includeActive?: boolean | undefined;
   batchSize?: number | undefined;
   cache?: ModelCache | null | undefined;
+  isFatal?: FatalCheck | undefined;
+  onEvent?: DeleteEventSink | undefined;
 }
 
 /**
@@ -90,13 +189,68 @@ export interface HiddenReferenceScanOptions {
  * restore, and knowing to restore would need finding them. Targets are never read. Port
  * of `Find-HiddenInputOutputReference`.
  */
-export function findHiddenInputOutputReferences(
+export async function findHiddenInputOutputReferences(
   gateway: Pick<DeleteGateway, 'readModel' | 'readArchivedModels'>,
   targetUniqueIds: readonly string[],
   index: DeleteIndex,
-  options?: HiddenReferenceScanOptions,
+  options: HiddenReferenceScanOptions = {},
 ): Promise<ReferenceSite[]> {
-  return notPorted('discovery');
+  const isFatal = options.isFatal ?? defaultIsFatal;
+  const batchSize = Math.min(options.batchSize ?? ARCHIVED_BATCH_SIZE, ARCHIVED_BATCH_SIZE);
+  const cache = options.cache ?? null;
+  const sites: ReferenceSite[] = [];
+
+  // A reference a target holds to another target dies with both, and a target is never
+  // edited, so reading one here buys nothing.
+  const targets = new Set(targetUniqueIds.map((t) => t.toLowerCase()));
+  const archivedIds: string[] = [];
+  const activeIds: string[] = [];
+  for (const entry of index.values()) {
+    if (targets.has(entry.uniqueId.toLowerCase())) continue;
+    if (entry.isArchived) archivedIds.push(entry.uniqueId);
+    else if (options.includeActive) activeIds.push(entry.uniqueId);
+  }
+  if (archivedIds.length + activeIds.length === 0) return sites;
+
+  // Cached only on a hit: a holder found here is read again for the ledger, and keeping
+  // the rest would hold hundreds of models to serve no reads at all.
+  const scan = (model: ProcessModel, id: string) => {
+    const found = findInputOutputReferenceSites(model, targetUniqueIds);
+    sites.push(...found);
+    if (found.length > 0) cache?.set(id.toLowerCase(), model);
+  };
+
+  for (const [i, id] of activeIds.entries()) {
+    options.onEvent?.({ kind: 'progress', label: 'Input/Output scan: active processes', done: i + 1, total: activeIds.length });
+    // The batch endpoint is for archived processes; active ones are read one by one.
+    const model = cache?.get(id.toLowerCase()) ?? (await readActive(gateway, id, isFatal));
+    if (model) scan(model, id);
+  }
+
+  const toFetch: string[] = [];
+  for (const id of archivedIds) {
+    const cached = cache?.get(id.toLowerCase());
+    if (cached) sites.push(...findInputOutputReferenceSites(cached, targetUniqueIds));
+    else toFetch.push(id);
+  }
+  for (let i = 0; i < toFetch.length; i += batchSize) {
+    const chunk = toFetch.slice(i, i + batchSize);
+    let models: ProcessModel[] = [];
+    try {
+      models = await gateway.readArchivedModels(chunk);
+    } catch (error) {
+      // The script skips a batch that fails and carries on, as here.
+      if (isFatal(error)) throw error;
+    }
+    for (const model of models) scan(model, nodeString(model, 'UniqueId'));
+    options.onEvent?.({
+      kind: 'progress',
+      label: 'Input/Output scan: archived processes',
+      done: Math.min(i + batchSize, toFetch.length),
+      total: toFetch.length,
+    });
+  }
+  return sites;
 }
 
 export interface DeletePlanOptions {
@@ -121,6 +275,7 @@ export interface DeletePlanOptions {
   preHoldSnapshot?: ProcessStateSnapshot | null | undefined;
   cache?: ModelCache | null | undefined;
   onEvent?: DeleteEventSink | undefined;
+  isFatal?: FatalCheck | undefined;
   now?: Date | undefined;
 }
 
@@ -131,8 +286,320 @@ export interface DeletePlanOptions {
  * the plan, and the blocked plan still carries the ledger, because it is the only record
  * of what was restored. Port of `New-ProcessDeletePlan`.
  */
-export function buildDeletePlan(gateway: DeleteGateway, options: DeletePlanOptions): Promise<DependencyPlan> {
-  return notPorted('discovery');
+/** What planning calls. Only a real run restores; a dry run's gateway can refuse to. */
+export type PlanningGateway = Pick<DeleteGateway, 'listProcesses' | 'checkDependencies' | 'readModel' | 'readArchivedModels' | 'restore'>;
+
+export async function buildDeletePlan(gateway: PlanningGateway, options: DeletePlanOptions): Promise<DependencyPlan> {
+  const isFatal = options.isFatal ?? defaultIsFatal;
+  const allowRestore = options.allowRestore ?? true;
+  const holdingGroupId = options.holdingGroupId ?? null;
+  const maxPasses = options.maxPasses ?? 3;
+  const cache: ModelCache = options.cache ?? new Map();
+  const index = options.index;
+  let targetIds = [...options.targetUniqueIds];
+
+  const plan = newDependencyPlan(options.siteUrl, targetIds, options.now);
+  const ledger = new Map<string, ParticipantRecord>();
+  let allClaims: DependencyClaim[] = [];
+  let restoredTotal = 0;
+  const log = (line: string) => {
+    plan.log.push(line);
+    options.onEvent?.({ kind: 'log', line });
+  };
+  const progress = (label: string, done: number, total: number) => options.onEvent?.({ kind: 'progress', label, done, total });
+  const finish = (): DependencyPlan => {
+    // Every exit carries the ledger: a blocked plan is exactly when the caller needs to
+    // know what the run un-archived.
+    plan.ledger = ledgerToPlanRows(ledger);
+    return plan;
+  };
+
+  // Which entries are the run's own targets. Everything else is a dependency holder, which
+  // survives the run and needs a different results row.
+  const targetLookupForRole = new Set(targetIds.map((t) => t.toLowerCase()));
+
+  const addLedgerEntry = async (uniqueId: string): Promise<ParticipantRecord | null> => {
+    const key = uniqueId.toLowerCase();
+    const existing = ledger.get(key);
+    if (existing) return existing;
+
+    let entry: Pick<DeleteIndexEntry, 'uniqueId' | 'numericId' | 'name' | 'isArchived' | 'groupId' | 'groupExists'> | null =
+      index.get(key) ?? null;
+
+    if (!entry) {
+      // Neither listing returned it, yet the dependency API named it. Processes have been
+      // seen that both sweeps miss and the batch endpoint still serves, so both reads are
+      // tried before giving up, and an unreachable one is said out loud.
+      let recovered = await readModelAnyState(gateway, uniqueId, true, cache, isFatal);
+      let recoveredArchived = true;
+      if (!recovered) {
+        recovered = await readModelAnyState(gateway, uniqueId, false, cache, isFatal);
+        recoveredArchived = false;
+      }
+      if (!recovered) {
+        const label = resolveClaimName(allClaims, uniqueId);
+        plan.unresolved.push({ uniqueId, name: label, reason: 'Absent from both process lists and not fetchable by either endpoint' });
+        log(`UNRESOLVED participant ${uniqueId} (${label}): not in the index and not fetchable; any reference it holds will NOT be removed`);
+        return null;
+      }
+      const stateId = nodeInt(recovered, 'StateId');
+      if (stateId !== null) recoveredArchived = stateId !== 1;
+      entry = {
+        uniqueId,
+        numericId: nodeInt(recovered, 'Id'),
+        name: nodeString(recovered, 'Name'),
+        isArchived: recoveredArchived,
+        groupId: nodeInt(recovered, 'GroupId'),
+        groupExists: true,
+      };
+      log(`Recovered participant ${uniqueId} (${entry.name}) by direct fetch; it is missing from both process list sweeps`);
+    }
+
+    // The pre-Hold snapshot wins wherever it has an entry: the index was refreshed after
+    // the Hold phase moved archived targets, and reports their moved state.
+    const snap = options.preHoldSnapshot?.get(key) ?? null;
+    const isArchivedNow = snap ? snap.isArchivedNow : entry.isArchived;
+    const model = await readModelAnyState(gateway, uniqueId, isArchivedNow, cache, isFatal);
+
+    let groupUniqueId = nodeString(model, 'GroupUniqueId');
+    let groupId = nodeInt(model, 'GroupId') ?? entry.groupId;
+    let wasArchived = entry.isArchived;
+    let restoredByThisRun = false;
+    let groupExists = entry.groupExists;
+    if (snap) {
+      wasArchived = snap.wasArchived;
+      restoredByThisRun = snap.restoredByThisRun;
+      if (snap.originalGroupId !== null) groupId = snap.originalGroupId;
+      if (snap.originalGroupUniqueId) groupUniqueId = snap.originalGroupUniqueId;
+      // The snapshot names the home group, so it also says whether that group is there.
+      groupExists = snap.originalGroupExists;
+    }
+
+    const record: ParticipantRecord = {
+      uniqueId: entry.uniqueId,
+      name: entry.name,
+      numericId: entry.numericId,
+      wasArchived,
+      originalGroupUniqueId: groupUniqueId,
+      originalGroupId: groupId,
+      originalGroupExists: groupExists,
+      restoredByThisRun,
+      role: targetLookupForRole.has(key) ? 'Target' : 'Holder',
+      parkedInHoldingGroup: false,
+      denormalized: false,
+      deleted: false,
+      model,
+    };
+    ledger.set(key, record);
+    return record;
+  };
+
+  // ---- Pass loop: discover, restore, re-discover until the set is stable ----
+  for (let pass = 1; pass <= maxPasses; pass++) {
+    allClaims = [];
+    let failed: string[] = [];
+
+    for (const [i, target] of targetIds.entries()) {
+      progress(`Discovery pass ${pass}: checking dependencies`, i + 1, targetIds.length);
+      const check = await checkProcessDependencies(gateway, target, isFatal);
+      // An empty claims list is a process with no dependencies, which is not a failure.
+      if (!check.success) failed.push(target);
+      else allClaims.push(...check.claims);
+    }
+
+    // One retry before giving up: a transient 5xx should not throw away twenty minutes
+    // of discovery a large run has already paid for.
+    let stillFailed: FailedTarget[] = [];
+    for (const [i, target] of failed.entries()) {
+      progress(`Discovery pass ${pass}: retrying failed checks`, i + 1, failed.length);
+      const check = await checkProcessDependencies(gateway, target, isFatal);
+      if (!check.success) stillFailed.push({ uniqueId: target, status: check.status, error: check.error });
+      else allClaims.push(...check.claims);
+    }
+    failed = [];
+
+    if (stillFailed.length > 0) {
+      const names = stillFailed.map((f) => {
+        const label = index.get(f.uniqueId.toLowerCase())?.name || f.uniqueId;
+        return `${label} (${f.uniqueId}): HTTP ${f.status} ${f.error ?? ''}`.trimEnd();
+      });
+      const proceed = options.onFailedTargets ? await options.onFailedTargets(stillFailed) : false;
+      if (!proceed) {
+        // A failed check is NOT an empty dependency list. Proceeding would delete a
+        // process whose references were never examined.
+        plan.status = 'Blocked';
+        plan.failedTargets = stillFailed;
+        log(`Dependency check failed for ${stillFailed.length} target(s) after retry: ${names.join('; ')}`);
+        return finish();
+      }
+      // Dropped from the target set outright, so nothing downstream can delete one.
+      const excluded = new Set(stillFailed.map((f) => f.uniqueId.toLowerCase()));
+      targetIds = targetIds.filter((t) => !excluded.has(t.toLowerCase()));
+      plan.targetUniqueIds = [...targetIds];
+      plan.failedTargets = stillFailed;
+      log(`Excluded ${stillFailed.length} target(s) whose dependency check failed: ${names.join('; ')}`);
+      if (targetIds.length === 0) {
+        plan.status = 'Blocked';
+        log('Every target failed its dependency check; nothing is left to plan');
+        return finish();
+      }
+    }
+    stillFailed = [];
+
+    const candidates = dependencyCandidates(allClaims, targetIds);
+    for (const [i, candidate] of candidates.entries()) {
+      progress(`Discovery pass ${pass}: reading process models`, i + 1, candidates.length);
+      await addLedgerEntry(candidate);
+    }
+
+    // Restore archived participants so their suppressed Input/Output edges show next pass.
+    let restoredThisPass = 0;
+    const orphanedHolders: OrphanedHolder[] = [];
+    if (allowRestore && holdingGroupId !== null) {
+      for (const candidate of candidates) {
+        const record = ledger.get(candidate.toLowerCase());
+        if (!record || !record.wasArchived || record.restoredByThisRun) continue;
+
+        // In place: holders survive the run, so parking them would strand them.
+        let groupId = record.originalGroupId ?? holdingGroupId;
+        // A holder whose own group was deleted has nowhere to go back to. It takes the
+        // answer orphaned targets already get: held in the holding group, read there, and
+        // archived where it sits on the way out (old T2).
+        const parked = record.originalGroupId !== null && !record.originalGroupExists;
+        if (parked) {
+          groupId = holdingGroupId;
+          options.onEvent?.({ kind: 'holderHeld', uniqueId: record.uniqueId, name: record.name, originalGroupId: record.originalGroupId });
+        }
+
+        const restored = await restoreProcess(gateway, record.uniqueId, groupId, { isFatal });
+        if (restored.ok) {
+          record.restoredByThisRun = true;
+          record.parkedInHoldingGroup = parked;
+          // Read again on the next pass: the cached copy is the archived one.
+          cache.delete(record.uniqueId.toLowerCase());
+          restoredThisPass++;
+          restoredTotal++;
+          log(
+            parked
+              ? `Held ${record.uniqueId} (${record.name}) in the holding group for discovery; its own group ${record.originalGroupId} no longer exists`
+              : `Restored ${record.uniqueId} (${record.name}) to group ${groupId} for discovery`,
+          );
+        } else if (parked) {
+          // The holding group was the fallback. Refused there too, it cannot be read
+          // anywhere, and a target it points at cannot be deleted safely.
+          orphanedHolders.push({
+            uniqueId: record.uniqueId,
+            name: record.name,
+            originalGroupId: record.originalGroupId,
+            reason: `its group no longer exists and it could not be held in the holding group either (HTTP ${restored.statusCode})`,
+          });
+        } else {
+          log(`FAILED to restore ${record.uniqueId} (${record.name}); its Input/Output edges stay hidden`);
+        }
+      }
+    }
+
+    if (orphanedHolders.length > 0) {
+      plan.orphanedHolders = orphanedHolders;
+      plan.status = 'Blocked';
+      for (const holder of orphanedHolders) {
+        log(
+          `BLOCKED: dependency holder ${holder.uniqueId} (${holder.name}) is archived and cannot be restored because ${holder.reason} (group ${holder.originalGroupId}). Its Input/Output references cannot be read, so a target it points at cannot be deleted safely.`,
+        );
+      }
+      log('Move these holders into a group that exists, then re-run.');
+      return finish();
+    }
+
+    if (restoredThisPass === 0) break;
+  }
+
+  // ---- The API blind spot: archived Input/Output holders ----
+  const freshIndex = restoredTotal > 0 ? await loadDeleteIndex(gateway) : index;
+  const blindSites = await findHiddenInputOutputReferences(gateway, targetIds, freshIndex, {
+    includeActive: options.scanActiveForInputOutput,
+    cache,
+    isFatal,
+    onEvent: options.onEvent,
+  });
+  for (const site of blindSites) {
+    if (!ledger.has(site.holderUniqueId.toLowerCase())) {
+      await addLedgerEntry(site.holderUniqueId);
+      log(`Archive scan found holder ${site.holderUniqueId} that the dependency API never reported`);
+    }
+  }
+
+  // ---- Locate: walk every participant, both directions ----
+  for (const target of targetIds) await addLedgerEntry(target);
+  const participants = [...ledger.values()];
+  const targetLookup = new Set(targetIds.map((t) => t.toLowerCase()));
+
+  const allSites: ReferenceSite[] = [];
+  for (const record of participants) {
+    if (!record.model) {
+      log(`Could not fetch model for ${record.uniqueId} (${record.name}); its references were not examined`);
+      continue;
+    }
+    if (targetLookup.has(record.uniqueId.toLowerCase())) {
+      // Located for reconciliation only: a target is about to be deleted, not edited.
+      const others = participants.filter((p) => p.uniqueId !== record.uniqueId).map((p) => p.uniqueId);
+      allSites.push(...findProcessReferenceSites(record.model, others));
+    } else {
+      allSites.push(...findProcessReferenceSites(record.model, targetIds));
+    }
+  }
+
+  // ---- Filter: self-references and target-held sites are not work ----
+  const workSites = allSites.filter(
+    (s) =>
+      s.holderUniqueId.toLowerCase() !== s.targetUniqueId.toLowerCase() &&
+      !targetLookup.has(s.holderUniqueId.toLowerCase()) &&
+      targetLookup.has(s.targetUniqueId.toLowerCase()),
+  );
+
+  // ---- Reconcile per pair ----
+  const reconciliation: Reconciliation[] = [];
+  for (const target of targetIds) {
+    const related = [
+      ...new Map(
+        allClaims
+          .filter((c) => c.queriedUniqueId.toLowerCase() === target.toLowerCase())
+          .map((c) => [c.relatedUniqueId.toLowerCase(), c.relatedUniqueId] as const),
+      ).values(),
+    ];
+    for (const relatedId of related) {
+      const record = ledger.get(relatedId.toLowerCase());
+      const relatedIsArchived = record ? record.wasArchived && !record.restoredByThisRun : false;
+      reconciliation.push(
+        ...reconcileDependencies({
+          queriedUniqueId: target,
+          relatedUniqueId: relatedId,
+          claims: allClaims,
+          sites: allSites,
+          relatedIsArchived,
+          // Both ends in the delete set: not work, and not a decision.
+          bothSidesDeleted: targetLookup.has(relatedId.toLowerCase()),
+        }),
+      );
+    }
+  }
+
+  plan.claims = allClaims;
+  plan.sites = workSites;
+  plan.workItems = groupSitesByHolder(workSites);
+  plan.reconciliation = reconciliation;
+  plan.status = 'Planned';
+
+  if (!allowRestore) {
+    const archivedCount = [...ledger.values()].filter((r) => r.wasArchived).length;
+    if (archivedCount > 0) {
+      plan.status = 'PlannedIncomplete';
+      log(
+        `Preview did not restore ${archivedCount} archived participant(s); their Input/Output references are hidden and this plan understates the work`,
+      );
+    }
+  }
+  return finish();
 }
 
 /**
@@ -141,7 +608,13 @@ export function buildDeletePlan(gateway: DeleteGateway, options: DeletePlanOptio
  * `Resolve-PlanProcessName`.
  */
 export function planProcessName(plan: DependencyPlan, index: DeleteIndex | null, uniqueId: string): string {
-  return notPorted('discovery');
+  if (!uniqueId) return '(unknown)';
+  const lower = uniqueId.toLowerCase();
+  const record = plan.ledger.find((r) => r.uniqueId.toLowerCase() === lower);
+  if (record?.name) return record.name;
+  const entry = index?.get(lower);
+  if (entry?.name) return entry.name;
+  return resolveClaimName(plan.claims, uniqueId);
 }
 
 /**
@@ -149,5 +622,99 @@ export function planProcessName(plan: DependencyPlan, index: DeleteIndex | null,
  * rather than claiming restores it never made. Port of `Show-ProcessDeletePlan`'s text.
  */
 export function planSummaryLines(plan: DependencyPlan, index: DeleteIndex | null): string[] {
-  return notPorted('discovery');
+  const lines: string[] = [];
+  lines.push(`Targets to delete: ${plan.targetUniqueIds.length}`);
+  lines.push(`Processes to edit: ${plan.workItems.length}`);
+  lines.push(`Reference sites: ${plan.sites.length}`);
+
+  const archived = plan.ledger.filter((r) => r.wasArchived);
+  if (archived.length > 0) {
+    const restored = plan.ledger.filter((r) => r.restoredByThisRun);
+    lines.push(
+      restored.length > 0
+        ? `Archived involved: ${archived.length} (${restored.length} restored for the run, re-archived afterwards)`
+        : `Archived involved: ${archived.length} (none restored; a real run would restore them)`,
+    );
+  }
+
+  const ledgerRow = (id: string) => plan.ledger.find((r) => r.uniqueId.toLowerCase() === id.toLowerCase());
+  if (plan.workItems.length > 0) {
+    lines.push('References to remove, by holding process:');
+    for (const item of plan.workItems) {
+      const record = ledgerRow(item.holderUniqueId);
+      lines.push(`  ${record?.name || item.holderUniqueId}${record?.wasArchived ? ' [archived]' : ''}`);
+      for (const site of item.sites) lines.push(`      ${site.action.padEnd(7)} ${site.path}`);
+    }
+  }
+
+  const groupSites = plan.sites.filter((s) => s.action === 'Report');
+  if (groupSites.length > 0) {
+    lines.push('Group links (reported, never removed automatically):');
+    for (const site of groupSites) lines.push(`  ${site.holderUniqueId} -> ${site.targetUniqueId}`);
+  }
+
+  if (plan.unresolved.length > 0) {
+    lines.push(`UNRESOLVED PARTICIPANTS (${plan.unresolved.length}):`);
+    lines.push('The dependency API named these processes but neither process list nor either fetch endpoint returned them. Any reference they hold will NOT be removed.');
+    for (const u of plan.unresolved) {
+      lines.push(`  ${u.name}  (${u.uniqueId})`);
+      lines.push(`      ${u.reason}`);
+    }
+  }
+
+  const notApplicable = plan.reconciliation.filter((r) => r.status === 'NotApplicable');
+  if (notApplicable.length > 0) {
+    lines.push(`${notApplicable.length} reconciliation entr(ies) skipped: both sides of the pair are being deleted. They are recorded in the plan file for audit but need no decision.`);
+  }
+  const known = plan.reconciliation.filter((r) => r.status === 'MatchWithKnownAsymmetry');
+  if (known.length > 0) {
+    lines.push(`${known.length} entr(ies) differ by the known child-reference asymmetry (warning, not a gate). See the open question in API_ARCHITECTURE.md.`);
+  }
+
+  const problems = plan.reconciliation.filter((r) => r.status === 'Mismatch');
+  if (problems.length > 0) {
+    lines.push(`RECONCILIATION MISMATCHES (${problems.length}):`);
+    lines.push('The dependency API and the process JSON disagree. Investigate before deleting.');
+    const targets = new Set(plan.targetUniqueIds.map((t) => t.toLowerCase()));
+    // Grouped by the queried process, so an operator scans by process rather than down
+    // 120 undifferentiated rows.
+    const byQueried = new Map<string, Reconciliation[]>();
+    for (const p of problems) byQueried.set(p.queriedUniqueId, [...(byQueried.get(p.queriedUniqueId) ?? []), p]);
+    for (const [queried, group] of byQueried) {
+      lines.push(`  ${planProcessName(plan, index, queried)}`);
+      for (const p of group) {
+        const survives = targets.has(p.relatedUniqueId.toLowerCase()) ? 'also a target' : 'survives';
+        lines.push(
+          `    ${p.category.padEnd(6)} -> ${planProcessName(plan, index, p.relatedUniqueId)}   claimed ${p.claimed}, located ${p.located}   [${survives}]`,
+        );
+        const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+        for (const site of plan.sites) {
+          if (
+            site.category === p.category &&
+            ((same(site.holderUniqueId, p.queriedUniqueId) && same(site.targetUniqueId, p.relatedUniqueId)) ||
+              (same(site.holderUniqueId, p.relatedUniqueId) && same(site.targetUniqueId, p.queriedUniqueId)))
+          ) {
+            lines.push(`           ${site.path}`);
+          }
+        }
+      }
+    }
+  }
+
+  const suppressed = plan.reconciliation.filter((r) => r.suppressed && r.located > 0);
+  if (suppressed.length > 0) {
+    lines.push('Suppressed by archiving (found in JSON, hidden from the API):');
+    for (const s of suppressed) lines.push(`  ${s.category}: ${s.located} reference(s) on ${s.relatedUniqueId}`);
+  }
+
+  if (plan.log.length > 0) {
+    lines.push('Plan log:');
+    for (const line of plan.log) lines.push(`  ${line}`);
+  }
+
+  if (plan.status === 'PlannedIncomplete') {
+    lines.push('THIS PLAN IS INCOMPLETE');
+    lines.push('Preview mode does not restore archived processes, so their Input and Output references are hidden. A real run will find more than this preview shows.');
+  }
+  return lines;
 }

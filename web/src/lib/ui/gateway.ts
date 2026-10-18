@@ -10,10 +10,12 @@
 import type { ArchiveGateway, ArchiveState } from '../archive/outcome.ts';
 import type { FactsGateway } from '../cleanup/facts.ts';
 import type { CleanupGateway } from '../cleanup/run.ts';
+import type { PlanningGateway } from '../delete/planner.ts';
 import type { MovePlanReads } from '../move/plan.ts';
 import type { MoveGateway } from '../move/run.ts';
 import type { OwnershipGateway } from '../ownership/run.ts';
 import type { OwnershipState, SetOwnershipResult } from '../pm/ownership.ts';
+import type { ActiveRead } from '../pm/dependencies.ts';
 import type { DirectoryUser } from '../pm/scim.ts';
 import type { GroupViewerCount, MovableNodeType } from '../pm/groups.ts';
 import type { TreeItem, ValidateActionResponse } from '../pm/types.ts';
@@ -167,6 +169,23 @@ export function browserOwnershipGateway(): OwnershipGateway & {
       callPm({ op: 'process.publishNow', processUniqueId, processRevisionEditId, publishMessage }),
     ownership: (processUniqueId) => callPm<OwnershipState>({ op: 'process.ownership', processUniqueId }),
     directory: (scimApiKey) => callPm<DirectoryUser[]>({ op: 'users.directory', scimApiKey }),
+  };
+}
+
+/**
+ * The reads a Bulk Delete plan is built from. Phase 2 of W5 plans without writing, so
+ * `restore` refuses: a dry run that restored a process would not be a dry run.
+ */
+export function browserPlanningGateway(): PlanningGateway {
+  return {
+    listProcesses: (page, listType) => callPm<ProcessListPage>({ op: 'processes.list', page, listType }),
+    checkDependencies: (processUniqueId) => callPm<unknown>({ op: 'process.dependencies', processUniqueId }),
+    readModel: (processUniqueId) => callPm<ActiveRead>({ op: 'process.model', processUniqueId }),
+    readArchivedModels: (processUniqueIds) =>
+      callPm<Record<string, unknown>[]>({ op: 'processes.archivedModels', processUniqueIds: [...processUniqueIds] }),
+    restore: async () => {
+      throw new Error('A dry run does not restore anything.');
+    },
   };
 }
 

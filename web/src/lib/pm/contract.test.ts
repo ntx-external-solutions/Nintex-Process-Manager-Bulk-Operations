@@ -14,6 +14,7 @@ import { breadcrumbTitles, getChildGroups, readAssociatedContents } from './grou
 import {
   getArchiveState,
   getGroupDocuments,
+  readProcessEnvelope,
   getLatestRevision,
   getVariationSet,
   publishProcess,
@@ -289,4 +290,13 @@ test('a group whose only document is archived still has documents', async () => 
     sleep: async () => {},
   };
   assert.deepEqual(await getGroupDocuments(ctx, 'g-1'), { total: 1, names: ['Policy.pdf (archived)'] });
+});
+
+test('the process envelope is a model, the archived answer, or not understood', () => {
+  const model = { processJson: { UniqueId: 'p' }, processActions: {} };
+  assert.deepEqual(readProcessEnvelope(model), { kind: 'model', response: model });
+  assert.deepEqual(readProcessEnvelope({ success: true, isArchived: true }), { kind: 'archived' });
+  assert.deepEqual(readProcessEnvelope({ success: true, IsArchived: 'true' }), { kind: 'archived' }, 'read case-insensitively');
+  assert.throws(() => readProcessEnvelope({ success: true }), /neither a process nor an archived flag/);
+  assert.throws(() => readProcessEnvelope(null));
 });

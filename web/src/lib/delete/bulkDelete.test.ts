@@ -519,7 +519,7 @@ test('a row carries its status code and group in their own columns, and every ro
 // Every results file uses ObjectID, which the CSV reader did not accept, so re-running the
 // failures out of a results file silently produced "No processes to delete".
 
-test('ObjectID and its spellings are read as an id', { skip: PHASE.discovery }, () => {
+test('ObjectID and its spellings are read as an id', () => {
   assert.equal(idFromCsvRow({ ObjectType: 'Process', ObjectID: T1, Name: 'Alpha' }), T1, 'ObjectID is read as an id');
   assert.equal(idFromCsvRow({ ObjectId: T1 }), T1, 'and so is ObjectId');
   assert.equal(idFromCsvRow({ ProcessID: '', ObjectID: T1 }), T1, 'a header that exists but is blank on this row does not swallow the lookup');
@@ -662,7 +662,9 @@ test('a holder whose group is gone is held, read, archived again, and its row sa
 
   const parkedRow = rows.find((r) => r.objectId === R11_DEAD_HOLDER);
   assert.ok(parkedRow, 'the parked holder has a results row');
-  assert.equal(parkedRow?.operation, 'ReArchiveHolder', 'under the holder operation');
+  // Cowork's review of phase 1: its own operation, saying it stays archived without a group.
+  assert.equal(parkedRow?.operation, 'ReArchiveOrphanedHolder', 'under the orphaned-holder operation');
+  assert.match(parkedRow?.message ?? '', /stays archived without a group/, 'which says it stays archived without a group');
   assert.equal(parkedRow?.status, 'Success', 'and counts as done: archived where it sits is the state it was found in');
   assert.match(parkedRow?.message ?? '', /group 1\b/, 'the row names the dead group it came from, so the trail survives the run');
   assert.match(parkedRow?.message ?? '', /already orphaned before the run started/, 'and is explicit that the run did not cause the orphaning');

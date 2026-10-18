@@ -34,7 +34,9 @@ export function resolveClaimName(
   claims: ReadonlyArray<{ relatedUniqueId: string; relatedName: string }>,
   uniqueId: string,
 ): string {
-  return notPorted('discovery');
+  const lower = uniqueId.toLowerCase();
+  const named = claims.find((c) => c.relatedUniqueId.toLowerCase() === lower && c.relatedName);
+  return named ? named.relatedName.trim() : uniqueId;
 }
 
 /**

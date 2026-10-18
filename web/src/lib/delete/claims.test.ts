@@ -47,20 +47,20 @@ const pairSites = () => [
 
 // ---------------------------------------------------------------- claims parsing
 
-test('every occurrence in the response becomes a claim', { skip: PHASE.discovery }, () => {
+test('every occurrence in the response becomes a claim', () => {
   const claims = targetClaims();
   assert.equal(claims.length, 4, 'every occurrence becomes a claim, duplicates included');
   assert.equal(claims.filter((c) => c.category === 'Link').length, 3, 'the 3 duplicate Linked Process rows are all kept');
   assert.equal(claims.filter((c) => c.category === 'Input').length, 1, 'the Process Input row is categorised');
 });
 
-test('a one-entry response and a null response', { skip: PHASE.discovery }, () => {
+test('a one-entry response and a null response', () => {
   const single = JSON.parse('[{"Type":"Linked Process","Dependencies":[{"Name":"X","UniqueId":"TARGET-A"}]}]') as unknown;
   assert.equal(parseDependencyResponse(single, 'Q').length, 1, 'a single-entry response is not lost to array collapsing');
   assert.equal(parseDependencyResponse(null, 'Q').length, 0, 'a null response yields no claims');
 });
 
-test('both sides of a claim are fetched, and group claims are not', { skip: PHASE.discovery }, () => {
+test('both sides of a claim are fetched, and group claims are not', () => {
   assert.equal(dependencyCandidates(targetClaims(), [TARGET_ID]).length, 2, 'both sides of a claim become fetch candidates');
 
   const groupClaim = [{ Type: 'Linked Process Group', Dependencies: [{ Name: 'G', UniqueId: 'GROUP-1' }] }];
@@ -70,7 +70,7 @@ test('both sides of a claim are fetched, and group claims are not', { skip: PHAS
 
 // ---------------------------------------------------------------- inversion
 
-test('sites invert to one work item per holder', { skip: PHASE.discovery }, () => {
+test('sites invert to one work item per holder', () => {
   const work = groupSitesByHolder(pairSites());
   assert.equal(work.length, 2, 'sites invert to one work item per holder');
 
@@ -79,7 +79,7 @@ test('sites invert to one work item per holder', { skip: PHASE.discovery }, () =
   assert.equal(holderWork?.targetsAffected.length, 1, 'the holder\'s work item names 1 affected target');
 });
 
-test('report-only group sites are not work', { skip: PHASE.discovery }, () => {
+test('report-only group sites are not work', () => {
   const model = allBuckets();
   const withGroup = [
     ...findProcessReferenceSites(model, ['TARGET-A']),
@@ -95,7 +95,7 @@ test('report-only group sites are not work', { skip: PHASE.discovery }, () => {
 
 // ---------------------------------------------------------------- reconciliation
 
-test('a query on the target reconciles against both sides', { skip: PHASE.discovery }, () => {
+test('a query on the target reconciles against both sides', () => {
   const rec = reconcileDependencies({
     queriedUniqueId: TARGET_ID,
     relatedUniqueId: HOLDER_ID,
@@ -114,7 +114,7 @@ test('a query on the target reconciles against both sides', { skip: PHASE.discov
   assert.equal(input?.status, 'Match', 'the input reconciles');
 });
 
-test('an archived related process suppresses the Input claim, not the reference', { skip: PHASE.discovery }, () => {
+test('an archived related process suppresses the Input claim, not the reference', () => {
   // With the holder archived the API drops the Input row, but the reference still exists.
   const rec = reconcileDependencies({
     queriedUniqueId: TARGET_ID,
@@ -131,7 +131,7 @@ test('an archived related process suppresses the Input claim, not the reference'
   assert.match(input?.note ?? '', /suppressed/, 'the suppression is called out in the note');
 });
 
-test('Input is scoped to the queried side, where Link is a union', { skip: PHASE.discovery }, () => {
+test('Input is scoped to the queried side, where Link is a union', () => {
   // Measured, not assumed: the pair holds one Input each way, but each query reports
   // exactly one, so Input is not the union that Link is. Reconciliation scopes
   // Input/Output to the queried process's own sites.
@@ -157,7 +157,7 @@ test('Input is scoped to the queried side, where Link is a union', { skip: PHASE
   assert.equal(sites.filter((s) => s.category === 'Link').length, 3, 'link sites are counted across both sides');
 });
 
-test('located sites with no claims is a mismatch', { skip: PHASE.discovery }, () => {
+test('located sites with no claims is a mismatch', () => {
   const rec = reconcileDependencies({
     queriedUniqueId: TARGET_ID,
     relatedUniqueId: HOLDER_ID,

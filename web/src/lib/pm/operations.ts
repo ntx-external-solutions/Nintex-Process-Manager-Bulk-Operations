@@ -35,6 +35,7 @@ import {
   listProcesses,
   publishProcess,
 } from './processes.ts';
+import { ARCHIVED_BATCH_SIZE, checkDependencies, readActiveModel, readArchivedModels } from './dependencies.ts';
 import { getOwnership, setOwnership, type UserRef } from './ownership.ts';
 import { listDirectoryUsers, scimBaseUrl } from './scim.ts';
 import type { ProcessRevisionStateId } from './types.ts';
@@ -80,6 +81,12 @@ export type Operation =
    * is the operator's, entered per run, and used for this one call only: never stored.
    */
   | { op: 'users.directory'; scimApiKey: string }
+  /** `CheckProcessDependencies` for one process, body as sent (null for none). */
+  | { op: 'process.dependencies'; processUniqueId: string }
+  /** One process's whole model, or that it is archived. Bulk Delete walks models in the browser. */
+  | { op: 'process.model'; processUniqueId: string }
+  /** Archived models in one batch read, up to 25 ids. A read, so the one-id rule is for writes. */
+  | { op: 'processes.archivedModels'; processUniqueIds: string[] }
   /** One process's owner, expert, revision and permissions. */
   | { op: 'process.ownership'; processUniqueId: string }
   /**
@@ -127,6 +134,9 @@ export const OPERATION_NAMES: readonly OperationName[] = [
   'users.directory',
   'process.ownership',
   'process.setOwnership',
+  'process.dependencies',
+  'process.model',
+  'processes.archivedModels',
 ];
 
 /**
@@ -217,6 +227,15 @@ export async function execute(ctx: PmContext, operation: Operation): Promise<unk
 
     case 'process.ownership':
       return getOwnership(ctx, operation.processUniqueId);
+
+    case 'process.dependencies':
+      return checkDependencies(ctx, operation.processUniqueId);
+
+    case 'process.model':
+      return readActiveModel(ctx, operation.processUniqueId);
+
+    case 'processes.archivedModels':
+      return readArchivedModels(ctx, operation.processUniqueIds);
 
     case 'process.setOwnership':
       return setOwnership(ctx, operation);
@@ -412,10 +431,27 @@ export function parseOperation(input: unknown): ParseResult {
       return { ok: true, operation: { op, scimApiKey: scimApiKey.trim() } };
     }
 
+    case 'process.dependencies':
+    case 'process.model':
     case 'process.ownership': {
       const processUniqueId = singleProcessId(body, op, ['processUniqueId']);
       if (typeof processUniqueId !== 'string') return processUniqueId;
       return { ok: true, operation: { op, processUniqueId } };
+    }
+
+    case 'processes.archivedModels': {
+      const extra = Object.keys(body).filter((key) => key !== 'op' && key !== 'processUniqueIds');
+      const ids = body['processUniqueIds'];
+      if (
+        extra.length > 0 ||
+        !Array.isArray(ids) ||
+        ids.length === 0 ||
+        ids.length > ARCHIVED_BATCH_SIZE ||
+        !ids.every((id) => typeof id === 'string' && GUID.test(id))
+      ) {
+        return { ok: false, error: `${op}: "processUniqueIds" must be 1 to ${ARCHIVED_BATCH_SIZE} process ids, and nothing else.` };
+      }
+      return { ok: true, operation: { op, processUniqueIds: ids as string[] } };
     }
 
     case 'process.setOwnership': {

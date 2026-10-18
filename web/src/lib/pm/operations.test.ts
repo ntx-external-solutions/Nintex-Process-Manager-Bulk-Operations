@@ -400,3 +400,42 @@ test('processes.list sends the paging parameters the endpoint needs', async () =
   assert.match(h.calls[0]!.url, /PageSize=200/);
   assert.match(h.calls[0]!.url, /ListType=7/);
 });
+
+// ----------------------------------------------------------------- delete reads
+
+test('the delete reads name one process, or a bounded batch of process ids', () => {
+  for (const op of ['process.dependencies', 'process.model']) {
+    assert.ok(parseOperation({ op, processUniqueId: PROCESS }).ok, op);
+    assert.equal(parseOperation({ op, processUniqueId: [PROCESS] }).ok, false, op);
+    assert.equal(parseOperation({ op, processUniqueId: PROCESS, searchBehavior: 1 }).ok, false, `${op}: nothing else rides along`);
+  }
+  assert.ok(parseOperation({ op: 'processes.archivedModels', processUniqueIds: [PROCESS, OTHER] }).ok);
+  for (const processUniqueIds of [[], ['not-a-guid'], Array.from({ length: 26 }, () => PROCESS), PROCESS]) {
+    assert.equal(parseOperation({ op: 'processes.archivedModels', processUniqueIds }).ok, false, JSON.stringify(processUniqueIds).slice(0, 30));
+  }
+  for (const op of ['process.dependencies', 'process.model', 'processes.archivedModels']) {
+    assert.equal(WRITE_OPERATIONS.includes(op as never), false, `${op} is a read`);
+  }
+});
+
+test('the dependency check asks for both directions, and an empty answer is a clean check', async () => {
+  const h = harness([undefined]);
+  assert.equal(await execute(h.ctx, { op: 'process.dependencies', processUniqueId: PROCESS }), null);
+  assert.match(h.calls[0]!.url, new RegExp(`/Api/v1/Processes/${PROCESS}/CheckProcessDependencies\\?searchBehavior=31$`));
+});
+
+test('the batch read repeats the id parameter and unwraps each model', async () => {
+  const h = harness([{ data: [{ ProcessModel: { UniqueId: PROCESS } }, { ProcessModel: null }] }]);
+  assert.deepEqual(await execute(h.ctx, { op: 'processes.archivedModels', processUniqueIds: [PROCESS, OTHER] }), [{ UniqueId: PROCESS }]);
+  assert.match(h.calls[0]!.url, new RegExp(`/mobile/api/v1/processes\\?processUniqueIds=${PROCESS}&processUniqueIds=${OTHER}$`));
+});
+
+test('the model read gives the model, or says archived for the 200 with no model', async () => {
+  const active = harness([processResponse()]);
+  const read = (await execute(active.ctx, { op: 'process.model', processUniqueId: PROCESS })) as { kind: string; model?: { Name?: string } };
+  assert.equal(read.kind, 'model');
+  assert.equal(read.model?.Name, 'First Process');
+  // Measured in S1, S2 and the W4 live test: an archived process answers 200 with only this.
+  const archived = harness([{ success: true, isArchived: true }]);
+  assert.deepEqual(await execute(archived.ctx, { op: 'process.model', processUniqueId: PROCESS }), { kind: 'archived' });
+});

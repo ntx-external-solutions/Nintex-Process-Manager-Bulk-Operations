@@ -11,7 +11,15 @@ import { loadProcessIndex } from '../../tenant/state.ts';
 import { readFixture } from './fixtures.ts';
 import { FakeTenant } from './fakeTenant.ts';
 import { FakePlanStore } from './planStore.ts';
+import type { ActiveRead } from '../gateway.ts';
 import type { DependencyPlan } from '../ledger.ts';
+
+/** The model off an active read; fails the test if the read said archived. */
+async function modelOf(read: Promise<ActiveRead>): Promise<Record<string, unknown>> {
+  const r = await read;
+  assert.equal(r.kind, 'model', 'the active read returned a model');
+  return r.kind === 'model' ? r.model : {};
+}
 
 const A = '11111111-1111-1111-1111-111111111111';
 const B = '22222222-2222-2222-2222-222222222222';
@@ -49,12 +57,14 @@ test('restore, archive and delete change what the reads and the group listing se
   const t = tenant();
   const group = t.group(100)!;
   assert.deepEqual((await t.groupProcesses(group)).map((p) => p.processUniqueId), [B], 'an archived process is not listed');
-  await assert.rejects(t.readModel(A), (e) => failureOf(e).status === 404, 'nor is it on the active read');
+  // Measured: 200 with only {success, isArchived}, not a 404. 404 is for a deleted process.
+  assert.deepEqual(await t.readModel(A), { kind: 'archived' }, 'the active read says archived, with no model');
+  assert.deepEqual(await t.archiveState(A), { found: true, isArchived: true, revisionEditId: null }, 'as getArchiveState reads that envelope');
   assert.equal((await t.readArchivedModels([A]))[0]?.['StateId'], 2, 'the batch read serves it');
 
   await t.restore(A, 100);
   assert.equal(t.isArchived(A), false);
-  assert.equal((await t.readModel(A))['GroupUniqueId'], 'group-100-home', 'the model follows the group it was put in');
+  assert.equal((await modelOf(t.readModel(A)))['GroupUniqueId'], 'group-100-home', 'the model follows the group it was put in');
   assert.equal((await t.groupProcesses(group)).length, 2);
 
   await t.archive(B, 'c');
@@ -62,6 +72,8 @@ test('restore, archive and delete change what the reads and the group listing se
   await t.deleteProcess(B, null);
   assert.equal(t.exists(B), false);
   assert.deepEqual(t.deleted, [B]);
+  await assert.rejects(t.readModel(B), (e) => failureOf(e).status === 404, 'a deleted process is the 404');
+  assert.equal((await t.archiveState(B)).found, false);
 });
 
 test('a refusal carries the status and the tenant message the app reads', async () => {
@@ -92,13 +104,13 @@ test('a save keeps a ProcessJson string and drops anything else, as the tenant d
 
   const edited = { ...model, Name: 'Edited' } as unknown as ProcessJson;
   await t.saveModel(id, buildUpdateEnvelope(edited, { changeDescription: 'x' }));
-  assert.equal((await t.readModel(id))['Name'], 'Edited');
+  assert.equal((await modelOf(t.readModel(id)))['Name'], 'Edited');
   assert.equal(t.callsTo('saveModel')[0]?.envelope?.SuppressChangeNotification, true, 'the envelope sent is logged');
 
   const lost = { ...model, Name: 'Lost' } as unknown as ProcessJson;
   const asObject = { ...buildUpdateEnvelope(lost, { changeDescription: 'x' }), ProcessJson: {} as unknown as string };
   await t.saveModel(id, asObject);
-  assert.equal((await t.readModel(id))['Name'], 'Edited', 'an object body is silently discarded');
+  assert.equal((await modelOf(t.readModel(id)))['Name'], 'Edited', 'an object body is silently discarded');
 });
 
 test('the app archive reads an archive that took effect as archived', async () => {
@@ -159,7 +171,7 @@ test('a scenario can make a call succeed without effect, or serve archived proce
   t.noEffect = undefined;
 
   t.activeReadServesArchived = true;
-  assert.equal((await t.readModel(A))['StateId'], 2, 'the active read now returns the archived model');
+  assert.equal((await modelOf(t.readModel(A)))['StateId'], 2, 'the active read now returns the archived model');
   assert.deepEqual(await t.archiveState(A), { found: true, isArchived: true, revisionEditId: 1 });
 });
 
@@ -168,5 +180,5 @@ test('a restore into the group a process is already in keeps the group id the mo
   const id = String(model['UniqueId']);
   const t = new FakeTenant({ processes: [{ uniqueId: id, name: String(model['Name']), model, archived: true }] });
   await t.restore(id, Number(model['GroupId']));
-  assert.equal((await t.readModel(id))['GroupUniqueId'], model['GroupUniqueId']);
+  assert.equal((await modelOf(t.readModel(id)))['GroupUniqueId'], model['GroupUniqueId']);
 });

@@ -5,7 +5,9 @@
 // behaviour to exercise each outcome: an archive that lands outright, one that goes
 // pending, one the tenant refuses, one that reports failure but took effect, a group held
 // by a live document, one held only by an archived document (F1), a draft that goes live
-// on a move, the breadcrumb, and an ownership save and publish with a SCIM directory.
+// on a move, the breadcrumb, an ownership save and publish with a SCIM directory, and the
+// dependency check and batch read a Bulk Delete plan is built from (Elsewhere links to
+// Old thing, which an archived process also takes as an Input).
 // For ownership, start the app with SCIM_BASE_URL=http://localhost:<port>.
 //
 //   node dev/mock-pm.mjs [port]      (default 4999; sign in to http://localhost:4999/tenant)
@@ -45,6 +47,27 @@ const procs = {
   [id(5)]: { name: 'Elsewhere', group: OTHER, archived: false, mode: 'outright', rev: 500, version: '1.0', state: 3, owner, expert },
   [id(6)]: { name: 'Old thing', group: RET, archived: false, mode: 'outright', rev: 600, version: '1.0', state: 3, owner, expert },
 };
+// Elsewhere holds a ProcessLink to Old thing; Archived input holds an Input from it, which
+// no dependency answer names because its holder is archived (the API's blind spot).
+procs[id(7)] = { name: 'Archived input', group: OTHER, archived: true, mode: 'outright', rev: 700, version: '1.0', state: 3, owner, expert };
+const links = {
+  [id(5)]: { ProcessProcedures: { ProcessLink: [{ Id: 501, LinkedProcessUniqueId: id(6), LinkedProcessName: 'Old thing' }] } },
+  [id(7)]: { Inputs: { Input: [{ Id: 701, FromProcessUniqueId: id(6), Name: 'From old thing' }] } },
+};
+const dependencies = {
+  [id(6)]: [{ Type: 'Linked Process', Dependencies: [{ Name: 'Elsewhere', UniqueId: id(5) }] }],
+  [id(5)]: [{ Type: 'Linked Process', Dependencies: [{ Name: 'Old thing', UniqueId: id(6) }] }],
+};
+const modelOf = (u) => {
+  const x = procs[u];
+  return {
+    UniqueId: u, Id: Number(u.slice(-3)), Name: x.name, Version: x.version, StateId: x.archived ? 2 : 1, GroupId: Number(x.group.slice(-3)), GroupUniqueId: x.group,
+    ProcessRevisionEditId: x.rev, ProcessRevisionStateId: x.state, OwnerId: x.owner.id, Owner: x.owner.name, ExpertId: x.expert.id, Expert: x.expert.name,
+    Objective: 'kept as is', ProcessGroupItems: { ProcessGroup: { UniqueId: x.group, Name: groups[x.group]?.title ?? '' } },
+    ProcessProcedures: null, Inputs: null, Outputs: null, ...(links[u] ?? {}),
+  };
+};
+
 const scimUsers = [
   { id: '101', userName: 'ann@example.com', displayName: 'Ann Owner', active: true },
   { id: '102', userName: 'bob@example.com', name: { givenName: 'Bob', familyName: 'Expert' }, active: true },
@@ -104,7 +127,7 @@ http.createServer(async (req, res) => {
     const items = Object.entries(procs)
       .filter(([, x]) => x.archived === archived)
       .map(([u, x]) => ({
-        processId: 1, processName: x.name, processUniqueId: u, processState: '', groupId: Number(x.group.slice(-3)),
+        processId: 1, id: Number(u.slice(-3)), processName: x.name, processUniqueId: u, processState: '', groupId: Number(x.group.slice(-3)),
         groupUniqueId: x.group, groupName: 'G', processOwner: '', processExpert: '', groupExists: !x.groupGone,
       }));
     return send(res, 200, { items, totalItemCount: items.length });
@@ -140,6 +163,16 @@ http.createServer(async (req, res) => {
     const held = documents[url.searchParams.get('ProcessGroupId')] ?? { live: [], archived: [] };
     const names = url.searchParams.get('ListType') === 'Archived' ? held.archived : held.live;
     return send(res, 200, { items: names.map((documentName) => ({ documentName })), totalItemCount: names.length });
+  }
+  let dm = p.match(/^\/Api\/v1\/Processes\/([^/]+)\/CheckProcessDependencies$/);
+  if (dm) {
+    // The tenant answers a process with no dependencies with 200 and an empty body.
+    if (!dependencies[dm[1]]) { res.writeHead(200); return res.end(); }
+    return send(res, 200, dependencies[dm[1]]);
+  }
+  if (p === '/mobile/api/v1/processes') {
+    const data = url.searchParams.getAll('processUniqueIds').filter((u) => procs[u]).map((u) => ({ ProcessModel: modelOf(u) }));
+    return send(res, 200, { data });
   }
   if (p === '/bff/navigation/api/v1/breadcrumb') {
     const items = chain(url.searchParams.get('id')).map((g, i) => ({
@@ -196,12 +229,10 @@ http.createServer(async (req, res) => {
   if (m) {
     const x = procs[m[1]];
     if (!x) return send(res, 404, { message: 'not found' });
+    // Measured (S1, S2, W4 live): an archived process answers 200 with only this.
+    if (x.archived) return send(res, 200, { success: true, isArchived: true });
     return send(res, 200, {
-      processJson: {
-        UniqueId: m[1], Name: x.name, Version: x.version, isArchived: x.archived, ProcessRevisionEditId: x.rev, ProcessRevisionStateId: x.state,
-        OwnerId: x.owner.id, Owner: x.owner.name, ExpertId: x.expert.id, Expert: x.expert.name, Objective: 'kept as is',
-        ProcessGroupItems: { ProcessGroup: { UniqueId: x.group, Name: groups[x.group]?.title ?? '' } },
-      },
+      processJson: { ...modelOf(m[1]), isArchived: false },
       processActions: { CanSave: true, CanPublishAfterEdit: true, CanSubmitForApprovalAfterEdit: true },
     });
   }
