@@ -7,8 +7,7 @@
  * is never mutated.
  */
 
-import { nodeArray, nodeString, nodeValue, type ProcessModel, type ProcessNode } from './model.ts';
-import { notPorted } from './phases.ts';
+import { nodeArray, nodeInt, nodeString, nodeValue, setNodeValue, type ProcessModel, type ProcessNode } from './model.ts';
 
 export type SiteCategory = 'Link' | 'Input' | 'Output' | 'Group';
 
@@ -111,7 +110,10 @@ export interface ReferenceRemoval {
 
 /** Deep clone, so the caller's model is never mutated. Port of `Copy-ProcessObject`. */
 export function copyProcessObject(model: ProcessModel | null | undefined): ProcessModel | null {
-  return notPorted('references');
+  if (model === null || model === undefined) return null;
+  // The script round-trips through JSON at depth 100, because a truncated tree saves as a
+  // silently corrupted process. JSON.parse has no depth limit, and the model is plain JSON.
+  return JSON.parse(JSON.stringify(model)) as ProcessModel;
 }
 
 /**
@@ -260,12 +262,35 @@ export function findInputOutputReferenceSites(
  * Port of `Clear-NodeLink`.
  */
 export function clearNodeLink(node: ProcessNode, bucket: string): void {
-  return notPorted('references');
+  // Only fields the node already has: a save that invents schema is a save the tenant may
+  // read differently.
+  for (const field of ORPHAN_CLEAR_FIELDS) setNodeValue(node, field, null);
+  if (bucket === 'Decision' && nodeInt(node, 'DecisionLinkType') === DECISION_LINK_LIVE) {
+    setNodeValue(node, 'DecisionLinkType', DECISION_LINK_ORPHANED);
+  }
 }
 
 /** Orphans matching children under a node, recursively; returns how many. Mutates `node`. Port of `Remove-ChildReference`. */
 export function removeChildReferences(node: ProcessNode, targetUniqueIds: readonly string[]): number {
-  return notPorted('references');
+  let count = 0;
+  const children = nodeValue(node, 'ChildProcessProcedures');
+  if (children === null) return 0;
+
+  for (const childType of CHILD_PROCEDURE_TYPES) {
+    for (const child of nodeArray(children, childType)) {
+      if (!isNode(child)) continue;
+      if (matchTarget(child, 'LinkedProcessUniqueId', targetUniqueIds)) {
+        clearNodeLink(child, childType);
+        count++;
+      }
+      count += removeChildReferences(child, targetUniqueIds);
+    }
+  }
+  return count;
+}
+
+function isNode(value: unknown): value is ProcessNode {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /**
@@ -277,5 +302,60 @@ export function removeProcessReferences(
   model: ProcessModel | null | undefined,
   targetUniqueIds: readonly string[],
 ): ReferenceRemoval {
-  return notPorted('references');
+  const sites = findProcessReferenceSites(model, targetUniqueIds);
+  const clone = copyProcessObject(model);
+  let removed = 0;
+  if (clone === null) return { cleaned: null, referencesRemoved: 0, sites };
+
+  const procedures = nodeValue(clone, 'ProcessProcedures');
+  if (procedures !== null) {
+    for (const spec of PROCEDURE_BUCKETS) {
+      const items = nodeArray(procedures, spec.bucket);
+      if (items.length === 0) continue;
+
+      if (spec.action === 'Remove') {
+        const kept: ProcessNode[] = [];
+        for (const node of items) {
+          if (!isNode(node)) continue;
+          if (matchTarget(node, spec.field, targetUniqueIds)) {
+            removed++;
+            continue; // the element is dropped
+          }
+          removed += removeChildReferences(node, targetUniqueIds);
+          kept.push(node);
+        }
+        // Written back as an array even when the payload had a bare object, as the script does.
+        setNodeValue(procedures, spec.bucket, kept);
+      } else {
+        // Orphan and Report buckets keep every element.
+        for (const node of items) {
+          if (!isNode(node)) continue;
+          if (spec.action === 'Orphan' && matchTarget(node, spec.field, targetUniqueIds)) {
+            clearNodeLink(node, spec.bucket);
+            removed++;
+          }
+          removed += removeChildReferences(node, targetUniqueIds);
+        }
+      }
+    }
+  }
+
+  for (const spec of IO_BUCKETS) {
+    const container = nodeValue(clone, spec.container);
+    if (container === null) continue;
+    const items = nodeArray(container, spec.bucket);
+    if (items.length === 0) continue;
+    const kept: ProcessNode[] = [];
+    for (const node of items) {
+      if (!isNode(node)) continue;
+      if (matchTarget(node, spec.field, targetUniqueIds)) {
+        removed++;
+        continue;
+      }
+      kept.push(node);
+    }
+    setNodeValue(container, spec.bucket, kept);
+  }
+
+  return { cleaned: clone, referencesRemoved: removed, sites };
 }

@@ -41,7 +41,12 @@ export interface HolderWorkItem {
 
 export type ReconciledCategory = 'Link' | 'Input' | 'Output';
 
-export type ReconciliationStatus = 'Match' | 'Mismatch' | 'MatchWithKnownAsymmetry' | 'NotApplicable';
+/**
+ * `MatchAcrossCategories`: the category disagrees but the pair's totals do not fall short.
+ * Measured on R11's set: the API labels some Input references "Linked Process" (Cowork's
+ * live check after W5 phase 3).
+ */
+export type ReconciliationStatus = 'Match' | 'Mismatch' | 'MatchWithKnownAsymmetry' | 'MatchAcrossCategories' | 'NotApplicable';
 
 export interface Reconciliation {
   queriedUniqueId: string;
@@ -57,11 +62,39 @@ export interface Reconciliation {
    * A Link mismatch claimed exactly twice per located site. The dependency check lists
    * every linked process twice while the holder's model holds one reference (measured on
    * the W5 phase 2 dry run, API_ARCHITECTURE.md "Why links reconcile as 'claimed 2,
-   * located 1'"). Still a `Mismatch`, and still gating: Cowork's review asked for it to be
-   * reported apart from the rest, not for the rule to change.
+   * located 1'"). Still a `Mismatch`, reported apart, and no longer gating: Cowork checked
+   * all 21 such pairs on R11's set against the holders' models after W5 phase 3.
    */
   doubleCounted: boolean;
+  /**
+   * A mismatch whose pair has at least one located site, but fewer than claimed. Every
+   * such pair on R11's set was the API over-claiming, so the run asks for an
+   * acknowledgement rather than stopping. Absent in a plan file from before it existed,
+   * which `reconciliationGate` reads as blocking.
+   */
+  overClaim?: boolean;
   note: string;
+}
+
+/** Mismatches as the run treats them. Port of the script's single mismatch gate, split three ways. */
+export interface ReconciliationGate {
+  /** Nothing located for the pair: the run stops here unless the operator says otherwise. */
+  blocking: Reconciliation[];
+  /** Located, but fewer than claimed: carries on once acknowledged on screen. */
+  overClaims: Reconciliation[];
+  /** The API's doubled links: reported, never asked about. */
+  doubleCounted: Reconciliation[];
+}
+
+export function reconciliationGate(rows: readonly Reconciliation[]): ReconciliationGate {
+  const gate: ReconciliationGate = { blocking: [], overClaims: [], doubleCounted: [] };
+  for (const row of rows) {
+    if (row.status !== 'Mismatch') continue;
+    if (row.doubleCounted === true) gate.doubleCounted.push(row);
+    else if (row.overClaim === true) gate.overClaims.push(row);
+    else gate.blocking.push(row);
+  }
+  return gate;
 }
 
 export interface ReconciliationInput {
@@ -148,8 +181,36 @@ export function groupSitesByHolder(sites: ReadonlyArray<ReferenceSite | null>): 
  * Claimed against located, per category, for one queried/related pair. Link is the
  * union of both directions; Input and Output are scoped to the queried process's own
  * sites (measured, not assumed). Port of `Test-DependencyReconciliation`.
+ *
+ * DIFFERS: then the pair as a whole (Cowork's live check after W5 phase 3). A category
+ * mismatch is only a mismatch when the pair's located total is below its claimed total,
+ * because the API labels some references by the wrong category, and finding more than the
+ * API claims removes everything found. A pair that falls short is an over-claim when
+ * anything was located, and blocks when nothing was.
  */
 export function reconcileDependencies(input: ReconciliationInput): Reconciliation[] {
+  const rows = reconcileByCategory(input);
+  if (input.bothSidesDeleted === true || !rows.some((r) => r.status === 'Mismatch')) return rows;
+
+  const pairClaimed = rows.reduce((n, r) => n + r.claimed, 0);
+  const pairLocated = rows.reduce((n, r) => n + r.expected, 0);
+  const counts = (pick: (r: Reconciliation) => number) => rows.map((r) => `${r.category} ${pick(r)}`).join(', ');
+  const across = `Across the pair: claimed ${counts((r) => r.claimed)}; located ${counts((r) => r.expected)}.`;
+
+  return rows.map((row) => {
+    if (row.status !== 'Mismatch') return row;
+    if (pairLocated >= pairClaimed) {
+      return { ...row, status: 'MatchAcrossCategories', doubleCounted: false, note: `${across} The pair's totals do not fall short, so nothing claimed is missing.` };
+    }
+    if (row.doubleCounted) return { ...row, note: `${row.note} ${across}` };
+    if (pairLocated >= 1) {
+      return { ...row, overClaim: true, note: `${across} The API claims more than the models hold; acknowledge before removing.` };
+    }
+    return { ...row, note: `${row.note} ${across}` };
+  });
+}
+
+function reconcileByCategory(input: ReconciliationInput): Reconciliation[] {
   const { queriedUniqueId: q, relatedUniqueId: r } = input;
   const pairClaims = input.claims.filter((c) => sameId(c.queriedUniqueId, q) && sameId(c.relatedUniqueId, r));
   const pairSites = input.sites.filter(

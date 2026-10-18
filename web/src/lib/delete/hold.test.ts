@@ -191,14 +191,17 @@ test('links the API counts twice are listed apart from the mismatches that are d
   plan.reconciliation = [...doubled, ...different];
   const shown = planSummaryLines(plan, null).join('\n');
 
-  assert.match(shown, /RECONCILIATION MISMATCHES \(1\):/, 'only the different one is a reconciliation mismatch');
+  // Since W5 phase 4, claimed 3 located 1 is an over-claim (something was located), not a
+  // mismatch that blocks: R11's third pair, a variation's one Decision[0] claimed 3 times.
+  assert.doesNotMatch(shown, /RECONCILIATION MISMATCHES/, 'nothing here has nothing located');
+  assert.match(shown, /CLAIMED MORE THAN FOUND \(1\):/, 'the different one is an over-claim');
   assert.match(shown, /LINKS THE DEPENDENCY API COUNTS TWICE \(1\):/, 'the doubled one is listed under its own heading');
-  const mismatches = shown.slice(shown.indexOf('RECONCILIATION MISMATCHES'), shown.indexOf('LINKS THE DEPENDENCY API'));
-  assert.match(mismatches, /-> Bravo\s+claimed 3, located 1/);
-  assert.doesNotMatch(mismatches, /-> Alpha/);
+  const overClaims = shown.slice(shown.indexOf('CLAIMED MORE THAN FOUND'), shown.indexOf('LINKS THE DEPENDENCY API'));
+  assert.match(overClaims, /-> Bravo\s+claimed 3, located 1/);
+  assert.doesNotMatch(overClaims, /-> Alpha/);
   assert.match(shown.slice(shown.indexOf('LINKS THE DEPENDENCY API')), /-> Alpha\s+claimed 2, located 1/);
 
-  // A plan file from before the field existed lists everything as a mismatch, as it did.
-  plan.reconciliation = plan.reconciliation.map(({ doubleCounted: _, ...r }) => r as (typeof plan.reconciliation)[number]);
+  // A plan file from before either field existed lists everything as a mismatch, as it did.
+  plan.reconciliation = plan.reconciliation.map(({ doubleCounted: _, overClaim: __, ...r }) => r as (typeof plan.reconciliation)[number]);
   assert.match(planSummaryLines(plan, null).join('\n'), /RECONCILIATION MISMATCHES \(2\):/);
 });

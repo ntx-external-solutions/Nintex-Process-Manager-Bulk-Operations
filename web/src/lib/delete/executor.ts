@@ -19,15 +19,18 @@
  */
 
 import { archiveOne, failureOf, type ArchiveOptions } from '../archive/outcome.ts';
-import type { ResultRow } from '../exec/report.ts';
+import { resultRow, type ResultRow } from '../exec/report.ts';
+import { defaultIsFatal } from '../exec/runner.ts';
+import { buildUpdateEnvelope } from '../pm/processes.ts';
 import type { ProcessIndex } from '../tenant/state.ts';
 import type { CollateralChange, CollateralGateway } from './collateral.ts';
 import type { DeleteEventSink } from './events.ts';
 import type { DeleteGateway } from './gateway.ts';
 import type { DependencyPlan } from './ledger.ts';
-import type { ProcessModel } from './model.ts';
+import { nodeInt, nodeString, type ProcessModel } from './model.ts';
+import { resolveClaimName } from './names.ts';
 import { notPorted } from './phases.ts';
-import type { ReferenceSite } from './references.ts';
+import { findProcessReferenceSites, removeProcessReferences, type ReferenceSite } from './references.ts';
 
 export interface EngineOptions {
   /** Permission to override a pending approval, read back per process (`-ApprovalsEnabled`). Default true. */
@@ -96,25 +99,97 @@ export interface SaveModelOptions {
   approvalsEnabled?: boolean | undefined;
   /** Default true: these edits publish a version the owner never asked for. */
   suppressChangeNotification?: boolean | undefined;
+  /** A dead session is rethrown rather than reported as a failed save. */
+  isFatal?: ((error: unknown) => string | null) | undefined;
+}
+
+/** The script's change description for a reference removal, used when the run gives none. */
+export const REFERENCE_REMOVAL_DESCRIPTION = 'Automated dependency removal';
+
+/** Whether a `Version` such as "3.1" has a major version above 0: "0.x" was never published. */
+function isPublishedVersion(version: string): boolean {
+  if (!version.includes('.')) return false;
+  const major = Number(version.split('.')[0]);
+  return Number.isInteger(major) && major > 0;
 }
 
 /**
  * Saves a model (ProcessJson as a string: an object returns 200 and drops the edit), then
  * re-reads it and publishes the new revision when the process had been published. Port
  * of `Save-NpmProcessModel`.
+ *
+ * The script slept a second before the re-read; the ownership save (pm/ownership.ts) reads
+ * straight after its save and matched the tenant in the W4 live test, so this does too.
  */
-export function saveProcessModel(
+export async function saveProcessModel(
   gateway: Pick<DeleteGateway, 'saveModel' | 'readModel' | 'publishNow' | 'publishRevisionEdit'>,
   processUniqueId: string,
   model: ProcessModel,
-  options?: SaveModelOptions,
+  options: SaveModelOptions = {},
 ): Promise<SaveOutcome> {
-  return notPorted('references');
+  const isFatal = options.isFatal ?? defaultIsFatal;
+  const description = options.changeDescription ?? REFERENCE_REMOVAL_DESCRIPTION;
+  const approvalsEnabled = options.approvalsEnabled ?? false;
+  const failed = (stage: SaveStage, error: unknown): SaveOutcome => {
+    if (isFatal(error)) throw error;
+    const failure = failureOf(error);
+    return { success: false, stage, error: failure.detail ?? failure.error, statusCode: failure.status };
+  };
+
+  try {
+    await gateway.saveModel(
+      processUniqueId,
+      buildUpdateEnvelope(model as Parameters<typeof buildUpdateEnvelope>[0], {
+        changeDescription: description,
+        submitForApproval: approvalsEnabled,
+        suppressChangeNotification: options.suppressChangeNotification ?? true,
+      }),
+    );
+  } catch (error) {
+    return failed('Save', error);
+  }
+
+  // Re-read for the revision id the save produced.
+  let updated: ProcessModel | null = null;
+  try {
+    const read = await gateway.readModel(processUniqueId);
+    if (read.kind === 'model') updated = read.model;
+  } catch (error) {
+    if (isFatal(error)) throw error;
+  }
+
+  // The script read the version off the re-read alone, so a failed re-read reported a
+  // published process as never published and left its new draft unpublished. The model
+  // that was saved says as much about whether it had been published.
+  const version = nodeString(updated, 'Version') || nodeString(model, 'Version');
+  if (!isPublishedVersion(version)) return { success: true, stage: 'SavedUnpublished', error: null, statusCode: 200 };
+
+  const revisionId = nodeInt(updated, 'ProcessRevisionEditId');
+  if (revisionId === null) {
+    return {
+      success: false,
+      stage: 'Publish',
+      error: 'Saved, but the new revision could not be read back, so it was not published',
+      statusCode: 0,
+    };
+  }
+
+  try {
+    // Both send the change description as the publish message: a tenant in "Publish Only
+    // mode" answers 400 without one (S2).
+    if (approvalsEnabled) await gateway.publishNow(processUniqueId, revisionId, description);
+    else await gateway.publishRevisionEdit(processUniqueId, revisionId, description);
+  } catch (error) {
+    return failed('Publish', error);
+  }
+  return { success: true, stage: 'Published', error: null, statusCode: 200 };
 }
 
 export interface VerificationFailure {
   holderUniqueId: string;
   remaining: ReferenceSite[];
+  /** Set when the holder could not be read back, so nothing about it was verified. */
+  unreadReason?: string | undefined;
 }
 
 export interface ReferenceRemovalRun {
@@ -127,12 +202,110 @@ export interface ReferenceRemovalRun {
  * Removes every reference the plan found, one save per holder, then re-reads each holder
  * and walks it for anything left. Port of `Invoke-ProcessDeletePlan`.
  */
-export function removePlanReferences(
+export async function removePlanReferences(
   gateway: DeleteGateway,
   plan: DependencyPlan,
-  options?: EngineOptions & { skipVerification?: boolean | undefined },
+  options: EngineOptions & {
+    skipVerification?: boolean | undefined;
+    /** The run's change description, sent on every save and publish. */
+    changeDescription?: string | undefined;
+    onEvent?: DeleteEventSink | undefined;
+  } = {},
 ): Promise<ReferenceRemovalRun> {
-  return notPorted('references');
+  const isFatal = options.isFatal ?? defaultIsFatal;
+  const results: ResultRow[] = [];
+  const workItems = plan.workItems;
+  const nameOf = (uniqueId: string) =>
+    plan.ledger.find((r) => r.uniqueId.toLowerCase() === uniqueId.toLowerCase())?.name || resolveClaimName(plan.claims, uniqueId);
+
+  // Read fresh for the edit, never from the plan: planning may be minutes old, and saving a
+  // stale model would discard whatever changed since.
+  const readForEdit = async (uniqueId: string): Promise<{ model: ProcessModel | null; reason: string; status: number }> => {
+    try {
+      const read = await gateway.readModel(uniqueId);
+      if (read.kind === 'model') return { model: read.model, reason: '', status: 0 };
+      return { model: null, reason: 'it is archived', status: 0 };
+    } catch (error) {
+      if (isFatal(error)) throw error;
+      const failure = failureOf(error);
+      return { model: null, reason: failure.detail ?? failure.error, status: failure.status };
+    }
+  };
+
+  options.onEvent?.({ kind: 'stage', stage: 'removing-references' });
+  for (const [i, item] of workItems.entries()) {
+    options.onEvent?.({ kind: 'progress', label: 'Removing references', done: i + 1, total: workItems.length });
+    const holderId = item.holderUniqueId;
+    const name = nameOf(holderId);
+    const { model, reason, status } = await readForEdit(holderId);
+    if (!model) {
+      results.push(
+        resultRow({
+          objectId: holderId,
+          name,
+          operation: 'RemoveReferences',
+          status: 'Failed',
+          message: `Could not fetch process for editing (${reason})`,
+          statusCode: status,
+        }),
+      );
+      continue;
+    }
+
+    // Every target at once: one save and one publish per holder.
+    const removal = removeProcessReferences(model, item.targetsAffected);
+    if (removal.referencesRemoved === 0 || !removal.cleaned) {
+      results.push(
+        resultRow({
+          objectId: holderId,
+          name,
+          operation: 'RemoveReferences',
+          status: 'Skipped',
+          message: 'No references found at edit time (already removed?)',
+        }),
+      );
+      continue;
+    }
+
+    const save = await saveProcessModel(gateway, holderId, removal.cleaned, {
+      changeDescription: options.changeDescription,
+      approvalsEnabled: options.approvalsEnabled ?? true,
+      suppressChangeNotification: true,
+      isFatal,
+    });
+    results.push(
+      resultRow({
+        objectId: holderId,
+        name,
+        operation: 'RemoveReferences',
+        status: save.success ? 'Success' : 'Failed',
+        message: save.success ? `Removed ${removal.referencesRemoved} reference(s), ${save.stage}` : `${save.stage} failed: ${save.error ?? ''}`.trimEnd(),
+        statusCode: save.success ? null : save.statusCode,
+      }),
+    );
+  }
+
+  // Verify while everything is still active, by walking each holder's saved model:
+  // archiving suppresses the very rows that would reveal a missed reference, so asking the
+  // dependency API afterwards reports success either way.
+  const verificationFailed: VerificationFailure[] = [];
+  if (!options.skipVerification) {
+    options.onEvent?.({ kind: 'stage', stage: 'verifying' });
+    for (const [i, item] of workItems.entries()) {
+      options.onEvent?.({ kind: 'progress', label: 'Verifying', done: i + 1, total: workItems.length });
+      const { model, reason } = await readForEdit(item.holderUniqueId);
+      // The script skipped a holder it could not read here, so a holder unreadable at both
+      // reads went to the delete with its references unchecked. Unread is unverified.
+      if (!model) {
+        verificationFailed.push({ holderUniqueId: item.holderUniqueId, remaining: [], unreadReason: reason });
+        continue;
+      }
+      const remaining = findProcessReferenceSites(model, item.targetsAffected).filter((s) => s.action !== 'Report');
+      if (remaining.length > 0) verificationFailed.push({ holderUniqueId: item.holderUniqueId, remaining });
+    }
+  }
+
+  return { results, verificationFailed };
 }
 
 /**

@@ -13,8 +13,13 @@ import { readProcess } from './processes.ts';
 /** Both directions, every category (API_ARCHITECTURE.md, "Dependency Checking APIs"). */
 export const DEPENDENCY_SEARCH_BEHAVIOR = 31;
 
-/** The archived batch read's chunk: the query string grows with every id, and long URLs are refused. */
-export const ARCHIVED_BATCH_SIZE = 25;
+/**
+ * The archived batch read's limit. The tenant refuses 21 or more ids with 400 "The
+ * processUniqueIds parameter maximum size is 20." It is a count, not URL length
+ * (API_ARCHITECTURE.md, measured after W5 phase 3). The script and this port both used
+ * 25, so every full batch was refused.
+ */
+export const ARCHIVED_BATCH_SIZE = 20;
 
 /**
  * `CheckProcessDependencies`, body as sent. The tenant answers 200 with an empty body for

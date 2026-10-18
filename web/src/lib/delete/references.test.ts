@@ -10,7 +10,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { ProcessModel } from './model.ts';
-import { PHASE } from './phases.ts';
 import {
   findInputOutputReferenceSites,
   findProcessReferenceSites,
@@ -100,7 +99,7 @@ test('a multi-target search returns the union', () => {
 
 // ---------------------------------------------------------------- remover
 
-test('the remover clears every reference on a copy, and leaves the rest', { skip: PHASE.references }, () => {
+test('the remover clears every reference on a copy, and leaves the rest', () => {
   const model = holder();
   const notePath = ['ProcessProcedures', 'Activity', 1, 'ChildProcessProcedures', 'Note', 0] as const;
   const originalText = dig(model, ...notePath, 'Text');
@@ -125,7 +124,7 @@ test('the remover clears every reference on a copy, and leaves the rest', { skip
 
 // ---------------------------------------------------------------- orphan semantics
 
-test('orphaning keeps the element and its breadcrumb, and touches nothing unrelated', { skip: PHASE.references }, () => {
+test('orphaning keeps the element and its breadcrumb, and touches nothing unrelated', () => {
   const result = removeProcessReferences(allBuckets(), ['TARGET-A']);
   const ac = result.cleaned;
   assert.equal(result.referencesRemoved, 7, 'removes all 7 TARGET-A references');
@@ -159,7 +158,7 @@ test('orphaning keeps the element and its breadcrumb, and touches nothing unrela
   assert.equal(dig(deep, 'LinkedProcessUniqueId'), 'TARGET-B', 'a two-deep child pointing elsewhere is untouched');
 });
 
-test('a multi-target removal clears every site in one pass', { skip: PHASE.references }, () => {
+test('a multi-target removal clears every site in one pass', () => {
   const result = removeProcessReferences(allBuckets(), ['TARGET-A', 'TARGET-B']);
   assert.equal(result.referencesRemoved, 11, 'a multi-target removal clears every site in one pass');
   assert.equal(
@@ -172,7 +171,7 @@ test('a multi-target removal clears every site in one pass', { skip: PHASE.refer
 
 // ---------------------------------------------------------------- null and shape tolerance
 
-test('an empty or null model yields no sites', { skip: PHASE.references }, () => {
+test('an empty or null model yields no sites', () => {
   assert.equal(findProcessReferenceSites({}, [TARGET_ID]).length, 0, 'an empty object yields no sites');
   assert.equal(findProcessReferenceSites(null, [TARGET_ID]).length, 0, 'a null process yields no sites');
 });
@@ -184,7 +183,7 @@ test('the real holder fixture carries a null Outputs', () => {
   assert.equal(model['Outputs'], null, 'the real fixture really does carry a null Outputs');
 });
 
-test('a bare-object bucket is walked, and ids match whatever their case', { skip: PHASE.references }, () => {
+test('a bare-object bucket is walked, and ids match whatever their case', () => {
   const single = JSON.parse('{"UniqueId":"H","ProcessProcedures":{"ProcessLink":{"Id":1,"LinkedProcessUniqueId":"TARGET-A"}}}') as ProcessModel;
   assert.equal(
     findProcessReferenceSites(single, ['TARGET-A']).length,
