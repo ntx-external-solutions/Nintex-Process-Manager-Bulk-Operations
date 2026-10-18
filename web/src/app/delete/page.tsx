@@ -1,7 +1,7 @@
 'use client';
 
 /**
- * Bulk Delete, dry run only (W5 phase 2).
+ * Bulk Delete, dry run only (W5 phases 2 and 3).
  *
  * Builds the delete plan the way the script's preview does, reading and never writing:
  * dependency checks, process models, the Input/Output scan of the archive,
@@ -13,6 +13,9 @@
 import { useCallback, useMemo, useState } from 'react';
 
 import type { DeleteEvent } from '@/lib/delete/events.ts';
+import { HOLDING_GROUP_NAME } from '@/lib/delete/gateway.ts';
+import { findOrphanedGroupProcesses, groupExistsCoverage, groupExistsCoverageLines } from '@/lib/delete/groups.ts';
+import { orphanedTargetWarningLines } from '@/lib/delete/holdingGroup.ts';
 import { serializePlan, type DependencyPlan } from '@/lib/delete/ledger.ts';
 import type { DeleteIndex } from '@/lib/delete/model.ts';
 import { buildDeletePlan, loadDeleteIndex, planSummaryLines } from '@/lib/delete/planner.ts';
@@ -166,10 +169,20 @@ function DryRunFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
             </div>
           </div>
           <div className="panel">
-            <pre className="plan-text">{planSummaryLines(stage.plan, stage.index).join('\n')}</pre>
+            <pre className="plan-text">{dryRunLines(stage.plan, stage.index).join('\n')}</pre>
           </div>
         </>
       )}
     </main>
   );
+}
+
+/** The warnings a real run raises before its first change, then the plan as the script's preview shows it. */
+function dryRunLines(plan: DependencyPlan, index: DeleteIndex): string[] {
+  const targets = plan.targetUniqueIds;
+  const warnings = [
+    ...orphanedTargetWarningLines(findOrphanedGroupProcesses(index, targets), targets.length, HOLDING_GROUP_NAME),
+    ...groupExistsCoverageLines(groupExistsCoverage(index)),
+  ];
+  return warnings.length > 0 ? [...warnings, '', ...planSummaryLines(plan, index)] : planSummaryLines(plan, index);
 }

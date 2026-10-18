@@ -131,8 +131,12 @@ export async function archiveOne(
     state = null;
   }
 
+  // A 404 here is a deleted process, not an archived one: an archived process answers
+  // 200 with only {success, isArchived} (measured in S1 and S2; Cowork's W5 phase 2
+  // review). W2 read the 404 as "archived", which an archive run never hit, but a
+  // process that vanished mid-run must not be reported archived.
   if (state !== null && !state.found) {
-    return outcome(true, 'Archived', 'Archived; the active-process read no longer returns it');
+    return outcome(false, 'Failed', 'Not found; it may have been deleted', { statusCode: 404, detail: null });
   }
 
   if (state === null) {

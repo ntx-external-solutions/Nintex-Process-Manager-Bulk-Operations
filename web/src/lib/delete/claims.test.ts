@@ -17,6 +17,7 @@ import {
   type DependencyClaim,
 } from './claims.ts';
 import type { ProcessModel } from './model.ts';
+import type { ReferenceSite } from './references.ts';
 import { PHASE } from './phases.ts';
 import { findProcessReferenceSites } from './references.ts';
 import { readFixture } from './testing/fixtures.ts';
@@ -170,4 +171,49 @@ test('located sites with no claims is a mismatch', () => {
     'Mismatch',
     'located sites with no claims is flagged as a mismatch',
   );
+});
+
+// ---------------------------------------------------------------- links the API counts twice
+// Measured on the W5 phase 2 dry run (API_ARCHITECTURE.md, "Why links reconcile as
+// 'claimed 2, located 1'"): the dependency check lists every linked process twice, while
+// each holder's model references the target once. 21 of the run's 24 mismatches were
+// that shape. Cowork's review: classify it and report it apart, without changing the rule.
+
+const Q = 'f0f00000-0000-0000-0000-00000000000a';
+const R = 'f0f00000-0000-0000-0000-00000000000b';
+
+function linkRec(claimed: number, located: number, category: 'Link' | 'Input' = 'Link') {
+  const type = category === 'Link' ? 'Linked Process' : 'Process Input';
+  const response = [{ Type: type, Dependencies: Array.from({ length: claimed }, () => ({ Name: 'Related', UniqueId: R })) }];
+  const sites: ReferenceSite[] = Array.from({ length: located }, (_, i) => ({
+    holderUniqueId: category === 'Link' ? R : Q,
+    targetUniqueId: category === 'Link' ? Q : R,
+    path: `ProcessProcedures.ProcessLink[${i}].LinkedProcessUniqueId`,
+    bucket: category === 'Link' ? 'ProcessLink' : 'Input',
+    category,
+    action: 'Remove',
+    matchedField: 'LinkedProcessUniqueId',
+    elementId: i,
+    isChild: false,
+  })) as ReferenceSite[];
+  const rec = reconcileDependencies({ queriedUniqueId: Q, relatedUniqueId: R, claims: parseDependencyResponse(response, Q), sites, relatedIsArchived: false });
+  return rec.find((r) => r.category === category)!;
+}
+
+test('a link claimed exactly twice per located site is a mismatch the API double-counted', () => {
+  const one = linkRec(2, 1);
+  assert.equal(one.status, 'Mismatch', 'it is still a mismatch: the rule is unchanged');
+  assert.equal(one.doubleCounted, true, 'and classified as the double-counted shape');
+  assert.match(one.note, /lists each linked process twice/, 'with the cause in the note');
+  assert.equal(linkRec(4, 2).doubleCounted, true, 'two references claimed four times is the same shape');
+});
+
+test('any other count is a mismatch of its own', () => {
+  assert.equal(linkRec(1, 0).doubleCounted, false, 'claimed 1, located 0 is not doubling');
+  assert.equal(linkRec(1, 0).status, 'Mismatch');
+  assert.equal(linkRec(3, 1).doubleCounted, false, 'claimed 3, located 1 is not doubling');
+  assert.equal(linkRec(0, 0).doubleCounted, false, 'claimed 0, located 0 matches');
+  assert.equal(linkRec(0, 0).status, 'Match');
+  assert.equal(linkRec(1, 1).doubleCounted, false, 'a match is not classified');
+  assert.equal(linkRec(2, 1, 'Input').doubleCounted, false, 'the measurement is for links, so an Input is not classified');
 });

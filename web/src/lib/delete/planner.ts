@@ -637,6 +637,25 @@ export function planSummaryLines(plan: DependencyPlan, index: DeleteIndex | null
     );
   }
 
+  // Named before anyone runs a delete, preview included: these are what blocked R11, and
+  // the ledger already knows them (Cowork's review of W5 phase 2).
+  const homeless = plan.ledger.filter((r) => r.role === 'Holder' && r.wasArchived && !readGroupExists(r.originalGroupExists).exists);
+  if (homeless.length > 0) {
+    const blocked = new Set(plan.orphanedHolders.map((o) => o.uniqueId.toLowerCase()));
+    lines.push(
+      `Archived holders with no group: ${homeless.length}. Their groups were deleted, so they cannot go home. A run parks them in the holding group, reads them there, and archives them again before the holding group is removed.`,
+    );
+    for (const r of homeless) {
+      const state = r.parkedInHoldingGroup
+        ? 'parked in the holding group for this run'
+        : blocked.has(r.uniqueId.toLowerCase())
+          ? 'could not be held, which blocks the run'
+          : 'not restored by this preview';
+      lines.push(`  ${planProcessName(plan, index, r.uniqueId)}  (${r.uniqueId})`);
+      lines.push(`      group ${r.originalGroupId ?? 'unknown'} is gone; ${state}`);
+    }
+  }
+
   const ledgerRow = (id: string) => plan.ledger.find((r) => r.uniqueId.toLowerCase() === id.toLowerCase());
   if (plan.workItems.length > 0) {
     lines.push('References to remove, by holding process:');
@@ -672,14 +691,15 @@ export function planSummaryLines(plan: DependencyPlan, index: DeleteIndex | null
   }
 
   const problems = plan.reconciliation.filter((r) => r.status === 'Mismatch');
-  if (problems.length > 0) {
-    lines.push(`RECONCILIATION MISMATCHES (${problems.length}):`);
-    lines.push('The dependency API and the process JSON disagree. Investigate before deleting.');
-    const targets = new Set(plan.targetUniqueIds.map((t) => t.toLowerCase()));
-    // Grouped by the queried process, so an operator scans by process rather than down
-    // 120 undifferentiated rows.
+  const doubled = problems.filter((r) => r.doubleCounted === true);
+  const different = problems.filter((r) => r.doubleCounted !== true);
+  const targets = new Set(plan.targetUniqueIds.map((t) => t.toLowerCase()));
+  const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+  // Grouped by the queried process, so an operator scans by process rather than down 120
+  // undifferentiated rows.
+  const listMismatches = (rows: readonly Reconciliation[], withSites: boolean) => {
     const byQueried = new Map<string, Reconciliation[]>();
-    for (const p of problems) byQueried.set(p.queriedUniqueId, [...(byQueried.get(p.queriedUniqueId) ?? []), p]);
+    for (const p of rows) byQueried.set(p.queriedUniqueId, [...(byQueried.get(p.queriedUniqueId) ?? []), p]);
     for (const [queried, group] of byQueried) {
       lines.push(`  ${planProcessName(plan, index, queried)}`);
       for (const p of group) {
@@ -687,7 +707,7 @@ export function planSummaryLines(plan: DependencyPlan, index: DeleteIndex | null
         lines.push(
           `    ${p.category.padEnd(6)} -> ${planProcessName(plan, index, p.relatedUniqueId)}   claimed ${p.claimed}, located ${p.located}   [${survives}]`,
         );
-        const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+        if (!withSites) continue;
         for (const site of plan.sites) {
           if (
             site.category === p.category &&
@@ -699,6 +719,21 @@ export function planSummaryLines(plan: DependencyPlan, index: DeleteIndex | null
         }
       }
     }
+  };
+
+  if (different.length > 0) {
+    lines.push(`RECONCILIATION MISMATCHES (${different.length}):`);
+    lines.push('The dependency API and the process JSON disagree. Investigate before deleting.');
+    listMismatches(different, true);
+  }
+  // Apart from the rest, so the ones that are different stand out (Cowork's review of W5
+  // phase 2). Still mismatches, and still counted as such.
+  if (doubled.length > 0) {
+    lines.push(`LINKS THE DEPENDENCY API COUNTS TWICE (${doubled.length}):`);
+    lines.push(
+      'Each is claimed exactly twice per reference found. The dependency check lists every linked process twice, while the holder holds one reference (API_ARCHITECTURE.md). These are still mismatches until that is confirmed.',
+    );
+    listMismatches(doubled, false);
   }
 
   const suppressed = plan.reconciliation.filter((r) => r.suppressed && r.located > 0);

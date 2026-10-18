@@ -114,10 +114,13 @@ test('absent field and no revision id: accepted, nothing to publish', async () =
   assert.match(o.message, /no revision id came back, so no override was sent/);
 });
 
-test('a 404 from the active read after the archive means it left the active side', async () => {
+test('a 404 from the active read after the archive is a deleted process, not an archived one', async () => {
   const o = await run({ state: async () => ({ found: false, isArchived: null, revisionEditId: null }) });
-  assert.equal(o.outcome, 'Archived');
-  assert.match(o.message, /no longer returns it/);
+  assert.equal(o.outcome, 'Failed');
+  assert.equal(o.success, false);
+  assert.equal(o.statusCode, 404);
+  assert.match(o.message, /Not found; it may have been deleted/);
+  assert.equal(o.calls.some((c) => c.startsWith('publish')), false, 'and no override is sent for it');
 });
 
 test('an unreadable process after the archive is reported as unknown, not guessed', async () => {

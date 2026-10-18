@@ -98,7 +98,7 @@ export function archiveProcess(
 }
 
 export interface ArchiveState {
-  /** False when the active-process read answers 404. */
+  /** False when the active-process read answers 404, which is a deleted process. An archived one answers 200. */
   found: boolean;
   /** null when the payload does not report the field. Absent is not false. */
   isArchived: boolean | null;

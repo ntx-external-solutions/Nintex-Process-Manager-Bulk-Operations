@@ -95,7 +95,7 @@ test('the baseline covers the whole tenant', { skip: PHASE.checkpoints }, () => 
 
 // ---------------------------------------------------------------- the groupExists flag through the snapshots
 
-test('the pre-Hold snapshot records whether the home group still exists', { skip: PHASE.hold }, () => {
+test('the pre-Hold snapshot records whether the home group still exists', () => {
   const index = orphanedGroupIndex();
   const ids = [...index.values()].map((e) => e.uniqueId);
   // The snapshot is what the unwind reads, so the flag has to survive the trip.

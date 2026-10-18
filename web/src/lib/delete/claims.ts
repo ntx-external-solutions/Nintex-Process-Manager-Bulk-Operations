@@ -53,6 +53,14 @@ export interface Reconciliation {
   expected: number;
   suppressed: boolean;
   status: ReconciliationStatus;
+  /**
+   * A Link mismatch claimed exactly twice per located site. The dependency check lists
+   * every linked process twice while the holder's model holds one reference (measured on
+   * the W5 phase 2 dry run, API_ARCHITECTURE.md "Why links reconcile as 'claimed 2,
+   * located 1'"). Still a `Mismatch`, and still gating: Cowork's review asked for it to be
+   * reported apart from the rest, not for the rule to change.
+   */
+  doubleCounted: boolean;
   note: string;
 }
 
@@ -157,6 +165,7 @@ export function reconcileDependencies(input: ReconciliationInput): Reconciliatio
     const expected = suppressed ? 0 : located;
 
     let status: ReconciliationStatus = 'Match';
+    let doubleCounted = false;
     let note = '';
     if (input.bothSidesDeleted === true) {
       status = 'NotApplicable';
@@ -170,6 +179,9 @@ export function reconcileDependencies(input: ReconciliationInput): Reconciliatio
       if (category === 'Link' && childCount > 0 && delta === childCount) {
         status = 'MatchWithKnownAsymmetry';
         note = `Differs by ${childCount} child-procedure site(s); see API_ARCHITECTURE.md child-reference asymmetry`;
+      } else if (category === 'Link' && located >= 1 && claimed === 2 * located) {
+        doubleCounted = true;
+        note = `Claimed ${claimed}, located ${located}: the dependency API lists each linked process twice (API_ARCHITECTURE.md).`;
       } else {
         note = `Claimed ${claimed}, located ${expected}. Investigate before removing.`;
       }
@@ -177,6 +189,6 @@ export function reconcileDependencies(input: ReconciliationInput): Reconciliatio
       note = `${located} reference(s) exist but are suppressed because the related process is archived`;
     }
 
-    return { queriedUniqueId: q, relatedUniqueId: r, category, claimed, located, expected, suppressed, status, note };
+    return { queriedUniqueId: q, relatedUniqueId: r, category, claimed, located, expected, suppressed, status, doubleCounted, note };
   });
 }

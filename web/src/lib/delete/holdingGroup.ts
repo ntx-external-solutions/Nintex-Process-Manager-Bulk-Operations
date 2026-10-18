@@ -46,5 +46,20 @@ export function orphanedTargetWarningLines(
   totalTargets: number,
   holdingGroupName: string,
 ): string[] {
-  return notPorted('hold');
+  if (orphans.length === 0) return [];
+  const total = totalTargets > 0 ? totalTargets : orphans.length;
+  const lines = [
+    'TARGETS WHOSE GROUP NO LONGER EXISTS',
+    `${orphans.length} of ${total} target(s) belong to a group that no longer exists.`,
+    'They can be archived but cannot be returned to their original group.',
+  ];
+  for (const o of [...orphans].sort((x, y) => x.name.localeCompare(y.name))) {
+    lines.push(`  ${o.name}  (${o.uniqueId})`);
+    lines.push(`      ${o.isArchived ? 'archived' : 'active'}; group ${o.originalGroupId ?? 'unknown'} is gone`);
+  }
+  lines.push('If the run does not delete them, they are archived where they sit and the results file names the group they are actually in.');
+  if (holdingGroupName) {
+    lines.push(`That is inside '${holdingGroupName}', so the holding group is left in place rather than deleted. Move them somewhere real to clear it.`);
+  }
+  return lines;
 }
