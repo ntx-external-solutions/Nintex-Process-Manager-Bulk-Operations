@@ -8,7 +8,7 @@
  * true.
  */
 
-import { pmRequest, type PmContext } from './client.ts';
+import { isPmError, pmRequest, type PmContext } from './client.ts';
 import type { LatestRevisionResponse, ProcessResponse, PublishRequest } from './types.ts';
 
 /** Subset of /EditPermissions we act on. */
@@ -43,6 +43,89 @@ export function getLatestRevision(
   return pmRequest<LatestRevisionResponse>(ctx, {
     path: `/bff/Process/api/v1/processes/${processUniqueId}/revisions/latest`,
   });
+}
+
+/**
+ * Archive one process, in place, with a comment.
+ *
+ * Takes no group: it archives the process wherever it currently sits
+ * (API_ARCHITECTURE.md, "ArchiveProcess archives in place"). On an approvals-enabled
+ * tenant a 200 here means *pending*, not archived; whether it is archived is read back
+ * separately (`getArchiveState`), never inferred from this call.
+ */
+export function archiveProcess(
+  ctx: PmContext,
+  processUniqueId: string,
+  comment: string,
+): Promise<unknown> {
+  return pmRequest<unknown>(ctx, {
+    path: '/Process/Edit/ArchiveProcess',
+    method: 'POST',
+    body: { processUniqueId, comment },
+    // Write policy: a 5xx or a dropped connection leaves the outcome unknown, and an
+    // archive can report failure and still take effect. The final read settles it.
+    retry: 'write',
+  });
+}
+
+export interface ArchiveState {
+  /** False when the active-process read answers 404. */
+  found: boolean;
+  /** null when the payload does not report the field. Absent is not false. */
+  isArchived: boolean | null;
+  /** The revision the approval override has to publish. null when not returned. */
+  revisionEditId: number | null;
+}
+
+function readField(source: unknown, name: string): { present: boolean; value: unknown } {
+  if (typeof source !== 'object' || source === null) return { present: false, value: undefined };
+  const record = source as Record<string, unknown>;
+  // The script looks fields up case-insensitively, because PowerShell does. Matching that
+  // here means a tenant that sends `IsArchived` is not read as one that sends nothing.
+  const key = Object.keys(record).find((k) => k.toLowerCase() === name.toLowerCase());
+  return key === undefined ? { present: false, value: undefined } : { present: true, value: record[key] };
+}
+
+/**
+ * Whether a process is archived, and its current revision, from one fresh read.
+ *
+ * `isArchived` may sit on the model or on the envelope around it, so both are tried,
+ * model first. A 404 means the process has left the active side, which immediately
+ * after an accepted archive is the archive having taken effect.
+ */
+export async function getArchiveState(ctx: PmContext, processUniqueId: string): Promise<ArchiveState> {
+  let wrapper: unknown;
+  try {
+    wrapper = await pmRequest<unknown>(ctx, { path: `/Api/v1/Processes/${processUniqueId}` });
+  } catch (error) {
+    if (isPmError(error) && error.status === 404) {
+      return { found: false, isArchived: null, revisionEditId: null };
+    }
+    throw error;
+  }
+
+  const modelField = readField(wrapper, 'processJson');
+  const model = modelField.present && modelField.value ? modelField.value : wrapper;
+
+  let isArchived: boolean | null = null;
+  for (const source of [model, wrapper]) {
+    const field = readField(source, 'isArchived');
+    if (field.present && field.value !== null && field.value !== undefined) {
+      isArchived = field.value === true || String(field.value).toLowerCase() === 'true';
+      break;
+    }
+  }
+
+  let revisionEditId: number | null = null;
+  for (const source of [model, wrapper]) {
+    const value = Number(readField(source, 'ProcessRevisionEditId').value);
+    if (Number.isInteger(value) && value > 0) {
+      revisionEditId = value;
+      break;
+    }
+  }
+
+  return { found: true, isArchived, revisionEditId };
 }
 
 export interface PublishResponse {

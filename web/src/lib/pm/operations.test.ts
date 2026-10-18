@@ -92,24 +92,87 @@ test('there is no way to name a URL', () => {
   }
 });
 
-test('the allowlist starts read-only', () => {
-  // W0's done-when: no write operation. Archive arrives in W2 and has to be added
-  // to WRITE_OPERATIONS on purpose, which is the decision this test makes visible.
-  assert.deepEqual(WRITE_OPERATIONS, []);
+test('the only writes are archive and the approval override', () => {
+  // Adding a write has to be a decision made here, not a side effect of a new case.
+  assert.deepEqual([...WRITE_OPERATIONS].sort(), ['process.archive', 'process.publishNow']);
 });
 
-test('no archive, delete or publish operation can be named yet', () => {
-  for (const op of [
-    'process.archive',
-    'process.delete',
-    'process.publish',
-    'process.publishNow',
-    'groups.delete',
-    'groups.move',
-  ]) {
+test('no delete, restore, move or update operation can be named yet', () => {
+  for (const op of ['process.delete', 'process.restore', 'process.update', 'groups.delete', 'groups.move', 'process.publish']) {
     const result = parseOperation({ op, processUniqueId: PROCESS, uniqueId: PROCESS });
     assert.equal(result.ok, false, op);
   }
+});
+
+// --------------------------------------------------------- one id per write
+
+const ONE_ID_CASES: Array<[string, Record<string, unknown>]> = [
+  ['process.archive', { comment: 'Bulk archive' }],
+  ['process.publishNow', { processRevisionEditId: 10133 }],
+  ['process.archiveState', {}],
+];
+
+test('each process operation accepts exactly one id', () => {
+  for (const [op, rest] of ONE_ID_CASES) {
+    assert.ok(parseOperation({ op, processUniqueId: PROCESS, ...rest }).ok, op);
+    for (const bad of [
+      [PROCESS],
+      [PROCESS, PROCESS],
+      `${PROCESS},${PROCESS}`,
+      `${PROCESS} `,
+      '',
+      'not-a-guid',
+      42,
+      null,
+    ]) {
+      assert.equal(parseOperation({ op, processUniqueId: bad, ...rest }).ok, false, `${op} ${JSON.stringify(bad)}`);
+    }
+  }
+});
+
+test('a second id cannot ride along under another field', () => {
+  for (const [op, rest] of ONE_ID_CASES) {
+    for (const extra of [{ processUniqueIds: [PROCESS] }, { ids: [PROCESS] }, { url: 'https://evil.example/' }]) {
+      const result = parseOperation({ op, processUniqueId: PROCESS, ...rest, ...extra });
+      assert.equal(result.ok, false, `${op} ${Object.keys(extra)[0]}`);
+      if (!result.ok) assert.match(result.error, /unexpected field/);
+    }
+  }
+});
+
+test('archive needs the change description', () => {
+  assert.equal(parseOperation({ op: 'process.archive', processUniqueId: PROCESS }).ok, false);
+  assert.equal(parseOperation({ op: 'process.archive', processUniqueId: PROCESS, comment: '   ' }).ok, false);
+  const ok = parseOperation({ op: 'process.archive', processUniqueId: PROCESS, comment: '  Retired  ' });
+  assert.ok(ok.ok);
+  assert.deepEqual(ok.operation, { op: 'process.archive', processUniqueId: PROCESS, comment: 'Retired' });
+});
+
+test('the override needs a positive integer revision', () => {
+  for (const bad of [0, -1, 1.5, '10133', null]) {
+    assert.equal(
+      parseOperation({ op: 'process.publishNow', processUniqueId: PROCESS, processRevisionEditId: bad }).ok,
+      false,
+      String(bad),
+    );
+  }
+});
+
+test('archive posts the id and the comment, and nothing else', async () => {
+  const h = harness([undefined]);
+  const result = await execute(h.ctx, { op: 'process.archive', processUniqueId: PROCESS, comment: 'Retired' });
+  assert.deepEqual(result, { accepted: true });
+  assert.equal(h.calls.length, 1);
+  assert.match(h.calls[0]!.url, /\/Process\/Edit\/ArchiveProcess$/);
+  assert.equal(h.calls[0]!.method, 'POST');
+  assert.equal(h.calls[0]!.body, `{"processUniqueId":"${PROCESS}","comment":"Retired"}`);
+});
+
+test('the override publishes now, with the revision id as a string', async () => {
+  const h = harness([{ actionUrl: '/tenant/Process/x' }]);
+  await execute(h.ctx, { op: 'process.publishNow', processUniqueId: PROCESS, processRevisionEditId: 10133 });
+  assert.match(h.calls[0]!.url, new RegExp(`/Api/v1/Processes/${PROCESS}/Publish$`));
+  assert.equal(h.calls[0]!.body, '{"ProcessRevisionEditId":"10133","IsPublishNow":true}');
 });
 
 test('non-object bodies are refused', () => {

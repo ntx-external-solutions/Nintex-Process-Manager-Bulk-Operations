@@ -7,6 +7,7 @@
  * call, not an exception.
  */
 
+import type { ArchiveGateway, ArchiveState } from '../archive/outcome.ts';
 import type { PlanGateway } from '../plan/load.ts';
 import type { Operation, ProcessSummary } from '../pm/operations.ts';
 import type { ProcessListPage } from '../pm/processes.ts';
@@ -15,13 +16,27 @@ import type { ChildTreeItemsResponse } from '../pm/types.ts';
 export class PmRequestError extends Error {
   /** The session is gone. Stop the run and send them back to sign in. */
   readonly signedOut: boolean;
-  /** The tenant's own response, when there was one. */
+  /** The tenant's HTTP status, when Process Manager answered at all. */
+  readonly status: number | null;
+  /** The tenant's own reason, extracted from its response body. */
+  readonly tenantMessage: string | null;
+  /** The tenant's raw response, when there was one. */
   readonly detail: string | null;
 
-  constructor(message: string, options: { signedOut?: boolean; detail?: string | null } = {}) {
+  constructor(
+    message: string,
+    options: {
+      signedOut?: boolean;
+      status?: number | null;
+      tenantMessage?: string | null;
+      detail?: string | null;
+    } = {},
+  ) {
     super(message);
     this.name = 'PmRequestError';
     this.signedOut = options.signedOut ?? false;
+    this.status = options.status ?? null;
+    this.tenantMessage = options.tenantMessage ?? null;
     this.detail = options.detail ?? null;
   }
 }
@@ -30,6 +45,8 @@ interface ProxyResponse {
   ok?: boolean;
   result?: unknown;
   error?: string;
+  status?: number | null;
+  message?: string | null;
   detail?: string;
   signedOut?: boolean;
 }
@@ -52,6 +69,8 @@ export async function callPm<T>(operation: Operation): Promise<T> {
   if (!response.ok) {
     throw new PmRequestError(payload.error ?? `Request failed (${response.status}).`, {
       signedOut: payload.signedOut === true,
+      status: typeof payload.status === 'number' ? payload.status : null,
+      tenantMessage: typeof payload.message === 'string' ? payload.message : null,
       detail: payload.detail ?? null,
     });
   }
@@ -76,10 +95,26 @@ export function browserGateway(): BrowserGateway {
   };
 }
 
+/**
+ * The archive writes, over the same proxy. Each names one process; the proxy refuses
+ * anything else (lib/pm/operations.ts).
+ */
+export function browserArchiveGateway(): ArchiveGateway {
+  return {
+    archive: (processUniqueId, comment) => callPm({ op: 'process.archive', processUniqueId, comment }),
+    archiveState: (processUniqueId) =>
+      callPm<ArchiveState>({ op: 'process.archiveState', processUniqueId }),
+    publishNow: (processUniqueId, processRevisionEditId) =>
+      callPm({ op: 'process.publishNow', processUniqueId, processRevisionEditId }),
+  };
+}
+
 // -------------------------------------------------------------- session
 
 export interface SessionInfo {
   tenant: string;
+  /** Origin and tenant, e.g. https://demo.promapp.com/tenant. Empty when unknown. */
+  siteUrl: string;
   username: string;
   expiresAt: number;
 }
@@ -98,6 +133,7 @@ export async function currentSession(): Promise<SessionInfo | null> {
     if (payload.signedIn !== true) return null;
     return {
       tenant: payload.tenant ?? '',
+      siteUrl: payload.siteUrl ?? '',
       username: payload.username ?? '',
       expiresAt: payload.expiresAt ?? 0,
     };

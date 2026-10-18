@@ -33,6 +33,7 @@ export function SignInForm({ onSignedIn }: { onSignedIn: (session: SessionInfo) 
       const payload = (await response.json().catch(() => ({}))) as {
         error?: string;
         tenant?: string;
+        baseUrl?: string;
         username?: string;
         expiresAt?: number;
       };
@@ -46,6 +47,7 @@ export function SignInForm({ onSignedIn }: { onSignedIn: (session: SessionInfo) 
       setPassword('');
       onSignedIn({
         tenant: payload.tenant ?? '',
+        siteUrl: payload.baseUrl && payload.tenant ? `${payload.baseUrl}/${payload.tenant}` : '',
         username: payload.username ?? username,
         expiresAt: payload.expiresAt ?? 0,
       });

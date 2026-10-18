@@ -24,7 +24,7 @@ const OPERATIONS: readonly OperationTile[] = [
   {
     title: 'Bulk Archive',
     summary: 'Pick groups or processes from the tree and archive them.',
-    href: null,
+    href: '/archive',
   },
   {
     title: 'Bulk Delete',

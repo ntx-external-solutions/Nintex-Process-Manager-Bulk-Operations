@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 
 import type { PmContext } from './client.ts';
 import { getChildGroups } from './groups.ts';
-import { getLatestRevision, publishProcess } from './processes.ts';
+import { getArchiveState, getLatestRevision, publishProcess } from './processes.ts';
 
 interface Call {
   url: string;
@@ -108,4 +108,61 @@ test('getLatestRevision reads the cheap concurrency check', async () => {
   const result = await getLatestRevision(h.ctx, '00000001-0000-4000-8000-000000000001');
   assert.equal(result.latestProcessRevisionEditId, 9174);
   assert.match(h.calls[0]!.url, /\/bff\/Process\/api\/v1\/processes\/00000001.*\/revisions\/latest$/);
+});
+
+// ---------------------------------------------------------------- archive state
+
+function answering(status: number, body: unknown) {
+  return harnessWith(async () =>
+    new Response(body === undefined ? null : JSON.stringify(body), {
+      status,
+      headers: { 'content-type': 'application/json' },
+    }),
+  );
+}
+
+function harnessWith(respond: () => Promise<Response>) {
+  const ctx: PmContext = {
+    baseUrl: 'https://demo.promapp.com',
+    tenant: 'tenant',
+    token: 'tok',
+    fetch: (async () => respond()) as unknown as typeof fetch,
+    sleep: async () => {},
+  };
+  return ctx;
+}
+
+const ARCHIVED_ID = '00000001-0000-4000-8000-000000000001';
+
+test('getArchiveState reads isArchived and the revision off the model', async () => {
+  const state = await getArchiveState(
+    answering(200, { processJson: { isArchived: false, ProcessRevisionEditId: 10133 }, processActions: {} }),
+    ARCHIVED_ID,
+  );
+  assert.deepEqual(state, { found: true, isArchived: false, revisionEditId: 10133 });
+});
+
+test('getArchiveState falls back to the envelope, and matches the field case-insensitively', async () => {
+  const state = await getArchiveState(
+    answering(200, { IsArchived: true, processJson: { ProcessRevisionEditId: 7 } }),
+    ARCHIVED_ID,
+  );
+  assert.deepEqual(state, { found: true, isArchived: true, revisionEditId: 7 });
+});
+
+test('getArchiveState reports an absent field as null, not false', async () => {
+  const state = await getArchiveState(answering(200, { processJson: { ProcessRevisionEditId: 7 } }), ARCHIVED_ID);
+  assert.equal(state.isArchived, null);
+});
+
+test('getArchiveState treats a 404 as having left the active side', async () => {
+  assert.deepEqual(await getArchiveState(answering(404, { message: 'Not found' }), ARCHIVED_ID), {
+    found: false,
+    isArchived: null,
+    revisionEditId: null,
+  });
+});
+
+test('getArchiveState lets any other failure through', async () => {
+  await assert.rejects(getArchiveState(answering(400, { message: 'Bad' }), ARCHIVED_ID), /returned 400/);
 });

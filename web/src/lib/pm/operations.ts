@@ -8,21 +8,37 @@
  * the operations below.
  *
  * Lifted from process-group-manager, whose allowlist has no archive or delete operation
- * and treats that as a structural safety property. This app will need both. Each one
+ * and treats that as a structural safety property. This app needs both. Each write
  * arrives with the task that uses it (archive in W2, delete in W5), and each takes
- * exactly one id, checked here on the server, so the proxy can never be asked to act
- * on a list. Until then the allowlist is read-only.
+ * exactly one process id, checked here on the server: the id must be a single GUID,
+ * and a body carrying any field the operation does not name is refused outright, so
+ * the proxy can never be asked to act on a list.
  */
 
 import type { PmContext } from './client.ts';
 import { getChildGroups } from './groups.ts';
-import { getProcess, listProcesses } from './processes.ts';
+import {
+  archiveProcess,
+  getArchiveState,
+  getProcess,
+  listProcesses,
+  publishProcess,
+} from './processes.ts';
 import type { ProcessRevisionStateId } from './types.ts';
 
 export type Operation =
   | { op: 'groups.tree'; parentUniqueId: string | null }
   | { op: 'process.summary'; processUniqueId: string }
-  | { op: 'processes.list'; page: number; listType: number };
+  | { op: 'processes.list'; page: number; listType: number }
+  /** Is it archived yet, and what revision would the approval override publish? */
+  | { op: 'process.archiveState'; processUniqueId: string }
+  /** One process. The comment is the run's change description. */
+  | { op: 'process.archive'; processUniqueId: string; comment: string }
+  /**
+   * The approval override: "Archive now" under the cog in the UI. Publishes the given
+   * revision with IsPublishNow, the revision id sent as a string.
+   */
+  | { op: 'process.publishNow'; processUniqueId: string; processRevisionEditId: number };
 
 export type OperationName = Operation['op'];
 
@@ -30,14 +46,16 @@ export const OPERATION_NAMES: readonly OperationName[] = [
   'groups.tree',
   'process.summary',
   'processes.list',
+  'process.archiveState',
+  'process.archive',
+  'process.publishNow',
 ];
 
 /**
- * Operations that change something on the tenant. Empty until W2, and asserted in
- * tests, so adding a write is a visible decision rather than a side effect of adding
- * a case to the switch below.
+ * Operations that change something on the tenant, asserted in tests, so adding a write
+ * is a visible decision rather than a side effect of adding a case to the switch below.
  */
-export const WRITE_OPERATIONS: readonly OperationName[] = [];
+export const WRITE_OPERATIONS: readonly OperationName[] = ['process.archive', 'process.publishNow'];
 
 /**
  * Compact view of a process: everything a planner needs and nothing else. Returning
@@ -65,6 +83,16 @@ export async function execute(ctx: PmContext, operation: Operation): Promise<unk
 
     case 'processes.list':
       return listProcesses(ctx, operation.page, undefined, operation.listType);
+
+    case 'process.archiveState':
+      return getArchiveState(ctx, operation.processUniqueId);
+
+    case 'process.archive':
+      await archiveProcess(ctx, operation.processUniqueId, operation.comment);
+      return { accepted: true };
+
+    case 'process.publishNow':
+      return publishProcess(ctx, operation.processUniqueId, operation.processRevisionEditId);
   }
 }
 
@@ -132,9 +160,65 @@ export function parseOperation(input: unknown): ParseResult {
       return { ok: true, operation: { op, page, listType: (listType as number) ?? 0 } };
     }
 
+    case 'process.archiveState': {
+      const processUniqueId = singleProcessId(body, op, ['processUniqueId']);
+      if (typeof processUniqueId !== 'string') return processUniqueId;
+      return { ok: true, operation: { op, processUniqueId } };
+    }
+
+    case 'process.archive': {
+      const processUniqueId = singleProcessId(body, op, ['processUniqueId', 'comment']);
+      if (typeof processUniqueId !== 'string') return processUniqueId;
+      const comment = requiredString(body['comment']);
+      if (!comment) {
+        return { ok: false, error: `${op}: "comment" is required. It is the run's change description.` };
+      }
+      return { ok: true, operation: { op, processUniqueId, comment: comment.trim() } };
+    }
+
+    case 'process.publishNow': {
+      const processUniqueId = singleProcessId(body, op, ['processUniqueId', 'processRevisionEditId']);
+      if (typeof processUniqueId !== 'string') return processUniqueId;
+      const processRevisionEditId = body['processRevisionEditId'];
+      if (
+        typeof processRevisionEditId !== 'number' ||
+        !Number.isInteger(processRevisionEditId) ||
+        processRevisionEditId <= 0
+      ) {
+        return { ok: false, error: `${op}: "processRevisionEditId" must be a positive integer.` };
+      }
+      return { ok: true, operation: { op, processUniqueId, processRevisionEditId } };
+    }
+
     default:
       return { ok: false, error: `Unknown operation "${op}".` };
   }
+}
+
+const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The one-id rule for operations that act on a process.
+ *
+ * The id must be one GUID: not an array, not a comma-separated list, not a GUID with
+ * something appended. And the body may carry only the fields the operation names, so a
+ * caller cannot slip a second id in under another key and rely on some later change to
+ * start reading it.
+ */
+function singleProcessId(
+  body: Record<string, unknown>,
+  op: string,
+  allowed: readonly string[],
+): string | { ok: false; error: string } {
+  const extra = Object.keys(body).filter((key) => key !== 'op' && !allowed.includes(key));
+  if (extra.length > 0) {
+    return { ok: false, error: `${op}: unexpected field${extra.length === 1 ? '' : 's'} ${extra.map((k) => `"${k}"`).join(', ')}.` };
+  }
+  const value = body['processUniqueId'];
+  if (typeof value !== 'string' || !GUID.test(value)) {
+    return { ok: false, error: `${op}: "processUniqueId" must be exactly one process id.` };
+  }
+  return value;
 }
 
 function requiredString(value: unknown): string | null {
