@@ -48,8 +48,8 @@ import {
   type EngineOptions,
   type VerificationFailure,
 } from './executor.ts';
-import { HOLDING_GROUP_NAME, holdingGroupNameFor, type DeleteGateway, type GroupRef } from './gateway.ts';
-import { findOrphanedGroupProcesses, groupExistsCoverage } from './groups.ts';
+import { ARCHIVED_BATCH_SIZE, HOLDING_GROUP_NAME, holdingGroupNameFor, type DeleteGateway, type GroupRef } from './gateway.ts';
+import { confirmOrphan, findOrphanedGroupProcesses, groupDisagreementRow, groupExistsCoverage, type OrphanedGroupProcess } from './groups.ts';
 import { removeHoldingGroup } from './holdingGroup.ts';
 import {
   markSnapshotRestored,
@@ -62,8 +62,10 @@ import {
   type DraftHolder,
   type FailedTarget,
   type PlanLedgerRow,
+  type ProcessStateSnapshot,
   type UnresolvedParticipant,
 } from './ledger.ts';
+import { nodeString, type ProcessModel } from './model.ts';
 import { selectDisplayName } from './names.ts';
 import { buildDeletePlan, loadDeleteIndex } from './planner.ts';
 import type { PlanStore } from './planStore.ts';
@@ -268,7 +270,7 @@ export async function runBulkDelete(gateway: DeleteGateway, options: BulkDeleteO
       }
     }
 
-    const orphans = findOrphanedGroupProcesses(index, targets);
+    const orphans = await confirmOrphanedTargets(gateway, findOrphanedGroupProcesses(index, targets), snapshot, addRow, isFatal);
     if (orphans.length > 0) emit({ kind: 'orphanedTargets', orphans, totalTargets: targets.length, holdingGroupName });
     emit({ kind: 'groupExistsCoverage', coverage: groupExistsCoverage(index) });
 
@@ -446,6 +448,7 @@ export async function runBulkDelete(gateway: DeleteGateway, options: BulkDeleteO
       allowRestore: !dryRun,
       scanActiveForInputOutput: options.thoroughScan,
       preHoldSnapshot: snapshot,
+      onRow: addRow,
       onRestored: async (ledger) => {
         if (!preliminary) return;
         preliminary.ledger = mergePlanLedger(ledger, snapshot);
@@ -586,6 +589,51 @@ export async function runBulkDelete(gateway: DeleteGateway, options: BulkDeleteO
     }
     throw error;
   }
+}
+
+/**
+ * The listing's orphaned targets, each checked against the group its model names before
+ * the run treats it as one (F6, after R13 found a false `groupExists: false`). A target
+ * whose group is found, or cannot be checked, goes back on the snapshot as in that group,
+ * so a held-back target is sent home rather than archived in the holding group; if home
+ * refuses it, the unwind says so as for any target. One `GroupCheck` warning row each.
+ * Only archived rows carry the flag, so the models come from the archived batch read.
+ */
+async function confirmOrphanedTargets(
+  gateway: DeleteGateway,
+  orphans: readonly OrphanedGroupProcess[],
+  snapshot: ProcessStateSnapshot,
+  addRow: (row: ResultRow) => void,
+  isFatal: (error: unknown) => string | null,
+): Promise<OrphanedGroupProcess[]> {
+  if (orphans.length === 0) return [];
+  const models = new Map<string, ProcessModel>();
+  const ids = orphans.filter((o) => o.isArchived).map((o) => o.uniqueId);
+  for (let i = 0; i < ids.length; i += ARCHIVED_BATCH_SIZE) {
+    try {
+      for (const model of await gateway.readArchivedModels(ids.slice(i, i + ARCHIVED_BATCH_SIZE))) {
+        const id = nodeString(model, 'UniqueId');
+        if (id) models.set(id.toLowerCase(), model);
+      }
+    } catch (error) {
+      if (isFatal(error)) throw error;
+      // Unread: the listing's word stands, as before.
+    }
+  }
+  const confirmed: OrphanedGroupProcess[] = [];
+  for (const orphan of orphans) {
+    const check = await confirmOrphan(gateway, models.get(orphan.uniqueId.toLowerCase()), isFatal);
+    const row = snapshot.get(orphan.uniqueId.toLowerCase());
+    if (check.kind === 'gone' || !row || check.group.id === null) {
+      confirmed.push(orphan);
+      continue;
+    }
+    row.originalGroupId = check.group.id;
+    row.originalGroupUniqueId = check.group.uniqueId;
+    row.originalGroupExists = true;
+    addRow(groupDisagreementRow(orphan, orphan.originalGroupId, check.group, check.kind === 'present'));
+  }
+  return confirmed;
 }
 
 /** What the operator is told when cleanup leaves the holding group: enough to find it in the tree. */

@@ -111,6 +111,12 @@ export interface DeleteGateway extends ArchiveGateway {
    */
   createGroup(name: string, parentGroupUniqueId: string | null): Promise<GroupRef>;
 
+  /**
+   * Whether a group is in the tree, by its breadcrumb: a deleted group's comes back empty
+   * (F1). Throws when the read cannot be made, which is not the same as "not found".
+   */
+  groupFound(groupUniqueId: string): Promise<boolean>;
+
   /** `POST /Process/Edit/RenameGroup`: one group, one new name. */
   renameGroup(groupUniqueId: string, newName: string): Promise<unknown>;
 

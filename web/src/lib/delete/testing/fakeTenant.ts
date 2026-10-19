@@ -90,6 +90,7 @@ export type FakeOp =
   | 'listGroups'
   | 'createGroup'
   | 'renameGroup'
+  | 'groupFound'
   | 'deleteGroup'
   | 'groupProcesses';
 
@@ -400,6 +401,12 @@ export class FakeTenant implements DeleteGateway {
     this.#groups.set(id, group);
     this.#end(call);
     return { ...group };
+  }
+
+  async groupFound(groupUniqueId: string): Promise<boolean> {
+    this.#begin({ op: 'groupFound', groupUniqueId });
+    const group = [...this.#groups.values()].find((g) => g.uniqueId.toLowerCase() === groupUniqueId.toLowerCase());
+    return group !== undefined && !this.missingGroupIds.has(group.id);
   }
 
   async renameGroup(groupUniqueId: string, newName: string): Promise<unknown> {

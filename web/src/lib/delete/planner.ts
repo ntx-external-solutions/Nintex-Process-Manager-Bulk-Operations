@@ -12,6 +12,7 @@
  */
 
 import { failureOf } from '../archive/outcome.ts';
+import type { ResultRow } from '../exec/report.ts';
 import { defaultIsFatal } from '../exec/runner.ts';
 import { isOpenDraft, writeStateOf } from '../pm/writePath.ts';
 import { readGroupExists } from '../select/archived.ts';
@@ -27,6 +28,7 @@ import {
   type Reconciliation,
 } from './claims.ts';
 import type { DeleteEventSink } from './events.ts';
+import { confirmOrphan, groupDisagreementRow } from './groups.ts';
 import { restoreProcess } from './executor.ts';
 import { ARCHIVED_BATCH_SIZE, type DeleteGateway } from './gateway.ts';
 import {
@@ -287,6 +289,8 @@ export interface DeletePlanOptions {
   targetUniqueIds: readonly string[];
   /** Refreshed after the Hold phase, so it reports held targets as active in the holding group. */
   index: DeleteIndex;
+  /** A results row the plan raises as it goes: today, a listing contradicted by the model's group (F6). */
+  onRow?: ((row: ResultRow) => void) | undefined;
   /** Where a holder whose group is gone is restored to be read. Null: nowhere, so no restores. */
   holdingGroupId?: number | null | undefined;
   /** False for a preview, which must not change the tenant. Default true. */
@@ -322,7 +326,7 @@ export interface DeletePlanOptions {
  * of what was restored. Port of `New-ProcessDeletePlan`.
  */
 /** What planning calls. Only a real run restores; a dry run's gateway can refuse to. */
-export type PlanningGateway = Pick<DeleteGateway, 'listProcesses' | 'checkDependencies' | 'readModel' | 'readArchivedModels' | 'restore'>;
+export type PlanningGateway = Pick<DeleteGateway, 'listProcesses' | 'checkDependencies' | 'readModel' | 'readArchivedModels' | 'restore' | 'groupFound'>;
 
 export async function buildDeletePlan(gateway: PlanningGateway, options: DeletePlanOptions): Promise<DependencyPlan> {
   const isFatal = options.isFatal ?? defaultIsFatal;
@@ -440,29 +444,41 @@ export async function buildDeletePlan(gateway: PlanningGateway, options: DeleteP
     holdingGroup: number,
     why: string,
   ): Promise<'restored' | 'failed' | OrphanedHolder> => {
+    // Judged now, from the archived model: the restore opens an in-progress revision that
+    // the executor's draft check would otherwise take for someone's draft (R13).
+    const before = record.model ? writeStateOf(record.model, null) : null;
+
+    // The listing's "group is gone" is checked against the model's own group before the
+    // holder is parked (R13: a false one led the run to park a holder, archive it in the
+    // holding group and delete that group). A group that is found, or that cannot be
+    // checked, is tried first; the holding group is the fallback only if it refuses.
+    if (record.originalGroupId !== null && !record.originalGroupExists) {
+      const check = await confirmOrphan(gateway, record.model, isFatal);
+      if (check.kind !== 'gone' && check.group.id !== null) {
+        const listedGroupId = record.originalGroupId;
+        const inPlace = await restoreProcess(gateway, record.uniqueId, check.group.id, { isFatal });
+        if (inPlace.ok) {
+          record.originalGroupId = check.group.id;
+          record.originalGroupUniqueId = check.group.uniqueId;
+          record.originalGroupExists = true;
+          options.onRow?.(groupDisagreementRow(record, listedGroupId, check.group, check.kind === 'present'));
+          log(
+            `The listing says ${record.uniqueId} (${record.name}) belongs to group ${listedGroupId}, which no longer exists, but its model names group ${check.group.id}, which ${check.kind === 'present' ? 'is in the tree' : 'took it back'}; treated as an ordinary holder`,
+          );
+          return afterRestore(record, before, false, check.group.id, why);
+        }
+        log(
+          `The model of ${record.uniqueId} (${record.name}) names group ${check.group.id}, but restoring it there failed (HTTP ${inPlace.statusCode}); treating it as an orphan`,
+        );
+      }
+    }
+
     const parked = record.originalGroupId !== null && !record.originalGroupExists;
     const groupId = parked ? holdingGroup : (record.originalGroupId ?? holdingGroup);
     if (parked) options.onEvent?.({ kind: 'holderHeld', uniqueId: record.uniqueId, name: record.name, originalGroupId: record.originalGroupId });
 
-    // Judged now, from the archived model: the restore opens an in-progress revision that
-    // the executor's draft check would otherwise take for someone's draft (R13).
-    const before = record.model ? writeStateOf(record.model, null) : null;
     const restored = await restoreProcess(gateway, record.uniqueId, groupId, { isFatal });
-    if (restored.ok) {
-      record.restoredByThisRun = true;
-      if (before) record.revisionBeforeRestore = { openDraft: isOpenDraft(before), publishedVersionExists: before.publishedVersionExists ?? null };
-      record.parkedInHoldingGroup = parked;
-      // Read again next time: the cached copy is the archived one.
-      cache.delete(record.uniqueId.toLowerCase());
-      restoredTotal++;
-      await options.onRestored?.(ledgerToPlanRows(ledger));
-      log(
-        parked
-          ? `Held ${record.uniqueId} (${record.name}) in the holding group ${why}; its own group ${record.originalGroupId} no longer exists`
-          : `Restored ${record.uniqueId} (${record.name}) to group ${groupId} ${why}`,
-      );
-      return 'restored';
-    }
+    if (restored.ok) return afterRestore(record, before, parked, groupId, why);
     if (parked) {
       // The holding group was the fallback. Refused there too, it cannot be read
       // anywhere, and a target it points at cannot be deleted safely.
@@ -475,6 +491,29 @@ export async function buildDeletePlan(gateway: PlanningGateway, options: DeleteP
     }
     log(`FAILED to restore ${record.uniqueId} (${record.name}); its Input/Output edges stay hidden`);
     return 'failed';
+  };
+
+  /** What every successful restore records, so the unwind and the executor know of it. */
+  const afterRestore = async (
+    record: ParticipantRecord,
+    before: ReturnType<typeof writeStateOf> | null,
+    parked: boolean,
+    groupId: number,
+    why: string,
+  ): Promise<'restored'> => {
+    record.restoredByThisRun = true;
+    if (before) record.revisionBeforeRestore = { openDraft: isOpenDraft(before), publishedVersionExists: before.publishedVersionExists ?? null };
+    record.parkedInHoldingGroup = parked;
+    // Read again next time: the cached copy is the archived one.
+    cache.delete(record.uniqueId.toLowerCase());
+    restoredTotal++;
+    await options.onRestored?.(ledgerToPlanRows(ledger));
+    log(
+      parked
+        ? `Held ${record.uniqueId} (${record.name}) in the holding group ${why}; its own group ${record.originalGroupId} no longer exists`
+        : `Restored ${record.uniqueId} (${record.name}) to group ${groupId} ${why}`,
+    );
+    return 'restored';
   };
 
   // ---- Pass loop: discover, restore, re-discover until the set is stable ----
