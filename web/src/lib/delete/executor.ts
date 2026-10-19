@@ -374,9 +374,11 @@ export async function removePlanReferences(
       resultRow({ objectId: holderId, name, operation: 'RemoveReferences', status, message, statusCode });
 
     if (refusedHolders.has(holderId.toLowerCase())) {
+      // Skipped, not Failed: left unticked, it did what the operator asked (R13). Failed
+      // is kept for errors, including the backstop below, which nobody chose.
       results.push(
         row(
-          'Failed',
+          'Skipped',
           `Not saved: ${SAVE_REFUSALS['open-draft']}. Its references remain, so ${keptOut(item.targetsAffected.length)} left out of the delete. Tick it to publish the draft with the removal.`,
         ),
       );

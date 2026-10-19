@@ -317,14 +317,14 @@ test('the plan lists a holder with an open draft under its own heading, with the
   assert.ok(lines.slice(heading).some((l) => l.includes(`blocks ${target.Name}`)), 'naming the target it blocks');
 });
 
-test('unticked, a draft holder is Failed before any save, and its target is left out of the delete', async () => {
+test('unticked, a draft holder is Skipped before any save (R13: it did what was asked), and its target is left out of the delete', async () => {
   const { tenant, holder, target } = draftTenant();
   const { plan } = await draftPlan(tenant, target.UniqueId);
   const removal = await removePlanReferences(tenant, plan);
 
   assert.equal(tenant.callsTo('saveModel').length, 0, 'nothing is saved');
   const row = removal.results[0];
-  assert.equal(row?.status, 'Failed');
+  assert.equal(row?.status, 'Skipped');
   assert.match(row?.message ?? '', /has an unpublished draft; removing the reference would publish it/);
   assert.match(row?.message ?? '', /the target it holds is left out of the delete/);
   assert.deepEqual(removal.heldBack.map((h) => [h.targetUniqueId, h.holderUniqueId]), [[target.UniqueId, holder.UniqueId]]);
@@ -363,7 +363,7 @@ test('the run decides from its own read: a draft opened after planning is refuse
 
   if (proc?.model) Object.assign(proc.model, { ProcessRevisionStateId: 1, Version: '3.1' });
   const removal = await removePlanReferences(tenant, plan);
-  assert.equal(removal.results[0]?.status, 'Failed');
+  assert.equal(removal.results[0]?.status, 'Skipped');
   assert.equal(removal.heldBack.length, 1);
 });
 
@@ -463,7 +463,7 @@ test('a clean holder listed before a draft holder keeps its link to the target t
   assert.deepEqual(removal.heldBack.map((h) => h.targetUniqueId), [T1], 'T1 is held back before any save');
   assert.deepEqual(links(tenant, H2), [T1], 'H2 lost its link to T3, which is deleted, and kept its link to T1, which is not');
   assert.equal(tenant.callsTo('saveModel', H1).length, 0, 'the draft holder is not saved');
-  assert.equal(removal.results.find((r) => r.objectId === H1)?.status, 'Failed');
+  assert.equal(removal.results.find((r) => r.objectId === H1)?.status, 'Skipped');
   assert.equal(removal.verificationFailed.length, 0);
 
   const rows = await deletePlanTargets(tenant, plan, { heldBack: removal.heldBack });

@@ -167,7 +167,7 @@ test('unticked, a draft holder keeps its target, and the run finishes without de
 
   assert.deepEqual(asked, [[holder.UniqueId]], 'the operator is asked about the draft holder, by id');
   assert.equal(tenant.exists(target.UniqueId), true);
-  assert.equal(rowsOf(rows, 'RemoveReferences')[0]?.status, 'Failed');
+  assert.equal(rowsOf(rows, 'RemoveReferences')[0]?.status, 'Skipped', 'left unticked, it did what was asked');
   assert.equal(rowsOf(rows, 'Delete')[0]?.status, 'Skipped');
   assert.equal(tenant.callsTo('saveModel').length, 0);
 });
