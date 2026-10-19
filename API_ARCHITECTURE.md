@@ -1510,3 +1510,27 @@ mismatches are the dependency API over-claiming:
   located 0 Link, 1 Input located and planned).
 - 1 is a variation record whose one `Decision[0]` link is claimed 3 times. The set's
   other variation doesn't reference the target.
+
+### Measured in R13, the first live delete (19 Oct 2026)
+
+- **Links are counted once per stored revision.** `CheckProcessDependencies` lists a link
+  from a published holder twice and from a never-published holder once. This is the
+  mechanism behind "claimed 2, located 1": the JSON walk reads one revision, the
+  dependency check counts the published one too.
+- **Cleaning only the draft doesn't free a target.** With the link removed from a
+  holder's draft but still in its published revision, `DeleteProcess` on the target
+  answers **HTTP 500** "Process Cannot Be Deleted", with `additionalInfos` naming the
+  holder. The removal has to be published.
+- **Restoring an archived published process creates an in-progress revision.** 1.0
+  becomes 1.1 with `ProcessRevisionStateId` 1. Anything that tests "open draft" on a
+  restored process sees one that the restore made.
+- **The archived listing's `groupExists` can be wrong.** Once, a row said `false` (group
+  id 1) while the process model's `ProcessGroupItems.ProcessGroup` named a group that was
+  in the tree. A second, real orphan in the same set was reported correctly. Not
+  reproduced; check the model's group before treating a process as orphaned.
+- **A new group is in the tree at once,** with its numeric id, and
+  `breadcrumb/children` on a new top-level group works and lists a process restored into
+  it.
+- **No approvals on the demo tenant:** submit for approval answers 400, so the
+  awaiting-approval paths can't be measured here.
+- `DeleteGroup` on an empty group: 200 `{"isValid":true, "deletedGroupId": ...}`.
