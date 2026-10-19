@@ -89,6 +89,7 @@ export type FakeOp =
   | 'deleteProcess'
   | 'listGroups'
   | 'createGroup'
+  | 'renameGroup'
   | 'deleteGroup'
   | 'groupProcesses';
 
@@ -138,7 +139,10 @@ export interface FakeTenantOptions {
    * tenant refuses with a 500; one mock silently does nothing.
    */
   restoreActive?: RestoreActiveBehaviour;
-  /** The group `createGroup` makes; without it, the next free id. */
+  /**
+   * The group `createGroup` makes, name included, as the tenant names a new group itself;
+   * without it, the next free id and the name asked for.
+   */
   holdingGroup?: GroupRef;
   /**
    * The active read (and its archive-state read) also serves archived processes, as most
@@ -376,10 +380,24 @@ export class FakeTenant implements DeleteGateway {
     const call: FakeCall = { op: 'createGroup', name, groupUniqueId: parentGroupUniqueId };
     this.#begin(call);
     const id = this.#holdingGroup?.id ?? Math.max(0, ...this.#groups.keys()) + 1;
-    const group: GroupRef = { id, uniqueId: this.#holdingGroup?.uniqueId ?? `group-${id}`, name };
+    const group: GroupRef = { id, uniqueId: this.#holdingGroup?.uniqueId ?? `group-${id}`, name: this.#holdingGroup?.name ?? name };
     this.#groups.set(id, group);
     this.#end(call);
     return { ...group };
+  }
+
+  async renameGroup(groupUniqueId: string, newName: string): Promise<unknown> {
+    const group = [...this.#groups.values()].find((g) => g.uniqueId === groupUniqueId);
+    const call: FakeCall = { op: 'renameGroup', groupUniqueId, name: newName };
+    if (this.#begin(call, () => (group ? null : notFound()))) return {};
+    group!.name = newName;
+    this.#end(call);
+    return {};
+  }
+
+  /** A group's current name, for asserting a rename. */
+  groupName(groupUniqueId: string): string | undefined {
+    return [...this.#groups.values()].find((g) => g.uniqueId === groupUniqueId)?.name;
   }
 
   async deleteGroup(groupUniqueId: string): Promise<unknown> {

@@ -46,11 +46,12 @@ export async function removeHoldingGroup(
   } catch (error) {
     if (isFatal(error)) throw error;
     // A group of unknown contents is not deleted.
-    return [groupRow('Skipped', 'Could not verify the group is empty; delete it manually after checking')];
+    return [groupRow('Skipped', `Could not verify '${options.groupName}' is empty; find it at the top level of the tree and delete it after checking`)];
   }
 
   if (remaining.length > 0) {
-    const rows = [groupRow('Skipped', `Still holds ${remaining.length} process(es): ${remaining.map((p) => p.processUniqueId).join(', ')}`)];
+    // The name is in the message as well as the row, so it survives being read on its own (F5).
+    const rows = [groupRow('Skipped', `'${options.groupName}' left in place: still holds ${remaining.length} process(es): ${remaining.map((p) => p.processUniqueId).join(', ')}`)];
     // A process stranded here was moved in by this run and left behind, which makes it
     // collateral whatever the sweeps said. The checkpoints are the other producer of
     // collateral rows, so what they reported is not reported twice (W2: 7 rows for 5).
@@ -78,7 +79,7 @@ export async function removeHoldingGroup(
     await gateway.deleteGroup(group.uniqueId);
   } catch (error) {
     if (isFatal(error)) throw error;
-    return [groupRow('Failed', 'Delete failed; remove it manually', failureOf(error).status)];
+    return [groupRow('Failed', `Delete failed; remove '${options.groupName}' manually from the top level of the tree`, failureOf(error).status)];
   }
   return [groupRow('Success', 'Empty holding group deleted')];
 }

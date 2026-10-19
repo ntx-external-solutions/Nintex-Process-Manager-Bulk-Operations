@@ -222,10 +222,12 @@ export function browserDeleteGateway(): DeleteGateway {
     listGroups: async () => [],
     createGroup: async (name, parentGroupUniqueId) => {
       if (parentGroupUniqueId !== null) throw new Error('The holding group is made at the top level only.');
-      const created = await callPm<{ id: number; uniqueId: string }>({ op: 'group.create' });
-      // The tenant gives a new group its default name; the run reports it by this one.
-      return { id: created.id, uniqueId: created.uniqueId, name } satisfies GroupRef;
+      const created = await callPm<{ id: number; uniqueId: string; name?: string }>({ op: 'group.create' });
+      // The tenant gives a new group its default name. That is what is returned, so a run
+      // whose rename then fails names the group as it appears in the tree (F5).
+      return { id: created.id, uniqueId: created.uniqueId, name: created.name || name } satisfies GroupRef;
     },
+    renameGroup: (groupUniqueId, newName) => callPm({ op: 'group.rename', groupUniqueId, newName }),
     deleteGroup: (groupUniqueId) => callPm({ op: 'group.delete', groupUniqueId }),
     groupProcesses: (group) => callPm<GroupProcess[]>({ op: 'group.processes', groupUniqueId: group.uniqueId }),
   };

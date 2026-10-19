@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { resultRow, type ResultRow } from '../exec/report.ts';
 import { deleteResultsSummary, resumeUnwind, runBulkDelete, type BulkDeleteOptions } from './bulkDelete.ts';
 import type { DeleteEvent } from './events.ts';
-import { HOLDING_GROUP_NAME, type GroupRef } from './gateway.ts';
+import { HOLDING_GROUP_NAME, holdingGroupNameFor, type GroupRef } from './gateway.ts';
 import { newDependencyPlan } from './ledger.ts';
 import type { ProcessModel } from './model.ts';
 import { FakeTenant, type FakeProcessSeed, type FakeTenantOptions } from './testing/fakeTenant.ts';
@@ -56,6 +56,60 @@ test('a run with only active targets still has a holding group, and removes it w
   assert.deepEqual(tenant.deleted, [T1]);
   assert.equal(plan?.status, 'Completed');
   assert.equal(plan?.holdingGroup?.uniqueId, TEMP.uniqueId, 'the plan names it, so a resumed unwind can remove it');
+});
+
+// ---------------------------------------------------------------- F5: the holding group's name
+
+test('the holding group is renamed for the run, after its ids are saved', async () => {
+  // Every group stranded in rounds 2 to 4 had the tenant's default name (Cowork, phase 7).
+  const store = new FakePlanStore();
+  let savedBeforeRename: number | null = null;
+  const tenant = scenario([{ uniqueId: T1, name: 'Raise invoice', groupId: HOME.id }], {
+    holdingGroup: { ...TEMP, name: 'New Process Group' },
+    after: (call) => {
+      if (call.op === 'renameGroup') savedBeforeRename = store.saves.filter((p) => p.holdingGroup?.uniqueId === TEMP.uniqueId).length;
+    },
+  });
+  const start = new Date('2026-10-19T14:03:22.456Z');
+  const { rows } = await run(tenant, { planStore: store, now: () => start });
+
+  const renames = tenant.callsTo('renameGroup');
+  assert.equal(renames.length, 1);
+  assert.equal(renames[0]?.groupUniqueId, TEMP.uniqueId);
+  assert.equal(renames[0]?.name, 'Bulk Delete holding group (temporary, 2026-10-19 14:03:22 UTC)');
+  assert.equal(holdingGroupNameFor(start), renames[0]?.name);
+  assert.ok((savedBeforeRename ?? 0) >= 1, 'the group was on record before the rename was sent');
+  const createdAt = tenant.calls.findIndex((c) => c.op === 'createGroup');
+  const renamedAt = tenant.calls.findIndex((c) => c.op === 'renameGroup');
+  const firstMutation = tenant.calls.findIndex((c) => c.op === 'restore' || c.op === 'saveModel' || c.op === 'archive' || c.op === 'deleteProcess');
+  assert.ok(createdAt < renamedAt && renamedAt < firstMutation, 'renamed before any process is touched');
+  assert.equal(rowsOf(rows, 'Cleanup')[0]?.name, renames[0]?.name, 'the cleanup row uses the new name');
+  assert.equal(store.latest()?.holdingGroup?.name, renames[0]?.name);
+});
+
+test('a failed rename is logged and the run carries on, reporting the group by its default name', async () => {
+  const tenant = scenario(
+    [
+      { uniqueId: T1, name: 'Raise invoice', groupId: HOME.id },
+      { uniqueId: X1, name: 'Stray', groupId: TEMP.id },
+    ],
+    {
+      holdingGroup: { ...TEMP, name: 'New Process Group' },
+      fail: (call) => (call.op === 'renameGroup' ? { status: 500, message: 'Rename refused' } : null),
+    },
+  );
+  const { rows, events, plan } = await run(tenant);
+
+  assert.deepEqual(tenant.deleted, [T1], 'the run still deleted its target');
+  assert.ok(plan?.log.some((l) => /Could not rename the holding group .*Rename refused.*'New Process Group'/.test(l)));
+  // The stray process keeps the group from being removed, so the operator must find it.
+  const cleanup = rowsOf(rows, 'Cleanup')[0];
+  assert.equal(cleanup?.status, 'Skipped');
+  assert.equal(cleanup?.name, 'New Process Group');
+  assert.match(cleanup?.message ?? '', /'New Process Group' left in place/);
+  const logged = events.filter((e) => e.kind === 'log').map((e) => (e.kind === 'log' ? e.line : ''));
+  assert.ok(logged.some((l) => /holding group 'New Process Group' \(id 830\) was left in place/.test(l)));
+  assert.equal(plan?.holdingGroupRemoved, false);
 });
 
 test('an unattended stop says why, and the unwind still runs', async () => {

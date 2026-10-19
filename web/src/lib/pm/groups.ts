@@ -272,7 +272,7 @@ export function breadcrumbTitles(response: unknown): string[] {
  * and the run deletes it by UniqueId once it is empty. The numeric id, which
  * RestoreProcess needs, is read from the top level of the tree.
  */
-export async function createTopLevelGroup(ctx: PmContext): Promise<{ id: number; uniqueId: string }> {
+export async function createTopLevelGroup(ctx: PmContext): Promise<{ id: number; uniqueId: string; name: string }> {
   const created = await pmRequest<Record<string, unknown>>(ctx, {
     path: '/Process/Edit/CreateGroup',
     method: 'POST',
@@ -285,7 +285,27 @@ export async function createTopLevelGroup(ctx: PmContext): Promise<{ id: number;
   const top = await getChildGroups(ctx, null);
   const item = (top.treeItems ?? []).find((t) => t.uniqueId.toLowerCase() === uniqueId.toLowerCase());
   if (!item) throw new Error(`The new group ${uniqueId} is not at the top level of the tree, so its numeric id is unknown. Delete it by hand.`);
-  return { id: item.id, uniqueId };
+  // The tenant's default name, kept so a run whose rename fails still reports the group
+  // by the name an admin will see in the tree (F5).
+  return { id: item.id, uniqueId, name: typeof item.title === 'string' ? item.title : '' };
+}
+
+/**
+ * Rename one group (PGM's `renameGroup`; measured with a bearer token in S1). The delete
+ * run names its holding group with it straight after creating it (F5). A body that says
+ * `isValid: false` is a refusal even under a 200.
+ */
+export async function renameGroup(ctx: PmContext, processGroupUniqueId: string, newName: string): Promise<unknown> {
+  const response = await pmRequest<unknown>(ctx, {
+    path: '/Process/Edit/RenameGroup',
+    method: 'POST',
+    body: { processGroupUniqueId, newName },
+    retry: 'write',
+  });
+  if (typeof response === 'object' && response !== null && (response as Record<string, unknown>)['isValid'] === false) {
+    throw new Error('The tenant refused the rename.');
+  }
+  return response;
 }
 
 /**
