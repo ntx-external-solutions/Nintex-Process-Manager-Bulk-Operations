@@ -8,13 +8,11 @@ earlier task; don't start them.
 The R11 tasks for the PowerShell (old T1 and T2) are superseded. They're folded into W5.
 The PowerShell is frozen at v4.11: don't change it.
 
-## Next handover (19 Oct): F5, then F6, then stop
+## Next handover (19 Oct, later): W6
 
-W5 is done and R13, the first live delete, ran on 19 Oct (review under W5). It worked
-where it was meant to and found two engine bugs, one of which damaged test content.
-Work F5, then F6, one PR each, then stop for review. W6 stays Queued until both are
-merged and Cowork has re-run the R13 cases live. Don't run anything against the tenant
-yourself.
+F5 and F6 are merged and R14, the live re-run of the R13 cases, passed on 19 Oct (review
+under F6). W6 is Ready, with three small additions from R14 listed in it. One PR, then
+stop for review. Don't run anything against the tenant yourself.
 
 ---
 
@@ -655,10 +653,10 @@ Code approved; 547 tests pass on Cowork's run too. Your five decisions:
 - **A failed group lookup tries the model's group first:** agreed. RestoreProcess answers
   500 for a group that doesn't exist (measured), so the fallback to parking is safe.
 - **An active target refused deletion is made active again in its group:** agreed; it
-  matches where a held-back active target stays. One addition: a restored published
-  process comes back with an in-progress revision (1.0 becomes 1.1, measured in R13), so
-  that row should say the restore opened one and that the published version is
-  unchanged. Otherwise the owner finds a draft nobody wrote. Do this in W6, not a new PR.
+  matches where a held-back active target stays. One addition, corrected after R14: the archive pass
+  publishes a new major version and the restore opens an in-progress revision on top
+  (1.0 becomes 2.0, then 2.1), so the row should say both. Otherwise the owner finds a
+  version and a draft nobody made. In W6, not a new PR (see W6).
 - **The confirmation before any reference is removed:** agreed, that's the point of item 4.
 - **No new version number on the restored holder's row:** fine. The R13 re-run reads the
   versions from the tenant instead.
@@ -712,12 +710,67 @@ From Cowork's live test R13 (under W5). Items 1 and 2 are engine bugs; do them f
 
 ---
 
+### Cowork's live test R14 (19 Oct): pass
+
+The R13 cases again, through the app after PRs #70 to #72, on Cowork-built test content
+(7 targets, 6 holders, removed afterwards; tenant back to its baseline, every
+pre-existing id present). 18 rows: 16 Success, 2 Skipped, 0 Failed. The tenant matched
+every row.
+
+- **F6 item 1:** the three restored archived holders (published, never published, and one
+  archived over an open draft) and the orphaned one were all edited, published and
+  re-archived ("restored from the archive for the edit, and archived again"). None was
+  offered as a tick. Their targets were deleted.
+- **F6 item 2:** the real orphan was confirmed (its group's breadcrumb is empty), parked,
+  re-archived in the holding group and reported as "already orphaned". The listing was
+  right this time, so the disagreement path wasn't exercised live; it rests on the tests.
+- **F6 item 3:** no `groupExists` coverage warning.
+- **F6 item 4:** the confirmation named all six targets, the one kept and the holder
+  keeping it, before any holder was edited (checked on the tenant at that moment).
+- **F6 item 5:** the unticked draft holder and its kept target are `Skipped`.
+- **F5:** the holding group showed in the tree as `Bulk Delete holding group (temporary,
+  <UTC time>)` and was removed at cleanup.
+- An active target nothing held was archived and deleted. The kept active target was left
+  active and untouched (still 1.0, no new revision).
+
+**Your four unverified items**
+
+1. **A restored never-published process:** there's no such thing. Archiving publishes a
+   new major version: a never-published 0.3 is archived as 1.0 and a published 1.0 as
+   2.0 (the archived model has `ProcessRevisionStateId` null). A restore then opens an
+   in-progress revision on top (1.1, 2.1). That's why R13 refused it: after the restore it
+   looks published with an open draft. Your fix handles it, and publishes it.
+2. **A deleted group's breadcrumb:** HTTP 200 `{"isChildren":false,"breadcrumbItems":[]}`.
+   A live group gives the tenant, the parents and itself.
+3. **`additionalInfos` on a refused delete:** HTTP 500
+   `{"additionalInfos":{"linked Process":["<holder name>"]},"caption":"Process Cannot Be
+   Deleted","errorMessage":"Process cannot be deleted as it has links to the following
+   items","field":""}`. An object keyed by category, each a list of names. Your reader
+   handles it; add this exact body as a fixture.
+4. **The holding group's new name in the tree:** yes, as above.
+
+**One consequence for F6 item 1:** an archived holder with "a real draft" can't exist,
+because archiving publishes the draft. The archived model never shows one, so the
+refuse-and-offer-a-tick branch for archived holders never fires. Leave it as a guard,
+but say so in its comment and test name.
+
 ## W6. Bulk Delete UI, and folder cleanup
 
-Status: Queued (F5 and F6 done and reviewed; waits on Cowork's live re-run, R14)
+Status: Ready (R14 passed, 19 Oct)
 
 Both entry points (tree and archived view), delete-by-group target resolution, the
 collateral confirmation on screen, and the optional "delete now-empty groups" step,
 deepest first, offered only for groups the run actually emptied. Reuse W2b's group
 cleanup. After a delete, a group can still hold archived documents, which block deletion
 (S1), so those groups are kept and reported.
+
+Also in W6, from R14:
+
+1. **Say what a refused delete did to an active target.** The archive pass publishes a new
+   major version, and making it active again opens an in-progress revision on top (1.0
+   becomes 2.0, then 2.1). The row should say so, e.g. "Not deleted, so made active again
+   in group N. Archiving published it as 2.0, and the restore opened 2.1."
+2. **An `Archive` row for each active target the archive pass archives** before
+   deleting it. R14's active target was archived and deleted with only a `Delete` row.
+3. The F6 guard for an archived holder with a draft never fires (see R14 under F6):
+   update its comment and test name to say it's a guard.

@@ -54,9 +54,14 @@ Maintained by the Cowork session. Claude Code reads this but does not edit it.
   re-archived in, orphaning it. Both are in F6 with three smaller fixes. All R13 content
   removed; tenant back to 13 top-level groups, 186 active, 463 archived, every
   pre-existing id present.
-- F5 and F6 done and reviewed (19 Oct, 547 tests). Next: JB merges and deploys, then
-  Cowork runs R14, the R13 cases again plus the four items Claude Code could not verify
-  offline. W6 after that.
+- F5 and F6 done, reviewed and merged (19 Oct, PRs #70 to #72, 547 tests).
+- R14 (19 Oct), the R13 cases again: pass, 16 Success and 2 Skipped, tenant matched every
+  row. Restored holders are edited and re-archived, the real orphan was handled, the
+  confirmation names everything before any edit, the holding group has its new name.
+  Found: archiving publishes a new major version (so there's no archived draft, and no
+  restored never-published process). All content removed; tenant back to 13 top-level
+  groups, 186 active, 463 archived, every pre-existing id present.
+- Next: W6 is Ready, with three small R14 additions. Cowork tests it live after.
 - Token duration (60000 minutes) deferred by JB; not a task.
 - Process and group names were removed from Cowork's handoff text (18 Oct) per CLAUDE.md.
 - Spikes S1 to S3 and the variation test are in `API_ARCHITECTURE.md`. One lasting change
