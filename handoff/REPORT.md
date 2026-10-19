@@ -6,6 +6,189 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## W6. Bulk Delete UI, and folder cleanup
+
+Commits on `claude/web-w6-delete-ui`, cut from Cowork's R14 handoff commit (`4b40304`),
+which goes into the PR untouched as its first commit:
+- `d10ec1b`: the three R14 additions (engine);
+- `8338ee6`: selection, cleanup candidates, and the collateral table (library);
+- `6fb8676`: the page, the shared cleanup panel, the mock and drivers.
+
+Cowork's R14 edits were already committed (`4b40304`, on the old F6 branch, not yet on
+`claude/main`), so there was nothing left to commit first. I didn't change them.
+
+**The three R14 additions.**
+1. **A refused active target's row says what archiving and the restore did.** Before the
+   restore, the run reads the archived model's version; after it, it reads the live
+   version. The row now ends: "Not deleted, so made active again in group N. Archiving
+   published it as 2.0, and the restore opened 2.1." If either read fails, the row says
+   "a new major version" or "an in-progress revision on top" rather than guessing. That
+   is two extra reads, made only for a refused active target.
+2. **An `Archive` row for each active target the archive pass archives.**
+   - `Success`, "Archived before the delete" (plus ", after the pending-approval
+     override" when that ran);
+   - or `Failed` with the archive's reason and status code, saying the delete was still
+     sent.
+   - A target the Hold restored gets no `Archive` row: it is going back to the state the
+     run found it in, and its `Delete` row covers it.
+3. **The guards.** The archived-draft branch is now labelled a guard in its comments
+   (`checkHolderDrafts`, `RevisionBeforeRestore`) and test name. So is the
+   never-published branch, which R14 showed can't happen either (archiving publishes a
+   0.3 as 1.0).
+
+Also from R14:
+- The exact refusal body is a fixture, passed through `tenantMessage` as the proxy
+  would. The row reads "Delete failed (HTTP 500): Process cannot be deleted as it has
+  links to the following items. Still referenced by: <holder>." The parser needed no
+  change.
+- The fake tenant's archive now publishes a new major version with no revision state,
+  as measured.
+
+**The page.**
+- **Three ways in, which add up:** the tree, the archived list, and ids or a CSV, as
+  tabs. The archived list is read the first time its tab is opened, with breadcrumb
+  paths.
+- **Delete by group** (`resolveDeleteSelection`): a checked group means every process
+  under it from the tree, plus every archived process in the index whose group is in
+  the checked subtree.
+  - The match is on the group's UniqueId, or its numeric id when the row has no
+    UniqueId.
+  - Orphans never match. They are picked from the archived list's own bucket.
+  - A subgroup that is unchecked inside a checked group keeps its archived processes
+    out.
+- **The plan:**
+  - two tables: "Archived first, then deleted" and "Deleted, already archived", each
+    target with its group path and how it was chosen;
+  - variation siblings (read from each tree target's `variationSetData`, with the name
+    match beside them) and any sets that couldn't be read. The run stays disabled until
+    "I have reviewed the variation warnings" is ticked;
+  - the existing plan text.
+- **Left out:** shortcuts, ids not found, and archived ticks that have gone since are
+  listed under "Left out", and their rows go at the top of the results file.
+- **The collateral gate** is its own panel: a table of process and what changed, with
+  the same words as the text list (`collateralEntries`) and the notes under it.
+- **The run** is unchanged. It gets the resolved ids, and the engine resolves them again
+  against its own fresh read.
+- **Cleanup afterwards** (`groupsTheRunDeletedFrom`, then the shared `CleanupPanel`):
+  - Offered only after a run whose plan is `Completed`, and only for groups checked in
+    the tree that a deleted target was in, or checked groups above one. They are
+    checked against a fresh listing, deepest first.
+  - `planCleanup` gains `archivedProcesses: 'keep'`. In a delete, a group still holding
+    an archived process (one the run kept, or one not selected) is kept and the reason
+    names the process. Archive keeps its old behaviour: it offers the group and warns
+    about the orphans.
+  - Documents, active processes, shortcuts and kept subgroups keep a group as before.
+    Each group gets a `DeleteGroup` row.
+  - A run that stopped, or whose fresh read failed, says why cleanup isn't offered.
+- **A run that dies** still offers "Finish it" from the saved plan, as since phase 7.
+  That was the W6 requirement from the phase 1 review.
+
+**Functions touched.**
+- `delete/executor.ts`:
+  - new: `preDeleteArchiveRow`, `archiveAndRestoreVersions`;
+  - changed: `returnActiveTarget` (reads versions), `deletePlanTargets` (`Archive`
+    rows);
+  - guard comments in `checkHolderDrafts`.
+- `delete/ledger.ts`: guard comments on `RevisionBeforeRestore`.
+- `delete/selection.ts` (new): `resolveDeleteSelection`, `groupsTheRunDeletedFrom`,
+  `deleteVariations`, `selectionIds`, `selectionSummary`.
+- `cleanup/plan.ts`: `planCleanup` takes `CleanupPlanOptions`.
+- `delete/collateral.ts`: `collateralEntries`, and `COLLATERAL_NOTES` shared with
+  `collateralLines`.
+- `app/components/CleanupPanel.tsx`: moved from `app/archive/`, with `heading`, `offer`
+  and `archivedProcesses` props. The archive page passes its old text.
+- `app/delete/page.tsx`: rewritten around the above.
+- `delete/testing/fakeTenant.ts`: archiving publishes a new major version.
+
+**Results-file operations.**
+- `Archive` is new in a delete run.
+- `DeleteGroup` and `GroupDeleted` (Archive's) can now appear after a delete.
+- `Select` and `Resolve` `Skipped` rows are new in a delete run, for what was selected
+  and left out.
+- The page's status list adds `Warning` (F6's `GroupCheck`), `Blocked` and `Orphaned`
+  (cleanup's), so none of them is shown as unexpected.
+
+**Tests.** 562 tests, all pass, none skipped (547 before W6). Typecheck and build are
+clean.
+- `deletion.test.ts`, +4:
+  - versions that can't be read are described;
+  - the R14 refusal body;
+  - an `Archive` row only for active targets;
+  - a refused archive is a `Failed` `Archive` row.
+
+  The refused-delete test is updated to the versions wording.
+- `orchestrator.test.ts`, +1: a refused active target end to end (`Archive`, then
+  `Delete` with the versions, active at 2.1 in its group, not archived again). Two
+  tests renamed `guard: …`.
+- `selection.test.ts`, +8 (new):
+  - a checked group takes in its subtree and its archived processes, with no group
+    nobody checked and no orphan;
+  - an unchecked subgroup stays out;
+  - processes picked one by one bring no group;
+  - the three ways in add up, each process once;
+  - cleanup candidates, twice;
+  - variations;
+  - archived-view paths.
+- `cleanup.test.ts`, +1: after a delete, an archived process keeps its group and the
+  parent.
+- `collateral.test.ts`, +1: the table carries the list's words.
+
+Checked against the old code: the 6 new or updated engine tests fail with the old
+`executor.ts`, and the cleanup test fails with the old `plan.ts`. The selection module
+is new.
+
+**Offline drive.** Every driver ran against the mock tenant in headless Chrome:
+- `drive-delete-group` (new): check Retired.
+  - The plan shows Old thing (archived first, picked in the tree) and an archived
+    process from Retired (archived in a checked group).
+  - The run writes 7 rows, all Success, including `Archive` before Old thing's
+    `Delete`.
+  - The cleanup offers Finance / Retired, deletes it, and adds a `DeleteGroup` row.
+- `drive-delete-refused` (new): the R14 body. An `Archive` row, then `Delete` `Failed`
+  500 naming the holder, ending "Archiving published it as 2.0, and the restore opened
+  2.1."
+- `drive-delete-archived` (new): a tick in the archived list plus an id. The plan shows
+  both phases with group paths from the breadcrumbs, and no writes.
+- `drive-delete`, `drive-delete-run` (now 6 rows, all Success: the new `Archive` row),
+  `drive-delete-resume` (4 rows, all Success), `drive-archive` (its cleanup through the
+  moved panel), `drive-move`, `drive-ownership` and `drive-expired` all pass.
+- At 390px wide, the input and plan screens have no sideways scroll.
+
+**Not verified offline. For Cowork's live test:**
+1. Delete by group on the tenant: that the archived processes the listing places in a
+   checked group are the ones the operator expects, including subgroups. They are
+   matched on the listing's `groupUniqueId`.
+2. The two version reads on a refused active target: that the mobile batch read serves
+   the just-archived target with its new version, and the live read shows the restore's
+   version afterwards.
+3. Group cleanup after a delete on a real group: the documents check, the fresh read,
+   and the `DeleteGroup` call are Archive's (R12), but they haven't run after a delete.
+4. The collateral table was not shown in a drive, because the mock produces no
+   collateral. It is tested as a function.
+
+**Decisions I'd like from Cowork.**
+- **Cleanup candidates are checked groups only.** A group whose processes were all picked
+  one by one, or picked from the archived list, is not offered even if the run emptied
+  it. The alternative is to offer every group a deleted target was in, which can offer a
+  group nobody selected.
+- **After a delete, a group holding an archived process is kept**, not offered with an
+  orphan warning as after Archive. Delete by group takes in a checked group's archived
+  processes, so one still there was kept by the run (held back, or refused). Deleting
+  its group would strand it.
+- **The variation review is required before the run**, as Archive's is. Before W6 the
+  delete page had no preview of siblings. The run's own name-match question and the
+  collateral checkpoints are unchanged.
+- **A checked group with one process unchecked still takes in all its archived
+  processes.** Unchecking speaks for that process only. The plan lists each archived one
+  by name, so the operator sees them before running.
+- **An archived target restored by the Hold gets no `Archive` row.** Its `Delete` row,
+  or its `ReArchive` row if kept, covers it.
+
+**Deferred or disputed.** Nothing deferred. The decisions above are where I went beyond
+the task text.
+
+---
+
 ## F6. Fixes from live round R13
 
 Commits on `claude/web-f6-r13-fixes`. The branch is cut from the F5 branch because both

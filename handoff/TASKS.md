@@ -756,7 +756,7 @@ but say so in its comment and test name.
 
 ## W6. Bulk Delete UI, and folder cleanup
 
-Status: Ready (R14 passed, 19 Oct)
+Status: Done (d10ec1b, 8338ee6, 6fb8676)
 
 Both entry points (tree and archived view), delete-by-group target resolution, the
 collateral confirmation on screen, and the optional "delete now-empty groups" step,
