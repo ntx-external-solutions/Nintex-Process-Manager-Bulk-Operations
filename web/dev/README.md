@@ -24,6 +24,9 @@ node dev/drive-expired.mjs     # the session dies between preview and run (R12)
 node dev/drive-delete.mjs      # a Bulk Delete dry run: plans, writes nothing
 node dev/drive-delete-run.mjs  # a real Bulk Delete: hold, remove, delete, put back, clean up
 node dev/drive-delete-resume.mjs  # the session dies mid-run; sign in again and finish it from the saved plan
+node dev/drive-delete-group.mjs    # delete by group: a checked group's archived processes too, then delete the emptied group
+node dev/drive-delete-archived.mjs # the archived list and ids as ways in, as a dry run: writes nothing
+node dev/drive-delete-refused.mjs  # the tenant refuses an active target's delete: Archive row, versions, active again
 ```
 
 Each script prints the screens it passes through and the write calls the mock received.

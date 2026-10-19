@@ -1,7 +1,13 @@
 'use client';
 
 /**
- * Bulk Delete: a dry run, then the run itself (W5 phase 7).
+ * Bulk Delete: choose, build the plan (a dry run), run it, then optionally delete the
+ * groups it emptied (W6).
+ *
+ * Three ways in, which add up: the tree (whole groups or processes), the archived view,
+ * and a list of ids. A checked group means every process under it and every archived
+ * process whose group is under it, which the tree never shows; active ones are archived
+ * first, so the preview shows the two phases apart (lib/delete/selection.ts).
  *
  * The dry run builds the plan the way the script's preview does, reading and never
  * writing. The run then does everything the script's Mode 5 does, building its own plan
@@ -10,17 +16,20 @@
  * plan is kept in this browser as the run goes, so a run that dies (a session that ends
  * mid-way) can be finished from it after signing in again, or from a downloaded copy.
  *
- * The tree and archived-view entry points, delete by group and empty-group cleanup are
- * W6.
+ * After a run that finished, the groups checked in the tree that it deleted something
+ * from are offered for deletion, deepest first, through Archive's group cleanup. A group
+ * still holding anything, an archived process the run kept included, is kept and
+ * reported (spike S1: documents block a group's delete).
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
+import { targetsInVariationSets, variationMessage, type VariationMatch } from '@/lib/archive/plan.ts';
 import { resultsToCsv, type ResultRow } from '@/lib/exec/report.ts';
 import { errorMessage } from '@/lib/exec/runner.ts';
 import { deleteConfirmationLines, deleteResultsSummary, resumeUnwind, runBulkDelete, type DeleteDecisions } from '@/lib/delete/bulkDelete.ts';
 import type { Reconciliation } from '@/lib/delete/claims.ts';
-import { collateralLines, variationWarningLines } from '@/lib/delete/collateral.ts';
+import { COLLATERAL_NOTES, collateralEntries, type CollateralChange, variationWarningLines } from '@/lib/delete/collateral.ts';
 import type { DeleteEvent, DeleteStage } from '@/lib/delete/events.ts';
 import { REFERENCE_REMOVAL_DESCRIPTION } from '@/lib/delete/executor.ts';
 import { findOrphanedGroupProcesses, groupExistsCoverage, groupExistsCoverageLines } from '@/lib/delete/groups.ts';
@@ -28,25 +37,60 @@ import { orphanedTargetWarningLines } from '@/lib/delete/holdingGroup.ts';
 import { parsePlan, serializePlan, type DependencyPlan, type DraftHolder } from '@/lib/delete/ledger.ts';
 import type { DeleteIndex } from '@/lib/delete/model.ts';
 import { buildDeletePlan, loadDeleteIndex, planSummaryLines } from '@/lib/delete/planner.ts';
-import { resolveTargetIds, targetsFromCsv } from '@/lib/delete/targets.ts';
+import {
+  deleteVariations,
+  groupsTheRunDeletedFrom,
+  resolveDeleteSelection,
+  selectionIds,
+  selectionSummary,
+  type DeleteSelection,
+  type DeleteTarget,
+} from '@/lib/delete/selection.ts';
+import { targetsFromCsv } from '@/lib/delete/targets.ts';
+import type { VariationSet } from '@/lib/pm/processes.ts';
+import { groupArchived, groupsNeedingPaths, loadArchived, loadGroupPaths, type ArchivedView as ArchivedViewData } from '@/lib/select/archived.ts';
+import { loadForSelection, type CoveredGroup } from '@/lib/select/resolve.ts';
+import { hasSelection } from '@/lib/select/selection.ts';
+import { loadProcessIndex, type ProcessIndex } from '@/lib/tenant/state.ts';
 import { datedFilename, downloadCsv, downloadText } from '@/lib/ui/download.ts';
-import { browserDeleteGateway, browserPlanningGateway, PmRequestError, type SessionInfo } from '@/lib/ui/gateway.ts';
+import { browserDeleteGateway, browserGateway, browserPlanningGateway, groupBreadcrumb, PmRequestError, type SessionInfo } from '@/lib/ui/gateway.ts';
 import { browserPlanStore, planNeedsFinishing } from '@/lib/ui/planStore.ts';
+import { ArchivedView } from '../components/ArchivedView.tsx';
+import { CleanupPanel } from '../components/CleanupPanel.tsx';
 import { ResultsSummary } from '../components/ResultsSummary.tsx';
 import { SessionGate } from '../components/SessionGate.tsx';
+import { TreeBrowser, useBrowseTree } from '../components/TreeBrowser.tsx';
 
-const RESULT_STATUSES = ['Success', 'Skipped', 'Failed', 'Accepted'] as const;
+const RESULT_STATUSES = ['Success', 'Skipped', 'Failed', 'Accepted', 'Warning', 'Blocked', 'Orphaned'] as const;
 
 type Question =
   | { kind: 'yesno'; title: string; lines: string[]; yes: string; no: string; resolve: (answer: boolean) => void }
+  | { kind: 'collateral'; phase: string; collateral: readonly CollateralChange[]; resolve: (answer: boolean) => void }
   | { kind: 'drafts'; holders: readonly DraftHolder[]; resolve: (ids: string[]) => void };
+
+type Source = 'tree' | 'archived' | 'ids';
+
+interface Preview {
+  plan: DependencyPlan;
+  index: DeleteIndex;
+  selection: DeleteSelection;
+  variations: VariationMatch[];
+  unreadSets: Array<{ uniqueId: string; name: string; error: string }>;
+  seconds: number;
+}
+
+/** What the done screen needs to offer the group cleanup, or why it can't. */
+type CleanupOffer =
+  | { kind: 'none' }
+  | { kind: 'offer'; groups: CoveredGroup[]; after: ProcessIndex }
+  | { kind: 'withheld'; groups: CoveredGroup[]; reason: string };
 
 type Stage =
   | { kind: 'input' }
   | { kind: 'planning'; progress: string }
-  | { kind: 'plan'; plan: DependencyPlan; index: DeleteIndex; unknown: string[]; seconds: number }
+  | { kind: 'plan'; preview: Preview }
   | { kind: 'running'; log: string[]; progress: string }
-  | { kind: 'done'; rows: ResultRow[]; plan: DependencyPlan | null; log: string[]; title: string };
+  | { kind: 'done'; rows: ResultRow[]; plan: DependencyPlan | null; log: string[]; title: string; cleanup: CleanupOffer };
 
 const STAGE_TEXT: Record<DeleteStage, string> = {
   gathering: 'Reading both process lists',
@@ -56,13 +100,20 @@ const STAGE_TEXT: Record<DeleteStage, string> = {
   'building-plan': 'Building the plan, with the archive restored',
   'removing-references': 'Checking each holder for open drafts, then removing references from the processes that hold them',
   verifying: 'Reading each edited process back to check nothing is left',
-  'archiving-targets': 'Archiving the targets before deleting them',
+  'archiving-targets': 'Archiving the active targets before deleting them',
   'deleting-targets': 'Deleting the targets',
   'checking-collateral-after-delete': 'Checking the tenant again after the deletes',
   'returning-processes': 'Returning what the run restored to its own group, archived',
   'reversing-collateral': 'Putting back processes that changed without being targets',
   cleanup: 'Removing the holding group',
   rechecking: 'Re-checking what still needs attention against a fresh read',
+};
+
+const SOURCE_TEXT: Record<DeleteTarget['source'], string> = {
+  tree: 'Picked in the tree',
+  group: 'Archived in a checked group',
+  archived: 'Picked in the archived list',
+  ids: 'By id',
 };
 
 export default function DeletePage() {
@@ -74,6 +125,7 @@ export default function DeletePage() {
 }
 
 function DeleteFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOut: () => void }) {
+  const reads = useMemo(() => browserGateway(), []);
   const planning = useMemo(() => browserPlanningGateway(), []);
   const gateway = useMemo(() => browserDeleteGateway(), []);
   const store = useMemo(() => browserPlanStore(), []);
@@ -83,8 +135,13 @@ function DeleteFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
     },
     [onSignedOut],
   );
+  const browse = useBrowseTree(reads, handleError);
 
   const [stage, setStage] = useState<Stage>({ kind: 'input' });
+  const [source, setSource] = useState<Source>('tree');
+  const [archived, setArchived] = useState<ArchivedViewData | null>(null);
+  const [archivedNote, setArchivedNote] = useState<string | null>(null);
+  const [archivedPicked, setArchivedPicked] = useState<ReadonlySet<string>>(new Set());
   const [ids, setIds] = useState('');
   const [fileNote, setFileNote] = useState<string | null>(null);
   const [thorough, setThorough] = useState(false);
@@ -100,6 +157,30 @@ function DeleteFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
       .catch(() => setUnfinished(null));
   }, [store]);
 
+  // The archived list is read the first time it is opened, not on every visit.
+  const archivedRequested = useRef(false);
+  async function openArchived() {
+    setSource('archived');
+    if (archivedRequested.current) return;
+    archivedRequested.current = true;
+    try {
+      setArchivedNote('Reading the archived list…');
+      const processes = await loadArchived(reads.processesList, {
+        onPage: (loaded, total) => setArchivedNote(`Reading the archived list… ${loaded} of ${total}`),
+      });
+      setArchivedNote('Reading group paths…');
+      const paths = await loadGroupPaths(groupsNeedingPaths(processes), groupBreadcrumb, {
+        isFatal: (e) => (e instanceof PmRequestError && e.signedOut ? 'signed out' : null),
+      });
+      setArchived(groupArchived(processes, (id) => paths.get(id) ?? null));
+      setArchivedNote(null);
+    } catch (cause) {
+      handleError(cause);
+      archivedRequested.current = false;
+      setArchivedNote(`Could not read the archived list: ${errorMessage(cause)}. Open it again to retry.`);
+    }
+  }
+
   async function readFile(file: File | undefined) {
     setFileNote(null);
     if (!file) return;
@@ -112,6 +193,10 @@ function DeleteFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
     setFileNote(`${file.name}: ${read.ids.length} id(s).`);
   }
 
+  const typedIds = ids.split(/[\s,;]+/).filter((v) => v !== '');
+  const treeChosen = hasSelection(browse.selection);
+  const anything = treeChosen || archivedPicked.size > 0 || typedIds.length > 0;
+
   async function dryRun() {
     setError(null);
     const started = Date.now();
@@ -119,26 +204,57 @@ function DeleteFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
       if (event.kind === 'progress') setStage({ kind: 'planning', progress: `${event.label}: ${event.done} of ${event.total}` });
     };
     try {
+      let tree = null;
+      if (treeChosen) {
+        setStage({ kind: 'planning', progress: 'Reading the checked groups…' });
+        const loaded = await loadForSelection(reads, browse.tree, browse.selection, {
+          onProgress: (n) => setStage({ kind: 'planning', progress: `Reading the checked groups… ${n} read` }),
+        });
+        browse.setTree(loaded.tree);
+        tree = loaded.resolution;
+      }
       setStage({ kind: 'planning', progress: 'Reading both process lists…' });
       const index = await loadDeleteIndex(planning, {
         onProgress: (loaded) => setStage({ kind: 'planning', progress: `Reading both process lists: ${loaded} so far` }),
       });
-      const { uniqueIds, unknown } = resolveTargetIds(ids.split(/[\s,;]+/), index);
-      if (uniqueIds.length === 0) {
-        setError(unknown.length > 0 ? `None of the ids matched a process: ${unknown.join(', ')}` : 'Enter at least one process id.');
+      const paths = new Map<string, string>();
+      for (const bucket of archived?.buckets ?? []) if (bucket.groupExists) paths.set(bucket.key.toLowerCase(), bucket.label);
+      const selection = resolveDeleteSelection({ tree, archived: archivedPicked, ids: typedIds, index, groupPath: (g) => paths.get(g.toLowerCase()) ?? null });
+      if (selection.targets.length === 0) {
+        const unknown = selection.skipped.filter((r) => r.operation === 'Resolve').map((r) => r.objectId);
+        setError(unknown.length > 0 ? `None of the ids matched a process: ${unknown.join(', ')}` : 'Nothing selected resolves to a process to delete.');
         setStage({ kind: 'input' });
         return;
       }
+
+      // Siblings are not in the tree, so each variation's set is read from the process.
+      const sets = new Map<string, VariationSet>();
+      const unreadSets: Preview['unreadSets'] = [];
+      const inSets = targetsInVariationSets(tree?.processes ?? []);
+      for (const [i, uniqueId] of inSets.entries()) {
+        setStage({ kind: 'planning', progress: `Reading variation sets… ${i + 1} of ${inSets.length}` });
+        try {
+          const set = await reads.variationSet(uniqueId);
+          if (set) sets.set(uniqueId.toLowerCase(), set);
+        } catch (cause) {
+          if (cause instanceof PmRequestError && cause.signedOut) throw cause;
+          unreadSets.push({ uniqueId, name: index.get(uniqueId.toLowerCase())?.name ?? uniqueId, error: errorMessage(cause) });
+        }
+      }
+
       const plan = await buildDeletePlan(planning, {
         siteUrl: session.siteUrl,
-        targetUniqueIds: uniqueIds,
+        targetUniqueIds: selectionIds(selection),
         index,
         allowRestore: false,
         holdingGroupId: null,
         scanActiveForInputOutput: thorough,
         onEvent,
       });
-      setStage({ kind: 'plan', plan, index, unknown, seconds: Math.round((Date.now() - started) / 1000) });
+      setStage({
+        kind: 'plan',
+        preview: { plan, index, selection, variations: deleteVariations(index, selection.targets, sets), unreadSets, seconds: Math.round((Date.now() - started) / 1000) },
+      });
     } catch (cause) {
       handleError(cause);
       setError(errorMessage(cause));
@@ -151,7 +267,10 @@ function DeleteFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
     new Promise<boolean>((resolve) => setQuestion({ kind: 'yesno', title, lines, yes, no, resolve }));
 
   /** Runs one engine call with the live log, then shows its results. */
-  async function withLog(title: string, work: (onEvent: (event: DeleteEvent) => void) => Promise<{ results: ResultRow[]; plan: DependencyPlan | null }>) {
+  async function withLog(
+    title: string,
+    work: (onEvent: (event: DeleteEvent) => void) => Promise<{ results: ResultRow[]; plan: DependencyPlan | null; cleanup?: CleanupOffer }>,
+  ) {
     setError(null);
     const log: string[] = [];
     const push = (line: string) => {
@@ -174,7 +293,7 @@ function DeleteFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
     try {
       const run = await work(onEvent);
       setUnfinished(planNeedsFinishing(run.plan) ? run.plan : null);
-      setStage({ kind: 'done', rows: run.results, plan: run.plan, log, title });
+      setStage({ kind: 'done', rows: run.results, plan: run.plan, log, title, cleanup: run.cleanup ?? { kind: 'none' } });
     } catch (cause) {
       handleError(cause);
       const saved = await store.load().catch(() => null);
@@ -182,16 +301,17 @@ function DeleteFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
       setError(
         `${errorMessage(cause)} The run stopped here. Its plan is saved in this browser: sign in again if asked, then use "Finish it" at the top of this page to put back what it un-archived.`,
       );
-      setStage({ kind: 'done', rows: [], plan: saved, log, title: 'The run did not finish' });
+      setStage({ kind: 'done', rows: [], plan: saved, log, title: 'The run did not finish', cleanup: { kind: 'none' } });
     }
   }
 
-  async function runDelete(plan: DependencyPlan, index: DeleteIndex, options: RunOptions) {
+  async function runDelete(preview: Preview, options: RunOptions) {
+    const { index, selection } = preview;
     const nameOf = (id: string) => index.get(id.toLowerCase())?.name || id;
     const pairLines = (rows: readonly Reconciliation[]) =>
       rows.map((r) => `${nameOf(r.queriedUniqueId)} -> ${nameOf(r.relatedUniqueId)}: ${r.category}, claimed ${r.claimed}, located ${r.located}. ${r.note}`);
     const decisions: DeleteDecisions = {
-      collateral: (collateral, phase) => askYesNo('Processes changed that were not targets', collateralLines(collateral, phase), 'Accept and carry on (they are still put back at the end)'),
+      collateral: (collateral, phase) => new Promise<boolean>((resolve) => setQuestion({ kind: 'collateral', phase, collateral, resolve })),
       variation: (warning) => askYesNo('A target looks like a variation', variationWarningLines(warning), 'Accept the risk to these masters'),
       failedTargets: (failed) =>
         askYesNo('Some targets could not be checked for dependencies', failed.map((f) => `${nameOf(f.uniqueId)}: HTTP ${f.status} ${f.error ?? ''}`), 'Carry on without them'),
@@ -214,10 +334,10 @@ function DeleteFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
       confirmDelete: (c) =>
         askYesNo('Permanent deletion', deleteConfirmationLines(c), `Delete ${c.deleting.length} process(es)`, 'Cancel and put things back'),
     };
-    await withLog('Delete finished', (onEvent) =>
-      runBulkDelete(gateway, {
+    await withLog('Delete finished', async (onEvent) => {
+      const run = await runBulkDelete(gateway, {
         siteUrl: session.siteUrl,
-        source: { kind: 'ids', ids: plan.targetUniqueIds },
+        source: { kind: 'ids', ids: selectionIds(selection) },
         planStore: store,
         thoroughScan: thorough,
         approvalsEnabled: options.approvalsEnabled,
@@ -226,8 +346,28 @@ function DeleteFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
         changeDescription: options.changeDescription.trim() || REFERENCE_REMOVAL_DESCRIPTION,
         decisions,
         onEvent,
-      }),
-    );
+      });
+      // What was selected and left out, then what the run did: every row in one file.
+      return { results: [...selection.skipped, ...run.results], plan: run.plan, cleanup: await cleanupOffer(selection, run.results, run.plan) };
+    });
+  }
+
+  /**
+   * The groups the finished run may offer, read against a fresh listing. Only a run that
+   * completed: one that stopped has put things back, and its groups are as they were.
+   */
+  async function cleanupOffer(selection: DeleteSelection, rows: readonly ResultRow[], plan: DependencyPlan | null): Promise<CleanupOffer> {
+    const deleted = rows.filter((r) => r.operation === 'Delete' && r.status === 'Success').map((r) => r.objectId);
+    const groups = groupsTheRunDeletedFrom(selection, deleted);
+    if (groups.length === 0) return { kind: 'none' };
+    if (plan?.status !== 'Completed') return { kind: 'withheld', groups, reason: 'the run did not complete' };
+    try {
+      return { kind: 'offer', groups, after: await loadProcessIndex(reads.processesList) };
+    } catch (cause) {
+      // Not handleError: a dead session here must not swap the page for the sign-in
+      // prompt, or the rows for everything this run already changed would be lost.
+      return { kind: 'withheld', groups, reason: `the process lists could not be read again (${errorMessage(cause)})` };
+    }
   }
 
   async function finish(plan: DependencyPlan) {
@@ -244,10 +384,21 @@ function DeleteFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
     setUnfinished(plan);
   }
 
+  function startOver() {
+    browse.refresh();
+    archivedRequested.current = false;
+    setArchived(null);
+    setArchivedNote(null);
+    setArchivedPicked(new Set());
+    setIds('');
+    setSource('tree');
+    setStage({ kind: 'input' });
+  }
+
   const answer = (value: boolean | string[]) => {
     const q = question;
     setQuestion(null);
-    if (q?.kind === 'yesno') q.resolve(value === true);
+    if (q?.kind === 'yesno' || q?.kind === 'collateral') q.resolve(value === true);
     if (q?.kind === 'drafts') q.resolve(Array.isArray(value) ? value : []);
   };
 
@@ -287,68 +438,84 @@ function DeleteFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
 
       {question !== null && (
         // Keyed, so one question's ticks never carry over to the next.
-        <QuestionPanel key={question.kind === 'yesno' ? `q|${question.title}|${question.lines.length}` : 'drafts'} question={question} onAnswer={answer} />
+        <QuestionPanel
+          key={question.kind === 'yesno' ? `q|${question.title}|${question.lines.length}` : question.kind === 'collateral' ? `c|${question.phase}` : 'drafts'}
+          question={question}
+          onAnswer={answer}
+        />
       )}
 
       {stage.kind === 'input' && (
-        <div className="panel">
-          <h2>1. Which processes</h2>
-          <label htmlFor="ids">Process ids (GUIDs or numeric ids), one per line</label>
-          <textarea id="ids" rows={8} value={ids} onChange={(e) => setIds(e.target.value)} />
-          <label htmlFor="file">Or a CSV with a ProcessID or ObjectID column (a results file works)</label>
-          <input id="file" type="file" accept=".csv,text/csv" onChange={(e) => void readFile(e.target.files?.[0])} />
-          {fileNote !== null && <p className="small">{fileNote}</p>}
-          <label className="checkbox">
-            <input type="checkbox" checked={thorough} onChange={(e) => setThorough(e.target.checked)} />
-            <span>
-              Also scan active processes for Input/Output references
-              <span className="detail">Slow: one read per active process. The script&rsquo;s thorough scan.</span>
-            </span>
-          </label>
-          <div className="row">
-            <button type="button" disabled={ids.trim() === ''} onClick={() => void dryRun()}>
-              Build the plan (dry run)
-            </button>
+        <>
+          <div className="panel">
+            <h2>1. Choose what to delete</h2>
+            <p>
+              Pick from the tree, from the archived list, or by id; the three add up. Checking a group means every process
+              under it, including subgroups you have not opened, and every archived process whose group is under it. Active
+              processes are archived first, then deleted. Nothing changes until you run the delete.
+            </p>
+            <div className="row" role="tablist">
+              {(
+                [
+                  ['tree', `From the tree${treeChosen ? ' (some checked)' : ''}`],
+                  ['archived', `From the archived list${archivedPicked.size > 0 ? ` (${archivedPicked.size})` : ''}`],
+                  ['ids', `By id or CSV${typedIds.length > 0 ? ` (${typedIds.length})` : ''}`],
+                ] as const
+              ).map(([key, label]) => (
+                <button key={key} type="button" role="tab" aria-selected={source === key} className={source === key ? '' : 'secondary'} onClick={() => (key === 'archived' ? void openArchived() : setSource(key))}>
+                  {label}
+                </button>
+              ))}
+            </div>
           </div>
-          <label htmlFor="plan-file">Or finish an interrupted run from a downloaded plan</label>
-          <input id="plan-file" type="file" accept=".json,application/json" onChange={(e) => void uploadPlan(e.target.files?.[0])} />
-        </div>
+
+          {source === 'tree' && <TreeBrowser state={browse} />}
+
+          {source === 'archived' && (
+            <>
+              {archivedNote !== null && <p className="pending">{archivedNote}</p>}
+              {archived !== null && <ArchivedView view={archived} selected={archivedPicked} onChange={setArchivedPicked} />}
+            </>
+          )}
+
+          {source === 'ids' && (
+            <div className="panel">
+              <label htmlFor="ids">Process ids (GUIDs or numeric ids), one per line</label>
+              <textarea id="ids" rows={8} value={ids} onChange={(e) => setIds(e.target.value)} />
+              <label htmlFor="file">Or a CSV with a ProcessID or ObjectID column (a results file works)</label>
+              <input id="file" type="file" accept=".csv,text/csv" onChange={(e) => void readFile(e.target.files?.[0])} />
+              {fileNote !== null && <p className="small">{fileNote}</p>}
+            </div>
+          )}
+
+          <div className="panel">
+            <label className="checkbox">
+              <input type="checkbox" checked={thorough} onChange={(e) => setThorough(e.target.checked)} />
+              <span>
+                Also scan active processes for Input/Output references
+                <span className="detail">Slow: one read per active process. The script&rsquo;s thorough scan.</span>
+              </span>
+            </label>
+            <div className="row">
+              <button type="button" disabled={!anything} onClick={() => void dryRun()}>
+                Build the plan (dry run)
+              </button>
+            </div>
+            <label htmlFor="plan-file">Or finish an interrupted run from a downloaded plan</label>
+            <input id="plan-file" type="file" accept=".json,application/json" onChange={(e) => void uploadPlan(e.target.files?.[0])} />
+          </div>
+        </>
       )}
 
       {stage.kind === 'planning' && <p className="pending">{stage.progress}</p>}
 
       {stage.kind === 'plan' && (
-        <>
-          <div className="panel">
-            <h2>2. The plan ({stage.plan.status})</h2>
-            <p>
-              {stage.plan.targetUniqueIds.length} target(s), {stage.plan.workItems.length} process(es) to edit,{' '}
-              {stage.plan.sites.length} reference site(s), {stage.plan.claims.length} claim(s). Built in {stage.seconds}s.
-              This dry run changed nothing. Archived processes were not restored, so a real run may find more.
-            </p>
-            {stage.unknown.length > 0 && <p className="small">Not found, so left out: {stage.unknown.join(', ')}</p>}
-            <div className="row">
-              <button
-                type="button"
-                className="secondary"
-                onClick={() => downloadText(datedFilename('delete-plan', 'json'), serializePlan(stage.plan), 'application/json')}
-              >
-                Download the plan
-              </button>
-              <button type="button" className="secondary" onClick={() => setStage({ kind: 'input' })}>
-                Plan something else
-              </button>
-            </div>
-          </div>
-          <div className="panel">
-            <pre className="plan-text">{dryRunLines(stage.plan, stage.index).join('\n')}</pre>
-          </div>
-          <RunPanel
-            targetCount={stage.plan.targetUniqueIds.length}
-            disabled={unfinished !== null}
-            onRun={(options) => void runDelete(stage.plan, stage.index, options)}
-          />
-        </>
+        <PlanView
+          preview={stage.preview}
+          finishFirst={unfinished !== null}
+          onBack={() => setStage({ kind: 'input' })}
+          onRun={(options) => void runDelete(stage.preview, options)}
+        />
       )}
 
       {stage.kind === 'running' && (
@@ -379,7 +546,7 @@ function DeleteFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
                       Download the plan
                     </button>
                   )}
-                  <button type="button" className="secondary" onClick={() => setStage({ kind: 'input' })}>
+                  <button type="button" className="secondary" onClick={startOver}>
                     Delete something else
                   </button>
                 </>
@@ -394,15 +561,167 @@ function DeleteFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
                 <button type="button" className="secondary" onClick={() => downloadCsv(datedFilename('delete-results'), resultsToCsv(stage.rows))}>
                   Download the results
                 </button>
-                <button type="button" className="secondary" onClick={() => setStage({ kind: 'input' })}>
+                <button type="button" className="secondary" onClick={startOver}>
                   Start again
                 </button>
               </div>
             )}
           </div>
+          {stage.cleanup.kind === 'offer' && (
+            <CleanupPanel
+              tenant={session.tenant}
+              groups={stage.cleanup.groups}
+              index={stage.cleanup.after}
+              onError={handleError}
+              onRows={(extra) => setStage({ ...stage, rows: [...stage.rows, ...extra] })}
+              heading="4. Delete the groups this emptied (optional)"
+              archivedProcesses="keep"
+              offer={
+                <>
+                  The run deleted processes from {stage.cleanup.groups.length} checked group{stage.cleanup.groups.length === 1 ? '' : 's'}.
+                  This checks which of them are now empty: no process, active or archived, no document, and no subgroup that is
+                  kept. Only groups you checked in the tree are offered. Nothing is deleted until you confirm.
+                </>
+              }
+            />
+          )}
+          {stage.cleanup.kind === 'withheld' && (
+            <div className="panel">
+              <h2>4. Delete the groups this emptied</h2>
+              <p>
+                Not offered for the {stage.cleanup.groups.length} checked group{stage.cleanup.groups.length === 1 ? '' : 's'} the run
+                deleted from, because {stage.cleanup.reason}. Build the plan again to get a confirmed result first.
+              </p>
+            </div>
+          )}
         </>
       )}
     </main>
+  );
+}
+
+function PlanView({ preview, finishFirst, onBack, onRun }: { preview: Preview; finishFirst: boolean; onBack: () => void; onRun: (options: RunOptions) => void }) {
+  const { plan, selection, variations, unreadSets } = preview;
+  const [variationsReviewed, setVariationsReviewed] = useState(false);
+  const archiveFirst = selection.targets.filter((t) => t.phase === 'archive-then-delete');
+  const deleteOnly = selection.targets.filter((t) => t.phase === 'delete');
+  const needsReview = variations.length > 0 || unreadSets.length > 0;
+
+  return (
+    <>
+      <div className="panel">
+        <h2>2. The plan ({plan.status}). Nothing has been changed.</h2>
+        <p>{selectionSummary(selection)}</p>
+        <p>
+          {plan.workItems.length} process(es) to edit, {plan.sites.length} reference site(s), {plan.claims.length} claim(s). Built in{' '}
+          {preview.seconds}s. Archived processes were not restored, so a real run may find more.
+        </p>
+        <div className="row">
+          <button type="button" className="secondary" onClick={() => downloadText(datedFilename('delete-plan', 'json'), serializePlan(plan), 'application/json')}>
+            Download the plan
+          </button>
+          <button type="button" className="secondary" onClick={onBack}>
+            Change the selection
+          </button>
+        </div>
+      </div>
+
+      {archiveFirst.length > 0 && <TargetTable title={`Archived first, then deleted (${archiveFirst.length})`} targets={archiveFirst} />}
+      {deleteOnly.length > 0 && <TargetTable title={`Deleted (${deleteOnly.length}), already archived`} targets={deleteOnly} />}
+
+      {unreadSets.length > 0 && (
+        <div className="panel warning">
+          <h2>Variation sets that could not be read</h2>
+          <p>These targets are variations, and their sets could not be read, so siblings that may be affected are not listed. Check them in Process Manager first.</p>
+          <ul className="checklist">
+            {unreadSets.map((u) => (
+              <li key={u.uniqueId}>
+                {u.name}: {u.error}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {variations.length > 0 && (
+        <div className="panel warning">
+          <h2>Variations: these may be affected too</h2>
+          <p>
+            Process variations are coupled: deleting one can act on its master. Each process below is a variation of a target, or
+            looks like one by its name, and is not itself a target. Siblings are not shown in the tree, so this is the only place
+            they appear. The run also checks the tenant before and after deleting, and puts back what it can.
+          </p>
+          <ul className="checklist">
+            {variations.map((m) => (
+              <li key={`${m.targetUniqueId}|${m.relativeUniqueId}`}>
+                <strong>{m.relativeName}</strong>
+                {m.relativeGroupId !== null && ` (group ${m.relativeGroupId})`}
+                {m.relativeIsArchived && ' (archived)'}: {variationMessage(m)}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {needsReview && (
+        <div className="panel">
+          <label className="inline">
+            <input type="checkbox" checked={variationsReviewed} onChange={(e) => setVariationsReviewed(e.target.checked)} /> I have reviewed the
+            variation warnings above
+          </label>
+        </div>
+      )}
+
+      {selection.skipped.length > 0 && (
+        <details className="panel">
+          <summary>Left out ({selection.skipped.length})</summary>
+          <ul className="checklist">
+            {selection.skipped.map((row) => (
+              <li key={`${row.operation}|${row.objectId}`}>
+                {row.name || row.objectId}: {row.message}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+
+      <div className="panel">
+        <pre className="plan-text">{dryRunLines(plan, preview.index).join('\n')}</pre>
+      </div>
+
+      <RunPanel
+        targetCount={plan.targetUniqueIds.length}
+        disabled={finishFirst || (needsReview && !variationsReviewed)}
+        reason={finishFirst ? 'Finish the earlier run first (top of the page).' : needsReview && !variationsReviewed ? 'Review the variation warnings first.' : null}
+        onRun={onRun}
+      />
+    </>
+  );
+}
+
+function TargetTable({ title, targets }: { title: string; targets: readonly DeleteTarget[] }) {
+  return (
+    <div className="panel">
+      <h2>{title}</h2>
+      <table className="plan">
+        <thead>
+          <tr>
+            <th>Process</th>
+            <th>Group</th>
+            <th>Chosen</th>
+          </tr>
+        </thead>
+        <tbody>
+          {targets.map((t) => (
+            <tr key={t.uniqueId}>
+              <td>{t.name || t.uniqueId}</td>
+              <td>{t.groupExists ? t.location || (t.groupId !== null ? `group ${t.groupId}` : 'not known') : 'Group no longer exists'}</td>
+              <td>{SOURCE_TEXT[t.source]}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
@@ -414,7 +733,7 @@ interface RunOptions {
 }
 
 /** The run's switches, and the typed DELETE the script asked for before it started. */
-function RunPanel({ targetCount, disabled, onRun }: { targetCount: number; disabled: boolean; onRun: (options: RunOptions) => void }) {
+function RunPanel({ targetCount, disabled, reason, onRun }: { targetCount: number; disabled: boolean; reason: string | null; onRun: (options: RunOptions) => void }) {
   const [approvalsEnabled, setApprovalsEnabled] = useState(true);
   const [acceptCollateral, setAcceptCollateral] = useState(false);
   const [allowUnheldTargets, setAllowUnheldTargets] = useState(false);
@@ -425,10 +744,10 @@ function RunPanel({ targetCount, disabled, onRun }: { targetCount: number; disab
       <h2>3. Delete for real</h2>
       <p>
         The run restores archived targets into a holding group, builds the plan again with the archive restored, removes
-        every reference, checks the tenant before and after deleting, and puts back everything it un-archived. It asks
-        before each step that needs a decision; a question nobody answers stops the run.
+        every reference, archives the active targets, checks the tenant before and after deleting, and puts back everything
+        it un-archived. It asks before each step that needs a decision; a question nobody answers stops the run.
       </p>
-      {disabled && <p className="small">Finish the earlier run first (top of the page).</p>}
+      {reason !== null && <p className="small">{reason}</p>}
       <label htmlFor="change">Change description, sent with every save, publish and archive</label>
       <input id="change" type="text" value={changeDescription} onChange={(e) => setChangeDescription(e.target.value)} />
       <label className="checkbox">
@@ -501,6 +820,50 @@ function QuestionPanel({ question, onAnswer }: { question: Question; onAnswer: (
         <div className="row">
           <button type="button" onClick={() => onAnswer(ticked)}>
             Carry on{ticked.length > 0 ? `, publishing ${ticked.length} draft(s)` : ', keeping their targets'}
+          </button>
+        </div>
+      </div>
+    );
+  }
+  if (question.kind === 'collateral') {
+    // The -AcceptCollateral gate, on screen: what changed, process by process (W6).
+    return (
+      <div className="panel warning">
+        <h2>Processes changed that were not targets</h2>
+        <p>
+          {question.collateral.length} process(es) changed state {question.phase}, without being targets of this run. Accepting
+          carries on; they are still put back at the end. Stopping puts back everything the run changed.
+        </p>
+        <table className="plan">
+          <thead>
+            <tr>
+              <th>Process</th>
+              <th>What changed</th>
+            </tr>
+          </thead>
+          <tbody>
+            {collateralEntries(question.collateral).map((c) => (
+              <tr key={c.uniqueId}>
+                <td>
+                  {c.name}
+                  <span className="small"> {c.uniqueId}</span>
+                </td>
+                <td>{c.changes.join(' ')}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {COLLATERAL_NOTES.map((note) => (
+          <p key={note} className="small">
+            {note}
+          </p>
+        ))}
+        <div className="row">
+          <button type="button" onClick={() => onAnswer(true)}>
+            Accept and carry on (they are still put back at the end)
+          </button>
+          <button type="button" className="secondary" onClick={() => onAnswer(false)}>
+            Stop and put things back
           </button>
         </div>
       </div>

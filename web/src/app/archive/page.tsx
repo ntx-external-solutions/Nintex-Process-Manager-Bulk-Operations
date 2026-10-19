@@ -39,10 +39,10 @@ import {
   PmRequestError,
   type SessionInfo,
 } from '@/lib/ui/gateway.ts';
+import { CleanupPanel } from '../components/CleanupPanel.tsx';
 import { ResultsSummary } from '../components/ResultsSummary.tsx';
 import { SessionGate } from '../components/SessionGate.tsx';
 import { TreeBrowser, useBrowseTree } from '../components/TreeBrowser.tsx';
-import { CleanupPanel } from './CleanupPanel.tsx';
 import type { ProcessIndex } from '@/lib/tenant/state.ts';
 
 type Stage =
@@ -307,6 +307,14 @@ function ArchiveFlow({ session, onSignedOut }: { session: SessionInfo; onSignedO
               index={stage.after}
               onError={handleError}
               onRows={(extra) => setStage({ ...stage, rows: [...stage.rows, ...extra] })}
+              heading="4. Delete the groups this left empty (optional)"
+              offer={
+                <>
+                  The selection covered {stage.plan.groups.length} group{stage.plan.groups.length === 1 ? '' : 's'}. This
+                  checks which of them now hold nothing but archived processes, and lets you delete those. Nothing is
+                  deleted until you confirm.
+                </>
+              }
             />
           ) : (
             stage.plan.groups.length > 0 && (

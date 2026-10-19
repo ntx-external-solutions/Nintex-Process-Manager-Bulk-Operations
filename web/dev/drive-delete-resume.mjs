@@ -8,7 +8,10 @@ import { connect } from './cdp.mjs';
 const MOCK = 'http://localhost:4999/tenant';
 const b = await connect();
 await b.signIn();
-await b.go('/delete', `!!document.querySelector('#ids')`, 'delete page');
+await b.go('/delete', `document.body.innerText.includes('Choose what to delete')`, 'delete page');
+// The ids box is the third way in (W6).
+await b.js(`$btn('By id or CSV')`);
+await b.until(`!!document.querySelector('#ids')`, 'the ids box');
 // A textarea, which $set (an input's value setter) cannot fill.
 await b.js(`(() => { const el = document.querySelector('#ids'); Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(el, '6'); el.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
 await b.js(`$btn('Build the plan')`);
@@ -23,7 +26,7 @@ console.log('--- AFTER THE SESSION DIED ---\n' + (await b.js(`document.querySele
 
 await fetch(`${MOCK}/_revive`);
 await b.signIn();
-await b.go('/delete', `document.body.innerText.includes('did not finish') || !!document.querySelector('#ids')`, 'delete page again');
+await b.go('/delete', `document.body.innerText.includes('did not finish') || document.body.innerText.includes('Choose what to delete')`, 'delete page again');
 console.log('--- SIGNED IN AGAIN ---\n' + (await b.js(`document.querySelector('main').innerText`)).split('\n').slice(0, 8).join('\n'));
 await b.js(`$btn('Finish it')`);
 await b.until(`document.body.innerText.includes('interrupted run is finished')`, 'the resumed unwind');

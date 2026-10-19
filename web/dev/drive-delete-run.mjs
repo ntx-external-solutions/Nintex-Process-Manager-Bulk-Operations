@@ -7,7 +7,10 @@ import { connect } from './cdp.mjs';
 
 const b = await connect();
 await b.signIn();
-await b.go('/delete', `!!document.querySelector('#ids')`, 'delete page');
+await b.go('/delete', `document.body.innerText.includes('Choose what to delete')`, 'delete page');
+// The ids box is the third way in (W6).
+await b.js(`$btn('By id or CSV')`);
+await b.until(`!!document.querySelector('#ids')`, 'the ids box');
 const type = (selector, value, proto = 'HTMLInputElement') =>
   b.js(
     `(() => { const el = document.querySelector('${selector}'); const s = Object.getOwnPropertyDescriptor(${proto}.prototype, 'value').set; s.call(el, ${JSON.stringify(value)}); el.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`,
