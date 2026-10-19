@@ -337,3 +337,87 @@ test('a session that dies during planning leaves the holders it restored on the 
   assert.equal(tenant.isArchived(H1), true);
   assert.equal(tenant.isArchived(H2), true);
 });
+
+// ---------------------------------------------------------------- F6 item 1: the restore's own revision
+
+const archivedHolder = (version: string, revisionStateId: number): ProcessModel => ({
+  UniqueId: X1,
+  Name: 'Old intake',
+  Version: version,
+  ProcessRevisionStateId: revisionStateId,
+  Inputs: { Input: [{ Id: 1, FromProcessUniqueId: T1 }] },
+});
+
+test('a restored published holder with no draft before the restore is edited and published, then archived again', async () => {
+  // R13: the restore turned 1.0 into 1.1 in progress, and the draft check refused every
+  // restored holder for a draft the run itself had opened.
+  const tenant = scenario([
+    { uniqueId: T1, name: 'Raise invoice', groupId: HOME.id },
+    { uniqueId: X1, name: 'Old intake', archived: true, groupId: HOME.id, model: archivedHolder('1.0', 3) },
+  ]);
+  const asked: string[][] = [];
+  const { rows, plan } = await run(tenant, { decisions: { publishDrafts: (d) => (asked.push(d.map((h) => h.holderUniqueId)), []) } });
+
+  assert.deepEqual(asked, [], 'not offered as a draft holder');
+  assert.equal(tenant.callsTo('saveModel', X1).length, 1);
+  assert.equal(tenant.callsTo('publishNow', X1).length, 1, 'published, as it was before the restore');
+  const removal = rows.find((r) => r.objectId === X1 && r.operation === 'RemoveReferences');
+  assert.equal(removal?.status, 'Success');
+  assert.match(removal?.message ?? '', /Removed 1 reference\(s\), Published; restored from the archive for the edit, and archived again/);
+  assert.doesNotMatch(removal?.message ?? '', /open draft went live/);
+  assert.deepEqual(tenant.deleted, [T1]);
+  assert.equal(tenant.isArchived(X1), true);
+  assert.deepEqual(plan?.ledger.find((e) => e.uniqueId === X1)?.revisionBeforeRestore, { openDraft: false, publishedVersionExists: true });
+});
+
+test('a restored holder that was never published is saved only, never published', async () => {
+  // R13 refused one of these too. What the live read showed after the restore was not
+  // captured, so this one shows a published-looking version in progress, which the old
+  // check refused; the decision now comes from the archived model (0.1) either way.
+  const tenant = scenario(
+    [
+      { uniqueId: T1, name: 'Raise invoice', groupId: HOME.id },
+      { uniqueId: X1, name: 'Old intake', archived: true, groupId: HOME.id, model: archivedHolder('0.1', 1) },
+    ],
+    {
+      after: (call, t) => {
+        const model = call.op === 'restore' && call.uniqueId === X1 ? t.process(X1)?.model : null;
+        if (model) model['Version'] = '1.1';
+      },
+    },
+  );
+  const { rows } = await run(tenant);
+
+  assert.equal(tenant.callsTo('saveModel', X1).length, 1);
+  assert.equal(tenant.callsTo('publishNow', X1).length, 0, 'nothing of it was ever live, so nothing is published');
+  const removal = rows.find((r) => r.objectId === X1 && r.operation === 'RemoveReferences');
+  assert.equal(removal?.status, 'Success');
+  assert.match(removal?.message ?? '', /SavedUnpublished; restored from the archive/);
+  assert.deepEqual(tenant.deleted, [T1]);
+  assert.equal(tenant.isArchived(X1), true);
+});
+
+test('an archived holder with a draft before the restore is refused, and offered as a tick like an active one', async () => {
+  const tenant = scenario([
+    { uniqueId: T1, name: 'Raise invoice', groupId: HOME.id },
+    { uniqueId: X1, name: 'Old intake', archived: true, groupId: HOME.id, model: archivedHolder('1.1', 1) },
+  ]);
+  const asked: string[][] = [];
+  const { rows } = await run(tenant, { decisions: { publishDrafts: (d) => (asked.push(d.map((h) => h.holderUniqueId)), []) } });
+
+  assert.deepEqual(asked, [[X1]], 'offered as a tick');
+  assert.equal(tenant.callsTo('saveModel', X1).length, 0);
+  assert.match(rows.find((r) => r.objectId === X1 && r.operation === 'RemoveReferences')?.message ?? '', /unpublished draft/);
+  assert.equal(tenant.exists(T1), true, 'its target is kept');
+  assert.equal(tenant.isArchived(X1), true, 'and it is archived again');
+
+  // Ticked, the draft goes live with the removal, as for an active holder.
+  const ticked = scenario([
+    { uniqueId: T1, name: 'Raise invoice', groupId: HOME.id },
+    { uniqueId: X1, name: 'Old intake', archived: true, groupId: HOME.id, model: archivedHolder('1.1', 1) },
+  ]);
+  const second = await run(ticked, { decisions: { publishDrafts: () => [X1] } });
+  assert.equal(ticked.callsTo('publishNow', X1).length, 1);
+  assert.deepEqual(ticked.deleted, [T1]);
+  assert.match(second.rows.find((r) => r.objectId === X1 && r.operation === 'RemoveReferences')?.message ?? '', /open draft went live/);
+});

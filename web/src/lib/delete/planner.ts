@@ -444,9 +444,13 @@ export async function buildDeletePlan(gateway: PlanningGateway, options: DeleteP
     const groupId = parked ? holdingGroup : (record.originalGroupId ?? holdingGroup);
     if (parked) options.onEvent?.({ kind: 'holderHeld', uniqueId: record.uniqueId, name: record.name, originalGroupId: record.originalGroupId });
 
+    // Judged now, from the archived model: the restore opens an in-progress revision that
+    // the executor's draft check would otherwise take for someone's draft (R13).
+    const before = record.model ? writeStateOf(record.model, null) : null;
     const restored = await restoreProcess(gateway, record.uniqueId, groupId, { isFatal });
     if (restored.ok) {
       record.restoredByThisRun = true;
+      if (before) record.revisionBeforeRestore = { openDraft: isOpenDraft(before), publishedVersionExists: before.publishedVersionExists ?? null };
       record.parkedInHoldingGroup = parked;
       // Read again next time: the cached copy is the archived one.
       cache.delete(record.uniqueId.toLowerCase());

@@ -157,6 +157,14 @@ export interface FakeTenantOptions {
 
 const key = (uniqueId: string): string => uniqueId.toLowerCase();
 
+/** 1.0 to 1.1 (an edit or a restore opening a revision) or to 2.0 (a publish). Anything else is left alone. */
+function bumpVersion(version: unknown, part: 'minor' | 'major'): unknown {
+  if (typeof version !== 'string') return version;
+  const [major, minor] = version.split('.').map(Number);
+  if (!Number.isInteger(major) || !Number.isInteger(minor)) return version;
+  return part === 'major' ? `${major! + 1}.0` : `${major}.${minor! + 1}`;
+}
+
 export class FakeTenant implements DeleteGateway {
   readonly calls: FakeCall[] = [];
   /** Deleted process ids, in order. */
@@ -354,6 +362,14 @@ export class FakeTenant implements DeleteGateway {
       return null;
     });
     if (skip) return {};
+    if (process!.archived) {
+      // Measured in R13: un-archiving opens an in-progress revision, 1.0 becoming 1.1
+      // with ProcessRevisionStateId 1, which a draft check cannot tell from someone's.
+      if (process!.model) {
+        process!.model['Version'] = bumpVersion(process!.model['Version'], 'minor');
+        process!.model['ProcessRevisionStateId'] = 1;
+      }
+    }
     if (process!.archived || this.restoreActive === 'relocate') {
       process!.archived = false;
       this.#place(process!, processGroupId);
@@ -449,6 +465,11 @@ export class FakeTenant implements DeleteGateway {
   ): Promise<unknown> {
     const call: FakeCall = { op, uniqueId: processUniqueId, revisionEditId: processRevisionEditId, comment: publishMessage };
     this.#begin(call, () => (this.exists(processUniqueId) ? null : notFound()));
+    const model = this.process(processUniqueId)?.model;
+    if (model) {
+      model['Version'] = bumpVersion(model['Version'], 'major');
+      model['ProcessRevisionStateId'] = 3;
+    }
     this.#end(call);
     return { actionUrl: '' };
   }

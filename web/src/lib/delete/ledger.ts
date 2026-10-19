@@ -182,6 +182,20 @@ export interface PlanLedgerRow {
   parkedInHoldingGroup: boolean;
   denormalized: boolean;
   deleted: boolean;
+  /**
+   * An archived holder's write state as its archived model showed it, taken just before
+   * this run restored it. Absent when it was not restored, or its model was unreadable.
+   * The restore itself opens an in-progress revision (R13: 1.0 becomes 1.1, state 1), so
+   * after it the live read cannot tell the run's revision from someone's draft.
+   */
+  revisionBeforeRestore?: RevisionBeforeRestore | undefined;
+}
+
+export interface RevisionBeforeRestore {
+  /** An open draft over a published version: someone's unpublished edits. */
+  openDraft: boolean;
+  /** False for a process never published (0.x); null when the version was unreadable. */
+  publishedVersionExists: boolean | null;
 }
 
 /** A participant in the working ledger, with the model it was read with. */
@@ -225,6 +239,7 @@ export function ledgerToPlanRows(ledger: ReadonlyMap<string, ParticipantRecord>)
     parkedInHoldingGroup: record.parkedInHoldingGroup === true,
     denormalized: record.denormalized,
     deleted: record.deleted,
+    ...(record.revisionBeforeRestore ? { revisionBeforeRestore: { ...record.revisionBeforeRestore } } : {}),
   }));
 }
 

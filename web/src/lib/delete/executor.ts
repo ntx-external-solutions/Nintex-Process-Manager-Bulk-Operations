@@ -39,7 +39,7 @@ import {
 } from './collateral.ts';
 import type { DeleteEventSink } from './events.ts';
 import type { DeleteGateway } from './gateway.ts';
-import type { DependencyPlan } from './ledger.ts';
+import type { DependencyPlan, RevisionBeforeRestore } from './ledger.ts';
 import { nodeInt, nodeString, type ProcessModel } from './model.ts';
 import { resolveClaimName } from './names.ts';
 import { reArchiveOperation } from './runOutcome.ts';
@@ -143,6 +143,13 @@ export interface SaveModelOptions {
    * W5 phase 5). The operator ticks each holder this applies to.
    */
   publishOpenDraft?: boolean | undefined;
+  /**
+   * Set for a holder this run restored whose archived model had no open draft: the
+   * in-progress revision the live read shows is the restore's own (R13), so the path is
+   * chosen as for a clean holder. Published before, it is published; never published, it
+   * is saved only. Absent, the live read decides.
+   */
+  restoredWithoutDraft?: RevisionBeforeRestore | undefined;
   /** Default true: these edits publish a version the owner never asked for. */
   suppressChangeNotification?: boolean | undefined;
   /** A dead session is rethrown rather than reported as a failed save. */
@@ -190,16 +197,20 @@ export async function saveProcessModel(
     return { success: false, stage, error: failure.detail ?? failure.error, statusCode: failure.status };
   };
 
-  const state = writeStateOf(model, options.processActions);
+  const restored = options.restoredWithoutDraft;
+  const live = writeStateOf(model, options.processActions);
+  // What was published before the restore is what the restore's revision sits over.
+  const state = restored && restored.publishedVersionExists !== null ? { ...live, publishedVersionExists: restored.publishedVersionExists } : live;
   const path = chooseWritePath(state, {
-    publish: 'match-state',
+    publish: restored?.publishedVersionExists === false ? 'save-only' : 'match-state',
     overridePendingApproval: options.approvalsEnabled ?? false,
-    openDraft: options.publishOpenDraft === true ? 'publish' : 'refuse',
+    openDraft: restored || options.publishOpenDraft === true ? 'publish' : 'refuse',
   });
   if (!isWritePath(path)) {
     return { success: false, stage: 'Refused', error: SAVE_REFUSALS[path.refused], statusCode: 0, refusal: path.refused };
   }
-  const draftPublished = path !== 'save-only' && state.revisionStateId === 1;
+  // The restore's own revision going live is not someone's draft going live.
+  const draftPublished = !restored && path !== 'save-only' && state.revisionStateId === 1;
 
   try {
     await gateway.saveModel(
@@ -294,8 +305,15 @@ export async function removePlanReferences(
   const heldBack: HeldBackTarget[] = [];
   const ticked = new Set((options.publishDrafts ?? []).map((id) => id.toLowerCase()));
   const workItems = plan.workItems;
-  const nameOf = (uniqueId: string) =>
-    plan.ledger.find((r) => r.uniqueId.toLowerCase() === uniqueId.toLowerCase())?.name || resolveClaimName(plan.claims, uniqueId);
+  const recordOf = (uniqueId: string) => plan.ledger.find((r) => r.uniqueId.toLowerCase() === uniqueId.toLowerCase());
+  const nameOf = (uniqueId: string) => recordOf(uniqueId)?.name || resolveClaimName(plan.claims, uniqueId);
+  // A holder this run restored is judged from its archived model, read before the restore:
+  // the live read shows the restore's own in-progress revision, which R13 took for a
+  // draft on every restored holder and held back all their targets.
+  const beforeRestore = (uniqueId: string) => {
+    const record = recordOf(uniqueId);
+    return record?.restoredByThisRun ? record.revisionBeforeRestore : undefined;
+  };
 
   // Read fresh for the edit, never from the plan: planning may be minutes old, and saving a
   // stale model would discard whatever changed since.
@@ -334,6 +352,11 @@ export async function removePlanReferences(
   for (const [i, item] of workItems.entries()) {
     options.onEvent?.({ kind: 'progress', label: 'Checking holders for open drafts', done: i + 1, total: workItems.length });
     if (ticked.has(item.holderUniqueId.toLowerCase())) continue;
+    const before = beforeRestore(item.holderUniqueId);
+    if (before) {
+      if (before.openDraft) holdBack(item.holderUniqueId, item.targetsAffected, draftReason(nameOf(item.holderUniqueId)));
+      continue;
+    }
     const { model, processActions } = await readForEdit(item.holderUniqueId);
     // Unreadable here is left to the edit, which reports it.
     if (model && isOpenDraft(writeStateOf(model, processActions))) {
@@ -380,12 +403,15 @@ export async function removePlanReferences(
     }
 
     // Decided again from this read: the pre-pass is the decision, this is the backstop
-    // for a draft opened since.
+    // for a draft opened since. A restored holder has no backstop: its draft is ours.
+    const before = beforeRestore(holderId);
+    const restoredWithoutDraft = before && !before.openDraft ? before : undefined;
     const save = await saveProcessModel(gateway, holderId, removal.cleaned, {
       processActions,
       changeDescription: options.changeDescription,
       approvalsEnabled: options.approvalsEnabled ?? true,
       publishOpenDraft: ticked.has(holderId.toLowerCase()),
+      restoredWithoutDraft,
       suppressChangeNotification: true,
       isFatal,
     });
@@ -414,7 +440,7 @@ export async function removePlanReferences(
       row(
         save.success ? 'Success' : 'Failed',
         save.success
-          ? `Removed ${removal.referencesRemoved} reference(s), ${save.stage}${save.draftPublished ? '; its open draft went live with the removal' : ''}`
+          ? `Removed ${removal.referencesRemoved} reference(s), ${save.stage}${save.draftPublished ? '; its open draft went live with the removal' : ''}${before ? '; restored from the archive for the edit, and archived again at the end of the run' : ''}`
           : save.stage === 'Refused'
             ? `Not saved: ${save.error ?? ''}. Its references to the targets remain.`
             : `${save.stage} failed: ${save.error ?? ''}`.trimEnd(),
