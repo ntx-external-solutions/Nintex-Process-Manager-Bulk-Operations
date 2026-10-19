@@ -54,7 +54,9 @@ Maintained by the Cowork session. Claude Code reads this but does not edit it.
   re-archived in, orphaning it. Both are in F6 with three smaller fixes. All R13 content
   removed; tenant back to 13 top-level groups, 186 active, 463 archived, every
   pre-existing id present.
-- Next: Claude Code works F5 then F6. Cowork then re-runs the R13 cases live before W6.
+- F5 and F6 done and reviewed (19 Oct, 547 tests). Next: JB merges and deploys, then
+  Cowork runs R14, the R13 cases again plus the four items Claude Code could not verify
+  offline. W6 after that.
 - Token duration (60000 minutes) deferred by JB; not a task.
 - Process and group names were removed from Cowork's handoff text (18 Oct) per CLAUDE.md.
 - Spikes S1 to S3 and the variation test are in `API_ARCHITECTURE.md`. One lasting change

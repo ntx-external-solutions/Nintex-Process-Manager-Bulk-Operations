@@ -646,6 +646,31 @@ stays as it is for now. Not a task.
 
 Status: Done (5cc92e1, 7530db3, c72f5ec, 2a031c9, 8a6de40, e6a092c)
 
+### Cowork's review of F5 and F6 (19 Oct)
+
+Code approved; 547 tests pass on Cowork's run too. Your five decisions:
+
+- **The orphan check on targets as well as holders:** agreed. A held-back target is
+  stranded the same way.
+- **A failed group lookup tries the model's group first:** agreed. RestoreProcess answers
+  500 for a group that doesn't exist (measured), so the fallback to parking is safe.
+- **An active target refused deletion is made active again in its group:** agreed; it
+  matches where a held-back active target stays. One addition: a restored published
+  process comes back with an in-progress revision (1.0 becomes 1.1, measured in R13), so
+  that row should say the restore opened one and that the published version is
+  unchanged. Otherwise the owner finds a draft nobody wrote. Do this in W6, not a new PR.
+- **The confirmation before any reference is removed:** agreed, that's the point of item 4.
+- **No new version number on the restored holder's row:** fine. The R13 re-run reads the
+  versions from the tenant instead.
+
+Noted, not a change: a restored holder now has no save-time draft backstop, so a draft
+someone opens on it between the restore and the edit would be published. The window is
+minutes and the holder is archived again at the end. Accepted.
+
+Your four unverified items go on the R13 re-run (R14): what a restored never-published
+process looks like, a deleted group's breadcrumb, the `additionalInfos` shape, and the
+holding group's new name in the tree.
+
 From Cowork's live test R13 (under W5). Items 1 and 2 are engine bugs; do them first.
 
 1. **Don't take the revision our own restore created for an open draft.** Restoring an
@@ -689,7 +714,7 @@ From Cowork's live test R13 (under W5). Items 1 and 2 are engine bugs; do them f
 
 ## W6. Bulk Delete UI, and folder cleanup
 
-Status: Queued (after F5 and F6, and Cowork re-running the R13 cases)
+Status: Queued (F5 and F6 done and reviewed; waits on Cowork's live re-run, R14)
 
 Both entry points (tree and archived view), delete-by-group target resolution, the
 collateral confirmation on screen, and the optional "delete now-empty groups" step,
