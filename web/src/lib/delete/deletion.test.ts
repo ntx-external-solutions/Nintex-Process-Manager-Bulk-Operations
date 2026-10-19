@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import type { ResultRow } from '../exec/report.ts';
+import { tenantMessage } from '../pm/client.ts';
 import { chooseWritePath, writeStateOf } from '../pm/writePath.ts';
 import type { Reconciliation } from './claims.ts';
 import { ACCEPTANCE_AUTHORITY } from './collateral.ts';
@@ -99,8 +100,12 @@ test('a target restored by this run is archived again before its delete', async 
   assert.deepEqual(tenant.deleted, [T2]);
 });
 
+/** T1 published at 1.0, as R14's active target was. */
+const PUBLISHED_T1: ProcessModel = { UniqueId: T1, Name: 'Raise invoice', Version: '1.0', ProcessRevisionStateId: 3 };
+
 test('a refused delete is a Failed row with the status, and the ledger is not marked', async () => {
   const tenant = tenantWith({ fail: (call) => (call.op === 'deleteProcess' && call.uniqueId === T1 ? { status: 409, message: 'In use' } : null) });
+  tenant.process(T1)!.model = structuredClone(PUBLISHED_T1);
   const plan = planFor([
     { uniqueId: T1, name: 'Raise invoice' },
     { uniqueId: T2, name: 'Close account', wasArchived: true },
@@ -108,7 +113,10 @@ test('a refused delete is a Failed row with the status, and the ledger is not ma
   const rows = rowsOf(await deletePlanTargets(tenant, plan), 'Delete');
 
   assert.equal(rows[0]?.status, 'Failed');
-  assert.match(rows[0]?.message ?? '', /^Delete failed \(HTTP 409\): In use\. Not deleted, so made active again in group 100, as it was before the run$/);
+  // R14: archiving published 1.0 as 2.0 and the restore opened 2.1. The row says both, or
+  // the owner finds a version and a draft nobody made.
+  assert.match(rows[0]?.message ?? '', /^Delete failed \(HTTP 409\): In use\. Not deleted, so made active again in group 100\. Archiving published it as 2\.0, and the restore opened 2\.1\.$/);
+  assert.equal(tenant.modelOf(T1)?.['Version'], '2.1', 'the row reads what the tenant holds');
   assert.equal(rows[0]?.statusCode, '409');
   assert.equal(plan.ledger[0]?.deleted, false, 'so the unwind still puts it back');
   assert.equal(rows[1]?.status, 'Success', 'one refusal does not stop the others');
@@ -148,6 +156,69 @@ test('a refusal whose body has no names falls back to the tenant\'s words, then 
   assert.equal(await run({ status: 500, body: 'Server Error in Application' }), 'Delete failed (HTTP 500): Server Error in Application');
   // An archived target is left to the unwind, which sends it home as a held-back one.
   assert.doesNotMatch(await run({ status: 500 }), /made active/);
+});
+
+test('a refused active target whose versions cannot be read is described, not guessed', async () => {
+  const tenant = tenantWith({
+    fail: (call) =>
+      call.op === 'deleteProcess' ? { status: 409, message: 'In use' } : call.op === 'readArchivedModels' || call.op === 'readModel' ? { status: 503 } : null,
+  });
+  const rows = rowsOf(await deletePlanTargets(tenant, planFor([{ uniqueId: T1, name: 'Raise invoice' }])), 'Delete');
+  assert.match(
+    rows[0]?.message ?? '',
+    /made active again in group 100\. Archiving published it as a new major version, and the restore opened an in-progress revision on top\.$/,
+  );
+  assert.equal(tenant.isArchived(T1), false, 'the restore itself still happened');
+});
+
+test('the R14 refusal body names the holder, keeps HTTP 500, and is not retried', async () => {
+  // Captured in R14. additionalInfos is an object keyed by category, each a list of names.
+  const body =
+    '{"additionalInfos":{"linked Process":["Order intake"]},"caption":"Process Cannot Be Deleted","errorMessage":"Process cannot be deleted as it has links to the following items","field":""}';
+  const tenant = tenantWith({
+    // The proxy's message is what tenantMessage pulls from that body.
+    fail: (call) => (call.op === 'deleteProcess' ? { status: 500, message: tenantMessage(body) ?? '', body } : null),
+  });
+  tenant.process(T1)!.model = structuredClone(PUBLISHED_T1);
+  const rows = rowsOf(await deletePlanTargets(tenant, planFor([{ uniqueId: T1, name: 'Raise invoice' }])), 'Delete');
+
+  assert.equal(tenant.callsTo('deleteProcess', T1).length, 1);
+  assert.equal(rows[0]?.status, 'Failed');
+  assert.equal(rows[0]?.statusCode, '500');
+  assert.equal(
+    rows[0]?.message,
+    'Delete failed (HTTP 500): Process cannot be deleted as it has links to the following items. Still referenced by: Order intake. ' +
+      'Not deleted, so made active again in group 100. Archiving published it as 2.0, and the restore opened 2.1.',
+  );
+});
+
+// ---------------------------------------------------------------- R14: an Archive row for the archive pass
+
+test('each active target the archive pass archives gets an Archive row; a restored target does not', async () => {
+  // R14: the active target was archived and deleted with only a Delete row.
+  const tenant = tenantWith();
+  tenant.setArchived(T2, false);
+  const rows = await deletePlanTargets(
+    tenant,
+    planFor([
+      { uniqueId: T1, name: 'Raise invoice' },
+      { uniqueId: T2, name: 'Close account', wasArchived: true, restoredByThisRun: true },
+    ]),
+  );
+  const archives = rowsOf(rows, 'Archive');
+  assert.deepEqual(archives.map((r) => [r.objectId, r.status, r.message]), [[T1, 'Success', 'Archived before the delete']]);
+  assert.equal(archives[0]?.groupId, String(HOME.id));
+  assert.deepEqual(rows.filter((r) => r.objectId === T1).map((r) => r.operation), ['Archive', 'Delete'], 'archive first, then delete');
+});
+
+test('an archive the tenant refuses is a Failed Archive row, and the delete is still sent', async () => {
+  const tenant = tenantWith({ fail: (call) => (call.op === 'archive' ? { status: 400, message: 'Locked by another user' } : null) });
+  const rows = await deletePlanTargets(tenant, planFor([{ uniqueId: T1, name: 'Raise invoice' }]));
+  const archive = rowsOf(rows, 'Archive')[0];
+  assert.equal(archive?.status, 'Failed');
+  assert.equal(archive?.statusCode, '400');
+  assert.match(archive?.message ?? '', /^Could not be archived before the delete: HTTP 400 refused by the tenant: Locked by another user\. The delete was still sent/);
+  assert.equal(rowsOf(rows, 'Delete')[0]?.status, 'Success');
 });
 
 test('an archive that fails is logged with its reason, and the delete still goes ahead', async () => {

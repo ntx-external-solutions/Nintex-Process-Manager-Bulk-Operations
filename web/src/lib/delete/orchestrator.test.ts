@@ -370,10 +370,12 @@ test('a restored published holder with no draft before the restore is edited and
   assert.deepEqual(plan?.ledger.find((e) => e.uniqueId === X1)?.revisionBeforeRestore, { openDraft: false, publishedVersionExists: true });
 });
 
-test('a restored holder that was never published is saved only, never published', async () => {
-  // R13 refused one of these too. What the live read showed after the restore was not
-  // captured, so this one shows a published-looking version in progress, which the old
-  // check refused; the decision now comes from the archived model (0.1) either way.
+test('guard: a restored holder whose archived model was never published is saved only, never published', async () => {
+  // R14 found there is no such process on the measured tenant: archiving publishes a
+  // never-published 0.3 as 1.0, so the archived model is always published. This is the
+  // branch for a tenant that archives without publishing. The live read after the restore
+  // shows a published-looking version in progress, which the R13 check refused; the
+  // decision comes from the archived model (0.1).
   const tenant = scenario(
     [
       { uniqueId: T1, name: 'Raise invoice', groupId: HOME.id },
@@ -397,7 +399,9 @@ test('a restored holder that was never published is saved only, never published'
   assert.equal(tenant.isArchived(X1), true);
 });
 
-test('an archived holder with a draft before the restore is refused, and offered as a tick like an active one', async () => {
+test('guard: an archived holder whose archived model shows a draft is refused, and offered as a tick like an active one', async () => {
+  // Never fires on the measured tenant: archiving publishes the draft (R14), so an archived
+  // model has no revision state. Kept for a tenant that archives a draft as a draft.
   const tenant = scenario([
     { uniqueId: T1, name: 'Raise invoice', groupId: HOME.id },
     { uniqueId: X1, name: 'Old intake', archived: true, groupId: HOME.id, model: archivedHolder('1.1', 1) },
@@ -577,4 +581,26 @@ test('an archived target the tenant refuses to delete goes home archived, with t
   assert.equal(tenant.groupOf(T1), HOME.id, 'archived again in its own group, not the holding group');
   assert.equal(rowsOf(rows, 'ReArchive')[0]?.status, 'Success');
   assert.equal(rowsOf(rows, 'Cleanup')[0]?.status, 'Success', 'so the holding group is empty and removed');
+});
+
+// ---------------------------------------------------------------- R14: what the archive pass did to an active target
+
+test('an active target the tenant refuses to delete has an Archive row, and its Delete row says what archiving and the restore did', async () => {
+  const tenant = scenario([{ uniqueId: T1, name: 'Raise invoice', groupId: HOME.id, model: { UniqueId: T1, Name: 'Raise invoice', Version: '1.0', ProcessRevisionStateId: 3 } }], {
+    fail: (call) => (call.op === 'deleteProcess' ? { status: 500, message: 'Process cannot be deleted as it has links to the following items' } : null),
+  });
+  const { rows } = await run(tenant);
+
+  assert.deepEqual(
+    rows.filter((r) => r.objectId === T1).map((r) => [r.operation, r.status]),
+    [
+      ['Archive', 'Success'],
+      ['Delete', 'Failed'],
+    ],
+  );
+  assert.match(rowsOf(rows, 'Delete')[0]?.message ?? '', /Not deleted, so made active again in group 100\. Archiving published it as 2\.0, and the restore opened 2\.1\.$/);
+  assert.equal(tenant.isArchived(T1), false);
+  assert.equal(tenant.groupOf(T1), HOME.id);
+  assert.equal(tenant.modelOf(T1)?.['Version'], '2.1');
+  assert.equal(rows.some((r) => r.objectId === T1 && r.operation.startsWith('ReArchive')), false, 'active before the run, so not archived again');
 });

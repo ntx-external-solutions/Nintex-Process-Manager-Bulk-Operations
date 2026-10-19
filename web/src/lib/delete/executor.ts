@@ -18,7 +18,7 @@
  * relocates an active process, in module globals. Here each is returned or passed.
  */
 
-import { archiveOne, failureOf, type ArchiveOptions } from '../archive/outcome.ts';
+import { archiveOne, failureOf, type ArchiveOptions, type ArchiveOutcome } from '../archive/outcome.ts';
 import { resultRow, type ResultRow } from '../exec/report.ts';
 import { defaultIsFatal } from '../exec/runner.ts';
 import { buildUpdateEnvelope } from '../pm/processes.ts';
@@ -318,7 +318,9 @@ export async function checkHolderDrafts(
     if (ticked.has(item.holderUniqueId.toLowerCase())) continue;
     // A holder this run restored is judged from its archived model, read before the
     // restore: the live read shows the restore's own in-progress revision, which R13
-    // took for a draft on every restored holder and held back all their targets.
+    // took for a draft on every restored holder and held back all their targets. That
+    // model never shows a draft, because archiving publishes it (R14), so a restored
+    // holder found with one here is a guard for a tenant that behaves otherwise.
     const record = recordOf(item.holderUniqueId);
     const before = record?.restoredByThisRun ? record.revisionBeforeRestore : undefined;
     let openDraft: boolean;
@@ -587,6 +589,10 @@ export async function deletePlanTargets(
     // logged. The delete still goes ahead and the checkpoint reads the tenant, because
     // ArchiveProcess can report failure and take effect anyway.
     if (!archive.success) log(`${nameOf(target)} (${target}) could not be archived before deletion: ${archive.message}`);
+    // An active target gets its own row for the archive (R14: it had only a Delete row,
+    // and archiving publishes a new major version). A target the Hold restored is going
+    // back to the state the run found it in, so its Delete row is the whole story.
+    if (record && !record.wasArchived) results.push(preDeleteArchiveRow(target, nameOf(target), record.originalGroupId, archive));
   }
 
   // Everything the run changed on purpose: the targets, and every holder it restored.
@@ -726,7 +732,30 @@ export function deleteRefusalText(error: unknown): string {
   return raw.slice(0, 500);
 }
 
-/** Makes an active target the archive pass archived active again in its own group; the row's suffix. */
+/** The archive pass's row for an active target: archived before its delete, or why not. */
+function preDeleteArchiveRow(target: string, name: string, groupId: number | null, archive: ArchiveOutcome): ResultRow {
+  const overridden = archive.outcome === 'Overridden' ? ', after the pending-approval override' : '';
+  return resultRow({
+    objectId: target,
+    name,
+    operation: 'Archive',
+    status: archive.success ? 'Success' : 'Failed',
+    message: archive.success
+      ? `Archived before the delete${overridden}`
+      : `Could not be archived before the delete: ${archive.message}. The delete was still sent; its row says what happened`,
+    groupId,
+    statusCode: archive.statusCode > 0 ? archive.statusCode : null,
+  });
+}
+
+/**
+ * Makes an active target the archive pass archived active again in its own group; the
+ * row's suffix. R14 measured what that leaves: archiving publishes a new major version
+ * (1.0 becomes 2.0) and the restore opens an in-progress revision on top (2.1), so the
+ * row says both, or the owner finds a version and a draft nobody made. Each version is
+ * read, the archived one before the restore and the restored one after; one that can't
+ * be read is described rather than guessed.
+ */
 async function returnActiveTarget(
   gateway: DeleteGateway,
   target: string,
@@ -734,10 +763,31 @@ async function returnActiveTarget(
   isFatal: (error: unknown) => string | null,
 ): Promise<string> {
   if (groupId === null) return '. It was archived before the delete and no original group was recorded, so it stays archived';
+  const versionFrom = async (read: () => Promise<ProcessModel | null | undefined>): Promise<string> => {
+    try {
+      return nodeString(await read(), 'Version');
+    } catch (error) {
+      if (isFatal(error)) throw error;
+      return '';
+    }
+  };
+  const archived = await versionFrom(async () => (await gateway.readArchivedModels([target]))[0]);
   const restored = await restoreProcess(gateway, target, groupId, { isFatal });
-  return restored.ok
-    ? `. Not deleted, so made active again in group ${groupId}, as it was before the run`
-    : `. It was archived before the delete and could not be made active again in group ${groupId} (HTTP ${restored.statusCode}); restore it manually`;
+  if (!restored.ok) {
+    return `. It was archived before the delete${archived ? `, which published it as ${archived},` : ''} and could not be made active again in group ${groupId} (HTTP ${restored.statusCode}); restore it manually`;
+  }
+  const opened = await versionFrom(async () => {
+    const read = await gateway.readModel(target);
+    return read.kind === 'model' ? read.model : null;
+  });
+  return `. Not deleted, so made active again in group ${groupId}. ${archiveAndRestoreVersions(archived, opened)}`;
+}
+
+/** "Archiving published it as 2.0, and the restore opened 2.1.", with words for a version not read. */
+export function archiveAndRestoreVersions(archived: string, opened: string): string {
+  const published = archived ? `Archiving published it as ${archived}` : 'Archiving published it as a new major version';
+  const restore = opened ? `the restore opened ${opened}` : 'the restore opened an in-progress revision on top';
+  return `${published}, and ${restore}.`;
 }
 
 /**
