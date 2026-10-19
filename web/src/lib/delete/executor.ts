@@ -38,7 +38,7 @@ import {
   type CollateralGateway,
 } from './collateral.ts';
 import type { DeleteEventSink } from './events.ts';
-import type { DeleteGateway } from './gateway.ts';
+import type { ActiveRead, DeleteGateway } from './gateway.ts';
 import type { DependencyPlan, RevisionBeforeRestore } from './ledger.ts';
 import { nodeInt, nodeString, type ProcessModel } from './model.ts';
 import { resolveClaimName } from './names.ts';
@@ -284,6 +284,67 @@ export interface ReferenceRemovalRun {
   heldBack: HeldBackTarget[];
 }
 
+/** Which holders an open draft keeps from being edited, decided before anything is saved. */
+export interface DraftCheck {
+  /** Each target a refused holder keeps alive, once, with the first such holder and why. */
+  heldBack: HeldBackTarget[];
+  /** Holders refused for an open draft the operator did not tick. */
+  refusedHolderIds: string[];
+}
+
+const draftReason = (name: string) => `${name} has an unpublished draft; removing its reference would publish it`;
+
+/**
+ * Every holder's write state, reads only (Cowork's review of W5 phase 6). Deciding at
+ * edit time meant a clean holder earlier in the list lost its link to a target that a
+ * draft holder later kept alive: a published change for nothing, and nothing puts
+ * references back. Run before the final confirmation, so it can say what will be kept
+ * and why (F6, R13); the save re-checks each holder and reports a draft opened since.
+ */
+export async function checkHolderDrafts(
+  gateway: Pick<DeleteGateway, 'readModel'>,
+  plan: Pick<DependencyPlan, 'workItems' | 'ledger' | 'claims'>,
+  options: EngineOptions & { publishDrafts?: readonly string[] | undefined; onEvent?: DeleteEventSink | undefined } = {},
+): Promise<DraftCheck> {
+  const isFatal = options.isFatal ?? defaultIsFatal;
+  const ticked = new Set((options.publishDrafts ?? []).map((id) => id.toLowerCase()));
+  const recordOf = (uniqueId: string) => plan.ledger.find((r) => r.uniqueId.toLowerCase() === uniqueId.toLowerCase());
+  const nameOf = (uniqueId: string) => recordOf(uniqueId)?.name || resolveClaimName(plan.claims, uniqueId);
+  const heldBack: HeldBackTarget[] = [];
+  const held = new Set<string>();
+  const refused: string[] = [];
+  for (const [i, item] of plan.workItems.entries()) {
+    options.onEvent?.({ kind: 'progress', label: 'Checking holders for open drafts', done: i + 1, total: plan.workItems.length });
+    if (ticked.has(item.holderUniqueId.toLowerCase())) continue;
+    // A holder this run restored is judged from its archived model, read before the
+    // restore: the live read shows the restore's own in-progress revision, which R13
+    // took for a draft on every restored holder and held back all their targets.
+    const record = recordOf(item.holderUniqueId);
+    const before = record?.restoredByThisRun ? record.revisionBeforeRestore : undefined;
+    let openDraft: boolean;
+    if (before) {
+      openDraft = before.openDraft;
+    } else {
+      let read: ActiveRead | null = null;
+      try {
+        read = await gateway.readModel(item.holderUniqueId);
+      } catch (error) {
+        if (isFatal(error)) throw error;
+        // Unreadable here is left to the edit, which reports it.
+      }
+      openDraft = read?.kind === 'model' && isOpenDraft(writeStateOf(read.model, read.processActions));
+    }
+    if (!openDraft) continue;
+    refused.push(item.holderUniqueId);
+    for (const target of item.targetsAffected) {
+      if (held.has(target.toLowerCase())) continue;
+      held.add(target.toLowerCase());
+      heldBack.push({ targetUniqueId: target, holderUniqueId: item.holderUniqueId, reason: draftReason(nameOf(item.holderUniqueId)) });
+    }
+  }
+  return { heldBack, refusedHolderIds: refused };
+}
+
 /**
  * Removes every reference the plan found, one save per holder, then re-reads each holder
  * and walks it for anything left. Port of `Invoke-ProcessDeletePlan`.
@@ -297,6 +358,8 @@ export async function removePlanReferences(
     changeDescription?: string | undefined;
     /** Holders with an open draft the operator ticked: their draft is published with the removal. */
     publishDrafts?: readonly string[] | undefined;
+    /** From `checkHolderDrafts`, when the run already made it for the confirmation. Absent: made here. */
+    draftCheck?: DraftCheck | undefined;
     onEvent?: DeleteEventSink | undefined;
   } = {},
 ): Promise<ReferenceRemovalRun> {
@@ -307,9 +370,7 @@ export async function removePlanReferences(
   const workItems = plan.workItems;
   const recordOf = (uniqueId: string) => plan.ledger.find((r) => r.uniqueId.toLowerCase() === uniqueId.toLowerCase());
   const nameOf = (uniqueId: string) => recordOf(uniqueId)?.name || resolveClaimName(plan.claims, uniqueId);
-  // A holder this run restored is judged from its archived model, read before the restore:
-  // the live read shows the restore's own in-progress revision, which R13 took for a
-  // draft on every restored holder and held back all their targets.
+  // As in `checkHolderDrafts`: a restored holder's open revision is the restore's own.
   const beforeRestore = (uniqueId: string) => {
     const record = recordOf(uniqueId);
     return record?.restoredByThisRun ? record.revisionBeforeRestore : undefined;
@@ -341,27 +402,17 @@ export async function removePlanReferences(
       heldBack.push({ targetUniqueId: target, holderUniqueId: holderId, reason });
     }
   };
-  const draftReason = (name: string) => `${name} has an unpublished draft; removing its reference would publish it`;
   const keptOut = (n: number) => (n === 1 ? 'the target it holds is' : `the ${n} targets it holds are`);
 
-  // Every holder's write state before the first save (Cowork's review of W5 phase 6).
-  // Deciding at edit time meant a clean holder earlier in the list lost its link to a
-  // target that a draft holder later kept alive: a published change for nothing, and
-  // nothing puts references back.
-  options.onEvent?.({ kind: 'stage', stage: 'removing-references' });
-  for (const [i, item] of workItems.entries()) {
-    options.onEvent?.({ kind: 'progress', label: 'Checking holders for open drafts', done: i + 1, total: workItems.length });
-    if (ticked.has(item.holderUniqueId.toLowerCase())) continue;
-    const before = beforeRestore(item.holderUniqueId);
-    if (before) {
-      if (before.openDraft) holdBack(item.holderUniqueId, item.targetsAffected, draftReason(nameOf(item.holderUniqueId)));
-      continue;
-    }
-    const { model, processActions } = await readForEdit(item.holderUniqueId);
-    // Unreadable here is left to the edit, which reports it.
-    if (model && isOpenDraft(writeStateOf(model, processActions))) {
-      holdBack(item.holderUniqueId, item.targetsAffected, draftReason(nameOf(item.holderUniqueId)));
-    }
+  // Every holder's write state before the first save (`checkHolderDrafts`). The run makes
+  // it earlier, for the confirmation, and has raised the stage already.
+  if (!options.draftCheck) options.onEvent?.({ kind: 'stage', stage: 'removing-references' });
+  const check = options.draftCheck ?? (await checkHolderDrafts(gateway, plan, { isFatal, publishDrafts: options.publishDrafts, onEvent: options.onEvent }));
+  for (const holderId of check.refusedHolderIds) refusedHolders.add(holderId.toLowerCase());
+  for (const h of check.heldBack) {
+    if (heldBackIds.has(h.targetUniqueId.toLowerCase())) continue;
+    heldBackIds.add(h.targetUniqueId.toLowerCase());
+    heldBack.push({ ...h });
   }
 
   /** Target to the holders whose references to it were removed, for the backstop's log line. */

@@ -39,12 +39,14 @@ import {
 import type { DeleteEvent, DeleteEventSink } from './events.ts';
 import {
   collateralGateway,
+  checkHolderDrafts,
   deletePlanTargets,
   newRelocationProbe,
   removePlanReferences,
   restorePlanState,
   restoreProcess,
   type CollateralGate,
+  type DraftCheck,
   type EngineOptions,
   type VerificationFailure,
 } from './executor.ts';
@@ -65,9 +67,9 @@ import {
   type ProcessStateSnapshot,
   type UnresolvedParticipant,
 } from './ledger.ts';
-import { nodeString, type ProcessModel } from './model.ts';
+import { nodeString, type DeleteIndex, type ProcessModel } from './model.ts';
 import { selectDisplayName } from './names.ts';
-import { buildDeletePlan, loadDeleteIndex } from './planner.ts';
+import { buildDeletePlan, loadDeleteIndex, planProcessName } from './planner.ts';
 import type { PlanStore } from './planStore.ts';
 import { RE_ARCHIVE_OPERATIONS, resolveRunOutcome } from './runOutcome.ts';
 import { CSV_ID_COLUMNS, resolveTargetIds, targetsFromCsv, type TargetSource } from './targets.ts';
@@ -104,11 +106,47 @@ export interface DeleteDecisions {
    * so their targets are kept (Cowork's review of W5 phase 5).
    */
   publishDrafts?: ((holders: readonly DraftHolder[]) => readonly string[] | Promise<readonly string[]>) | undefined;
-  /** The typed DELETE. Absent: confirmed, on the preview, before the run began. */
-  confirmDelete?: Decision<number> | undefined;
+  /**
+   * The last question, asked after the draft check and before any reference is removed:
+   * what will be deleted, what is kept and why, and which drafts go live (F6). Absent:
+   * confirmed, on the preview, before the run began.
+   */
+  confirmDelete?: Decision<DeleteConfirmation> | undefined;
 }
 
 export { ACCEPTANCE_AUTHORITY };
+
+/** What the final confirmation names (F6: R13's said only how many). */
+export interface DeleteConfirmation {
+  deleting: Array<{ uniqueId: string; name: string }>;
+  /** Kept because a holder of it has an open draft nobody ticked. */
+  heldBack: Array<{ uniqueId: string; name: string; holderUniqueId: string; holderName: string; reason: string }>;
+  /** Ticked draft holders: their drafts go live with the removal. */
+  publishingDrafts: Array<{ uniqueId: string; name: string }>;
+  /** Holders whose references will be removed before anything is deleted. */
+  holdersToEdit: number;
+}
+
+/** The confirmation as the page shows it. */
+export function deleteConfirmationLines(c: DeleteConfirmation): string[] {
+  const lines = [`About to permanently delete ${c.deleting.length} process(es). This cannot be undone.`];
+  lines.push(...c.deleting.map((t) => `  ${t.name || UNKNOWN_NAME}  (${t.uniqueId})`));
+  if (c.heldBack.length > 0) {
+    lines.push('', `Kept, ${c.heldBack.length} target(s): a holder of each has an unpublished draft that was not ticked.`);
+    for (const h of c.heldBack) lines.push(`  ${h.name || UNKNOWN_NAME}  (${h.uniqueId}): held by ${h.holderName || UNKNOWN_NAME} (${h.holderUniqueId})`);
+  }
+  if (c.publishingDrafts.length > 0) {
+    lines.push('', `Published with the removal, drafts included, ${c.publishingDrafts.length} ticked holder(s):`);
+    lines.push(...c.publishingDrafts.map((h) => `  ${h.name || UNKNOWN_NAME}  (${h.uniqueId})`));
+  }
+  if (c.holdersToEdit > 0) {
+    lines.push(
+      '',
+      `References are removed from ${c.holdersToEdit} holder(s) first. Each is checked again as it is saved: one that has opened a draft since is reported, and its targets kept.`,
+    );
+  }
+  return lines;
+}
 
 export interface BulkDeleteOptions extends EngineOptions {
   siteUrl: string;
@@ -523,14 +561,22 @@ export async function runBulkDelete(gateway: DeleteGateway, options: BulkDeleteO
       if (!go) return stopAndUnwind(`${gate.overClaims.length} pair(s) claimed more than was found, and were not acknowledged. Nothing has been deleted.`);
     }
 
-    // ---- Remove references ----
+    // ---- Decide drafts, check every holder, then confirm: all before the first edit ----
     const drafts = plan.draftHolders ?? [];
     const publishDrafts = drafts.length > 0 && decisions.publishDrafts ? await decisions.publishDrafts(drafts) : [];
+    emit({ kind: 'stage', stage: 'removing-references' });
+    const draftCheck = await checkHolderDrafts(gateway, plan, { ...engine, publishDrafts, onEvent: options.onEvent });
+    const confirmation = deleteConfirmationOf(plan, index, draftCheck, publishDrafts);
+    const confirmed = decisions.confirmDelete ? (await decisions.confirmDelete(confirmation)) === true : true;
+    if (!confirmed) return stopAndUnwind('Deletion cancelled. Nothing has been edited or deleted.');
+
+    // ---- Remove references ----
     const removal = await removePlanReferences(gateway, plan, {
       ...engine,
       onRow: addRow,
       changeDescription: options.changeDescription,
       publishDrafts,
+      draftCheck,
       onEvent: options.onEvent,
     });
     await save(plan);
@@ -542,10 +588,6 @@ export async function runBulkDelete(gateway: DeleteGateway, options: BulkDeleteO
     }
 
     // ---- Delete ----
-    const toDelete = targets.length - new Set(removal.heldBack.map((h) => h.targetUniqueId.toLowerCase())).size;
-    const confirmed = decisions.confirmDelete ? (await decisions.confirmDelete(toDelete)) === true : true;
-    if (!confirmed) return stopAndUnwind('Deletion cancelled. Nothing has been deleted.');
-
     const holdingGroupNow = tempGroup;
     const deletion = await deletePlanTargets(gateway, plan, {
       ...engine,
@@ -634,6 +676,28 @@ async function confirmOrphanedTargets(
     addRow(groupDisagreementRow(orphan, orphan.originalGroupId, check.group, check.kind === 'present'));
   }
   return confirmed;
+}
+
+/** The confirmation's contents, from the plan and the draft check made just before it. */
+function deleteConfirmationOf(plan: DependencyPlan, index: DeleteIndex, check: DraftCheck, publishDrafts: readonly string[]): DeleteConfirmation {
+  const nameOf = (id: string) => planProcessName(plan, index, id);
+  const kept = new Set(check.heldBack.map((h) => h.targetUniqueId.toLowerCase()));
+  const refused = new Set(check.refusedHolderIds.map((id) => id.toLowerCase()));
+  const ticked = new Set(publishDrafts.map((id) => id.toLowerCase()));
+  return {
+    deleting: plan.targetUniqueIds.filter((id) => !kept.has(id.toLowerCase())).map((id) => ({ uniqueId: id, name: nameOf(id) })),
+    heldBack: check.heldBack.map((h) => ({
+      uniqueId: h.targetUniqueId,
+      name: nameOf(h.targetUniqueId),
+      holderUniqueId: h.holderUniqueId,
+      holderName: nameOf(h.holderUniqueId),
+      reason: h.reason,
+    })),
+    publishingDrafts: (plan.draftHolders ?? []).filter((d) => ticked.has(d.holderUniqueId.toLowerCase())).map((d) => ({ uniqueId: d.holderUniqueId, name: d.name })),
+    holdersToEdit: plan.workItems.filter(
+      (w) => !refused.has(w.holderUniqueId.toLowerCase()) && w.targetsAffected.some((t) => !kept.has(t.toLowerCase())),
+    ).length,
+  };
 }
 
 /** What the operator is told when cleanup leaves the holding group: enough to find it in the tree. */

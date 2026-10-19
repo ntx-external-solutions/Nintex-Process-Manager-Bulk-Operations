@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { resultRow, type ResultRow } from '../exec/report.ts';
-import { deleteResultsSummary, resumeUnwind, runBulkDelete, type BulkDeleteOptions } from './bulkDelete.ts';
+import { deleteConfirmationLines, deleteResultsSummary, resumeUnwind, runBulkDelete, type BulkDeleteOptions, type DeleteConfirmation } from './bulkDelete.ts';
 import type { DeleteEvent } from './events.ts';
 import { HOLDING_GROUP_NAME, holdingGroupNameFor, type GroupRef } from './gateway.ts';
 import { newDependencyPlan } from './ledger.ts';
@@ -511,4 +511,50 @@ test('a target the listing calls orphaned, whose model names a group in the tree
   assert.equal(tenant.isArchived(T1), true);
   assert.equal(tenant.groupOf(T1), HOME.id, 'archived again in its own group, not left in the holding group');
   assert.equal(plan?.ledger.find((e) => e.uniqueId === T1)?.originalGroupExists, true);
+});
+
+// ---------------------------------------------------------------- F6 item 4: the confirmation names what happens
+
+test('the final confirmation names the targets kept and why, before any reference is removed', async () => {
+  // R13: it said only how many, and which were held back was decided after it.
+  const { tenant, holder, target } = draftTenant();
+  const seen: DeleteConfirmation[] = [];
+  let savesWhenAsked = -1;
+  await run(tenant, {
+    source: { kind: 'ids', ids: [target.UniqueId] },
+    decisions: {
+      publishDrafts: () => [],
+      confirmDelete: (c) => {
+        seen.push(c);
+        savesWhenAsked = tenant.callsTo('saveModel').length;
+        return true;
+      },
+    },
+  });
+  assert.equal(seen.length, 1);
+  assert.equal(savesWhenAsked, 0, 'asked before anything is edited');
+  const c = seen[0]!;
+  assert.deepEqual(c.deleting, []);
+  assert.deepEqual(c.heldBack.map((h) => [h.uniqueId, h.holderUniqueId]), [[target.UniqueId, holder.UniqueId]]);
+  assert.equal(c.holdersToEdit, 0);
+  const lines = deleteConfirmationLines(c).join('\n');
+  assert.match(lines, /About to permanently delete 0 process\(es\)/);
+  assert.match(lines, new RegExp(`Kept, 1 target\\(s\\)[\\s\\S]*${target.UniqueId}\\): held by ${holder.Name} \\(${holder.UniqueId}\\)`));
+});
+
+test('a ticked draft holder is named in the confirmation, and declining it edits nothing', async () => {
+  const { tenant, holder, target } = draftTenant();
+  const seen: DeleteConfirmation[] = [];
+  const { rows } = await run(tenant, {
+    source: { kind: 'ids', ids: [target.UniqueId] },
+    decisions: { publishDrafts: () => [holder.UniqueId], confirmDelete: (c) => (seen.push(c), false) },
+  });
+  const c = seen[0]!;
+  assert.deepEqual(c.deleting.map((t) => t.uniqueId), [target.UniqueId]);
+  assert.deepEqual(c.publishingDrafts.map((h) => h.uniqueId), [holder.UniqueId]);
+  assert.equal(c.holdersToEdit, 1);
+  assert.match(deleteConfirmationLines(c).join('\n'), /Published with the removal, drafts included, 1 ticked holder\(s\)/);
+  assert.equal(tenant.callsTo('saveModel').length, 0, 'declined before the first edit');
+  assert.equal(tenant.exists(target.UniqueId), true);
+  assert.equal(rowsOf(rows, 'RemoveReferences').length, 0);
 });
