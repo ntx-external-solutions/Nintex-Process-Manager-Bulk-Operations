@@ -189,6 +189,8 @@ export function browserPlanningGateway(): PlanningGateway {
     restore: async () => {
       throw new Error('A dry run does not restore anything.');
     },
+    // A deleted group's breadcrumb comes back empty (F1); a read that fails throws.
+    groupFound: async (groupUniqueId) => (await groupBreadcrumb(groupUniqueId)).length > 0,
   };
 }
 

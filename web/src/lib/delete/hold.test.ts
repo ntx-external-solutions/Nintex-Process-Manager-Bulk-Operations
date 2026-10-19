@@ -104,7 +104,7 @@ test('the orphaned-target warning counts targets, names each, and mentions the h
 
 test('a coverage gap is said out loud; full coverage says nothing', () => {
   assert.match(groupExistsCoverageLines({ total: 2, reported: 0, missing: 2, orphans: 0, state: 'None' }).join(' '), /does not report groupExists/);
-  assert.match(groupExistsCoverageLines({ total: 3, reported: 2, missing: 1, orphans: 0, state: 'Mixed' }).join(' '), /1 of 3 listing row/);
+  assert.match(groupExistsCoverageLines({ total: 3, reported: 2, missing: 1, orphans: 0, state: 'Mixed' }).join(' '), /1 of 3 archived listing row/);
   assert.deepEqual(groupExistsCoverageLines({ total: 3, reported: 3, missing: 0, orphans: 1, state: 'Full' }), []);
   assert.deepEqual(groupExistsCoverageLines(null), []);
 });

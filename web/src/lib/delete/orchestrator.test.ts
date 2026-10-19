@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { resultRow, type ResultRow } from '../exec/report.ts';
-import { deleteResultsSummary, resumeUnwind, runBulkDelete, type BulkDeleteOptions } from './bulkDelete.ts';
+import { deleteConfirmationLines, deleteResultsSummary, resumeUnwind, runBulkDelete, type BulkDeleteOptions, type DeleteConfirmation } from './bulkDelete.ts';
 import type { DeleteEvent } from './events.ts';
 import { HOLDING_GROUP_NAME, holdingGroupNameFor, type GroupRef } from './gateway.ts';
 import { newDependencyPlan } from './ledger.ts';
@@ -167,7 +167,7 @@ test('unticked, a draft holder keeps its target, and the run finishes without de
 
   assert.deepEqual(asked, [[holder.UniqueId]], 'the operator is asked about the draft holder, by id');
   assert.equal(tenant.exists(target.UniqueId), true);
-  assert.equal(rowsOf(rows, 'RemoveReferences')[0]?.status, 'Failed');
+  assert.equal(rowsOf(rows, 'RemoveReferences')[0]?.status, 'Skipped', 'left unticked, it did what was asked');
   assert.equal(rowsOf(rows, 'Delete')[0]?.status, 'Skipped');
   assert.equal(tenant.callsTo('saveModel').length, 0);
 });
@@ -336,4 +336,245 @@ test('a session that dies during planning leaves the holders it restored on the 
   await resumeUnwind(tenant, saved!, { planStore: store });
   assert.equal(tenant.isArchived(H1), true);
   assert.equal(tenant.isArchived(H2), true);
+});
+
+// ---------------------------------------------------------------- F6 item 1: the restore's own revision
+
+const archivedHolder = (version: string, revisionStateId: number): ProcessModel => ({
+  UniqueId: X1,
+  Name: 'Old intake',
+  Version: version,
+  ProcessRevisionStateId: revisionStateId,
+  Inputs: { Input: [{ Id: 1, FromProcessUniqueId: T1 }] },
+});
+
+test('a restored published holder with no draft before the restore is edited and published, then archived again', async () => {
+  // R13: the restore turned 1.0 into 1.1 in progress, and the draft check refused every
+  // restored holder for a draft the run itself had opened.
+  const tenant = scenario([
+    { uniqueId: T1, name: 'Raise invoice', groupId: HOME.id },
+    { uniqueId: X1, name: 'Old intake', archived: true, groupId: HOME.id, model: archivedHolder('1.0', 3) },
+  ]);
+  const asked: string[][] = [];
+  const { rows, plan } = await run(tenant, { decisions: { publishDrafts: (d) => (asked.push(d.map((h) => h.holderUniqueId)), []) } });
+
+  assert.deepEqual(asked, [], 'not offered as a draft holder');
+  assert.equal(tenant.callsTo('saveModel', X1).length, 1);
+  assert.equal(tenant.callsTo('publishNow', X1).length, 1, 'published, as it was before the restore');
+  const removal = rows.find((r) => r.objectId === X1 && r.operation === 'RemoveReferences');
+  assert.equal(removal?.status, 'Success');
+  assert.match(removal?.message ?? '', /Removed 1 reference\(s\), Published; restored from the archive for the edit, and archived again/);
+  assert.doesNotMatch(removal?.message ?? '', /open draft went live/);
+  assert.deepEqual(tenant.deleted, [T1]);
+  assert.equal(tenant.isArchived(X1), true);
+  assert.deepEqual(plan?.ledger.find((e) => e.uniqueId === X1)?.revisionBeforeRestore, { openDraft: false, publishedVersionExists: true });
+});
+
+test('a restored holder that was never published is saved only, never published', async () => {
+  // R13 refused one of these too. What the live read showed after the restore was not
+  // captured, so this one shows a published-looking version in progress, which the old
+  // check refused; the decision now comes from the archived model (0.1) either way.
+  const tenant = scenario(
+    [
+      { uniqueId: T1, name: 'Raise invoice', groupId: HOME.id },
+      { uniqueId: X1, name: 'Old intake', archived: true, groupId: HOME.id, model: archivedHolder('0.1', 1) },
+    ],
+    {
+      after: (call, t) => {
+        const model = call.op === 'restore' && call.uniqueId === X1 ? t.process(X1)?.model : null;
+        if (model) model['Version'] = '1.1';
+      },
+    },
+  );
+  const { rows } = await run(tenant);
+
+  assert.equal(tenant.callsTo('saveModel', X1).length, 1);
+  assert.equal(tenant.callsTo('publishNow', X1).length, 0, 'nothing of it was ever live, so nothing is published');
+  const removal = rows.find((r) => r.objectId === X1 && r.operation === 'RemoveReferences');
+  assert.equal(removal?.status, 'Success');
+  assert.match(removal?.message ?? '', /SavedUnpublished; restored from the archive/);
+  assert.deepEqual(tenant.deleted, [T1]);
+  assert.equal(tenant.isArchived(X1), true);
+});
+
+test('an archived holder with a draft before the restore is refused, and offered as a tick like an active one', async () => {
+  const tenant = scenario([
+    { uniqueId: T1, name: 'Raise invoice', groupId: HOME.id },
+    { uniqueId: X1, name: 'Old intake', archived: true, groupId: HOME.id, model: archivedHolder('1.1', 1) },
+  ]);
+  const asked: string[][] = [];
+  const { rows } = await run(tenant, { decisions: { publishDrafts: (d) => (asked.push(d.map((h) => h.holderUniqueId)), []) } });
+
+  assert.deepEqual(asked, [[X1]], 'offered as a tick');
+  assert.equal(tenant.callsTo('saveModel', X1).length, 0);
+  assert.match(rows.find((r) => r.objectId === X1 && r.operation === 'RemoveReferences')?.message ?? '', /unpublished draft/);
+  assert.equal(tenant.exists(T1), true, 'its target is kept');
+  assert.equal(tenant.isArchived(X1), true, 'and it is archived again');
+
+  // Ticked, the draft goes live with the removal, as for an active holder.
+  const ticked = scenario([
+    { uniqueId: T1, name: 'Raise invoice', groupId: HOME.id },
+    { uniqueId: X1, name: 'Old intake', archived: true, groupId: HOME.id, model: archivedHolder('1.1', 1) },
+  ]);
+  const second = await run(ticked, { decisions: { publishDrafts: () => [X1] } });
+  assert.equal(ticked.callsTo('publishNow', X1).length, 1);
+  assert.deepEqual(ticked.deleted, [T1]);
+  assert.match(second.rows.find((r) => r.objectId === X1 && r.operation === 'RemoveReferences')?.message ?? '', /open draft went live/);
+});
+
+// ---------------------------------------------------------------- F6 item 2: confirm an orphan before parking it
+
+const inGroup = (group: GroupRef | { Id: number; UniqueId: string; Name: string } | null): Partial<ProcessModel> =>
+  group === null ? {} : { ProcessGroupItems: { ProcessGroup: 'Id' in group ? group : { Id: group.id, UniqueId: group.uniqueId, Name: group.name } } };
+
+function listedAsOrphan(modelGroup: Parameters<typeof inGroup>[0], options: FakeTenantOptions = {}) {
+  return scenario(
+    [
+      { uniqueId: T1, name: 'Raise invoice', groupId: HOME.id },
+      {
+        uniqueId: X1,
+        name: 'Old intake',
+        archived: true,
+        // R13: the listing said group 1, groupExists false.
+        groupId: 1,
+        groupExists: false,
+        model: { ...archivedHolder('1.0', 3), ...inGroup(modelGroup) },
+      },
+    ],
+    { missingGroupIds: [1], ...options },
+  );
+}
+
+test('a holder the listing calls orphaned, whose model names a group in the tree, is treated as in that group', async () => {
+  const tenant = listedAsOrphan(HOME);
+  const { rows, events } = await run(tenant);
+
+  assert.deepEqual(tenant.callsTo('restore', X1).map((c) => c.groupId), [HOME.id], 'restored into its own group, never the holding group');
+  assert.equal(events.some((e) => e.kind === 'holderHeld'), false, 'not held as an orphan');
+  const warning = rows.find((r) => r.objectId === X1 && r.operation === 'GroupCheck');
+  assert.equal(warning?.status, 'Warning');
+  assert.match(warning?.message ?? '', /listing says its group 1 no longer exists, but its model names group 'Home' \(id 100\), which is in the tree/);
+  assert.equal(tenant.isArchived(X1), true);
+  assert.equal(tenant.groupOf(X1), HOME.id, 'archived again in its own group, so deleting the holding group cannot orphan it');
+  assert.equal(rows.find((r) => r.objectId === X1 && r.operation.startsWith('ReArchive'))?.operation, 'ReArchiveHolder');
+  assert.equal(rows.some((r) => /no longer exists|stays archived without a group/.test(r.operation === 'GroupCheck' ? '' : r.message)), false);
+  assert.deepEqual(tenant.deleted, [T1]);
+});
+
+test('a holder whose model names a group that is not in the tree is parked, as before', async () => {
+  const tenant = listedAsOrphan({ Id: 77, UniqueId: 'group-77-gone', Name: 'Gone' });
+  const { rows, events } = await run(tenant);
+
+  assert.equal(tenant.callsTo('groupFound').length, 1, 'the model group was looked for');
+  assert.deepEqual(tenant.callsTo('restore', X1).map((c) => c.groupId), [TEMP.id], 'only into the holding group');
+  assert.ok(events.some((e) => e.kind === 'holderHeld' && e.uniqueId === X1));
+  assert.equal(rows.some((r) => r.operation === 'GroupCheck'), false);
+  const parked = rows.find((r) => r.objectId === X1 && r.operation.startsWith('ReArchive'));
+  assert.equal(parked?.operation, 'ReArchiveOrphanedHolder');
+  assert.match(parked?.message ?? '', /stays archived without a group/);
+});
+
+test('a holder whose model names no group keeps today\'s behavior: parked, nothing looked up', async () => {
+  const tenant = listedAsOrphan(null);
+  const { rows } = await run(tenant);
+
+  assert.equal(tenant.callsTo('groupFound').length, 0);
+  assert.deepEqual(tenant.callsTo('restore', X1).map((c) => c.groupId), [TEMP.id]);
+  assert.equal(rows.find((r) => r.objectId === X1 && r.operation.startsWith('ReArchive'))?.operation, 'ReArchiveOrphanedHolder');
+});
+
+test('a group lookup that fails tries the model\'s group first, and parks only if the tenant refuses it', async () => {
+  const lookupFails: FakeTenantOptions['fail'] = (call) => (call.op === 'groupFound' ? { status: 503, message: 'Unavailable' } : null);
+  const accepted = listedAsOrphan(HOME, { fail: lookupFails });
+  const first = await run(accepted);
+  assert.deepEqual(accepted.callsTo('restore', X1).map((c) => c.groupId), [HOME.id]);
+  assert.match(first.rows.find((r) => r.operation === 'GroupCheck')?.message ?? '', /could not be checked\. Restored into that group, which the tenant accepted/);
+  assert.equal(accepted.groupOf(X1), HOME.id);
+
+  // The model names a group the tenant then refuses: the holding group is the fallback.
+  const refused = listedAsOrphan({ Id: 77, UniqueId: 'group-77-gone', Name: 'Gone' }, { fail: lookupFails, missingGroupIds: [1, 77] });
+  const second = await run(refused);
+  assert.deepEqual(refused.callsTo('restore', X1).map((c) => c.groupId), [77, TEMP.id]);
+  assert.equal(second.rows.some((r) => r.operation === 'GroupCheck'), false);
+  assert.equal(second.rows.find((r) => r.objectId === X1 && r.operation.startsWith('ReArchive'))?.operation, 'ReArchiveOrphanedHolder');
+});
+
+test('a target the listing calls orphaned, whose model names a group in the tree, is sent home when the run stops', async () => {
+  const tenant = scenario(
+    [{ uniqueId: T1, name: 'Raise invoice', archived: true, groupId: 1, groupExists: false, model: { UniqueId: T1, Name: 'Raise invoice', Version: '1.0', ...inGroup(HOME) } }],
+    { missingGroupIds: [1] },
+  );
+  const { rows, events, plan } = await run(tenant, { decisions: { confirmDelete: () => false } });
+
+  assert.equal(events.some((e) => e.kind === 'orphanedTargets'), false, 'no orphan warning for it');
+  assert.equal(rows.find((r) => r.objectId === T1 && r.operation === 'GroupCheck')?.status, 'Warning');
+  assert.equal(tenant.isArchived(T1), true);
+  assert.equal(tenant.groupOf(T1), HOME.id, 'archived again in its own group, not left in the holding group');
+  assert.equal(plan?.ledger.find((e) => e.uniqueId === T1)?.originalGroupExists, true);
+});
+
+// ---------------------------------------------------------------- F6 item 4: the confirmation names what happens
+
+test('the final confirmation names the targets kept and why, before any reference is removed', async () => {
+  // R13: it said only how many, and which were held back was decided after it.
+  const { tenant, holder, target } = draftTenant();
+  const seen: DeleteConfirmation[] = [];
+  let savesWhenAsked = -1;
+  await run(tenant, {
+    source: { kind: 'ids', ids: [target.UniqueId] },
+    decisions: {
+      publishDrafts: () => [],
+      confirmDelete: (c) => {
+        seen.push(c);
+        savesWhenAsked = tenant.callsTo('saveModel').length;
+        return true;
+      },
+    },
+  });
+  assert.equal(seen.length, 1);
+  assert.equal(savesWhenAsked, 0, 'asked before anything is edited');
+  const c = seen[0]!;
+  assert.deepEqual(c.deleting, []);
+  assert.deepEqual(c.heldBack.map((h) => [h.uniqueId, h.holderUniqueId]), [[target.UniqueId, holder.UniqueId]]);
+  assert.equal(c.holdersToEdit, 0);
+  const lines = deleteConfirmationLines(c).join('\n');
+  assert.match(lines, /About to permanently delete 0 process\(es\)/);
+  assert.match(lines, new RegExp(`Kept, 1 target\\(s\\)[\\s\\S]*${target.UniqueId}\\): held by ${holder.Name} \\(${holder.UniqueId}\\)`));
+});
+
+test('a ticked draft holder is named in the confirmation, and declining it edits nothing', async () => {
+  const { tenant, holder, target } = draftTenant();
+  const seen: DeleteConfirmation[] = [];
+  const { rows } = await run(tenant, {
+    source: { kind: 'ids', ids: [target.UniqueId] },
+    decisions: { publishDrafts: () => [holder.UniqueId], confirmDelete: (c) => (seen.push(c), false) },
+  });
+  const c = seen[0]!;
+  assert.deepEqual(c.deleting.map((t) => t.uniqueId), [target.UniqueId]);
+  assert.deepEqual(c.publishingDrafts.map((h) => h.uniqueId), [holder.UniqueId]);
+  assert.equal(c.holdersToEdit, 1);
+  assert.match(deleteConfirmationLines(c).join('\n'), /Published with the removal, drafts included, 1 ticked holder\(s\)/);
+  assert.equal(tenant.callsTo('saveModel').length, 0, 'declined before the first edit');
+  assert.equal(tenant.exists(target.UniqueId), true);
+  assert.equal(rowsOf(rows, 'RemoveReferences').length, 0);
+});
+
+// ---------------------------------------------------------------- F6 item 6: a refused delete, end to end
+
+test('an archived target the tenant refuses to delete goes home archived, with the holder named in its row', async () => {
+  const tenant = scenario([{ uniqueId: T1, name: 'Raise invoice', archived: true, groupId: HOME.id }], {
+    fail: (call) =>
+      call.op === 'deleteProcess'
+        ? { status: 500, message: 'Process Cannot Be Deleted', body: JSON.stringify({ message: 'Process Cannot Be Deleted', additionalInfos: { processes: ['Order intake'] } }) }
+        : null,
+  });
+  const { rows } = await run(tenant);
+
+  assert.match(rowsOf(rows, 'Delete')[0]?.message ?? '', /Still referenced by: Order intake/);
+  assert.equal(rowsOf(rows, 'Delete')[0]?.statusCode, '500');
+  assert.equal(tenant.callsTo('deleteProcess').length, 1);
+  assert.equal(tenant.isArchived(T1), true);
+  assert.equal(tenant.groupOf(T1), HOME.id, 'archived again in its own group, not the holding group');
+  assert.equal(rowsOf(rows, 'ReArchive')[0]?.status, 'Success');
+  assert.equal(rowsOf(rows, 'Cleanup')[0]?.status, 'Success', 'so the holding group is empty and removed');
 });

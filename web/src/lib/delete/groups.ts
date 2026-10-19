@@ -9,7 +9,10 @@
  * measured orphans carry a real numeric id.
  */
 
-import type { DeleteIndexEntry } from './model.ts';
+import { resultRow, type ResultRow } from '../exec/report.ts';
+import { defaultIsFatal } from '../exec/runner.ts';
+import type { DeleteGateway } from './gateway.ts';
+import { nodeInt, nodeString, nodeValue, type DeleteIndexEntry, type ProcessModel } from './model.ts';
 import { readGroupExists } from '../select/archived.ts';
 import type { IndexEntry, ProcessIndex } from '../tenant/state.ts';
 
@@ -107,14 +110,20 @@ export interface GroupExistsCoverage {
   state: GroupExistsCoverageState;
 }
 
-export type CoverageEntry = Pick<DeleteIndexEntry, 'groupExists' | 'groupExistsReported'>;
+export type CoverageEntry = Pick<DeleteIndexEntry, 'groupExists' | 'groupExistsReported'> & { isArchived?: boolean | undefined };
 
-/** Whether this tenant's listing reports `groupExists` at all. Port of `Get-NpmGroupExistsCoverage`. */
+/**
+ * Whether this tenant's listing reports `groupExists` at all, over archived rows only.
+ * Port of `Get-NpmGroupExistsCoverage`. Active rows never carry the field, so counting
+ * them made every run warn "194 of 673 listing row(s) do not report groupExists" (R13).
+ * An entry with no `isArchived` is counted, as the script counted every row.
+ */
 export function groupExistsCoverage(index: ReadonlyMap<string, CoverageEntry> | null): GroupExistsCoverage {
   let total = 0;
   let reported = 0;
   let orphans = 0;
   for (const entry of index?.values() ?? []) {
+    if (entry.isArchived === false) continue;
     total++;
     if (!entry.groupExistsReported) continue;
     reported++;
@@ -136,8 +145,73 @@ export function groupExistsCoverageLines(coverage: GroupExistsCoverage | null): 
   }
   if (coverage?.state === 'Mixed') {
     return [
-      `${coverage.missing} of ${coverage.total} listing row(s) do not report groupExists, while ${coverage.reported} do. Those rows are treated as though their group exists, which is the safe default but may be wrong: on a listing that reports the field everywhere else, a missing one is more likely to mean the group is gone than that the field was omitted. Check those processes before relying on this run's orphan count.`,
+      `${coverage.missing} of ${coverage.total} archived listing row(s) do not report groupExists, while ${coverage.reported} do. Those rows are treated as though their group exists, which is the safe default but may be wrong: on a listing that reports the field everywhere else, a missing one is more likely to mean the group is gone than that the field was omitted. Check those processes before relying on this run's orphan count.`,
     ];
   }
   return [];
+}
+
+// ------------------------------------------------------------ confirming an orphan (F6)
+
+/** The group a process model names (`ProcessGroupItems.ProcessGroup`), or null when it names none. */
+export interface ModelGroup {
+  id: number | null;
+  uniqueId: string;
+  name: string;
+}
+
+export function modelGroupOf(model: ProcessModel | null | undefined): ModelGroup | null {
+  const group = nodeValue(nodeValue(model, 'ProcessGroupItems'), 'ProcessGroup');
+  const uniqueId = nodeString(group, 'UniqueId');
+  if (!uniqueId) return null;
+  return { id: nodeInt(group, 'Id'), uniqueId, name: nodeString(group, 'Name') };
+}
+
+/**
+ * Whether the listing's "group is gone" holds for this process. Measured once in R13: a
+ * row said `groupExists: false` (group id 1) while the model named a group that was in
+ * the tree, and the run parked the process, archived it in the holding group and deleted
+ * that group, which made the orphan real. So the listing alone is not enough to park.
+ *
+ *  - `gone`: the model names no group, or the group it names is not found. Today's
+ *    behavior, which is right for a real orphan.
+ *  - `present`: the group the model names was found. Treat it as in that group.
+ *  - `unknown`: the lookup could not be made. The caller tries that group first and
+ *    falls back to parking only if the tenant refuses it.
+ */
+export type OrphanCheck = { kind: 'gone' } | { kind: 'present'; group: ModelGroup } | { kind: 'unknown'; group: ModelGroup };
+
+export async function confirmOrphan(
+  gateway: Pick<DeleteGateway, 'groupFound'>,
+  model: ProcessModel | null | undefined,
+  isFatal: (error: unknown) => string | null = defaultIsFatal,
+): Promise<OrphanCheck> {
+  const group = modelGroupOf(model);
+  if (!group || group.id === null) return { kind: 'gone' };
+  try {
+    return (await gateway.groupFound(group.uniqueId)) ? { kind: 'present', group } : { kind: 'gone' };
+  } catch (error) {
+    if (isFatal(error)) throw error;
+    return { kind: 'unknown', group };
+  }
+}
+
+/** The warning row for a listing that called a group gone when the model's group is there. */
+export function groupDisagreementRow(
+  process: { uniqueId: string; name: string },
+  listedGroupId: number | null,
+  group: ModelGroup,
+  confirmed: boolean,
+): ResultRow {
+  const named = `${group.name ? `'${group.name}' ` : ''}(id ${group.id ?? 'unknown'})`;
+  return resultRow({
+    objectId: process.uniqueId,
+    name: process.name,
+    operation: 'GroupCheck',
+    status: 'Warning',
+    message: confirmed
+      ? `The process listing says its group ${listedGroupId ?? 'unknown'} no longer exists, but its model names group ${named}, which is in the tree. Treated as in that group, not as an orphan.`
+      : `The process listing says its group ${listedGroupId ?? 'unknown'} no longer exists, but its model names group ${named}, and the tree could not be checked. Restored into that group, which the tenant accepted, so it is not an orphan.`,
+    groupId: group.id,
+  });
 }

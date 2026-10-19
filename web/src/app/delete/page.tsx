@@ -18,7 +18,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { resultsToCsv, type ResultRow } from '@/lib/exec/report.ts';
 import { errorMessage } from '@/lib/exec/runner.ts';
-import { deleteResultsSummary, resumeUnwind, runBulkDelete, type DeleteDecisions } from '@/lib/delete/bulkDelete.ts';
+import { deleteConfirmationLines, deleteResultsSummary, resumeUnwind, runBulkDelete, type DeleteDecisions } from '@/lib/delete/bulkDelete.ts';
 import type { Reconciliation } from '@/lib/delete/claims.ts';
 import { collateralLines, variationWarningLines } from '@/lib/delete/collateral.ts';
 import type { DeleteEvent, DeleteStage } from '@/lib/delete/events.ts';
@@ -54,7 +54,7 @@ const STAGE_TEXT: Record<DeleteStage, string> = {
   'holding-group': 'Making the holding group and restoring archived targets into it',
   'checking-collateral': 'Checking the tenant for processes that changed without being targets',
   'building-plan': 'Building the plan, with the archive restored',
-  'removing-references': 'Removing references from the processes that hold them',
+  'removing-references': 'Checking each holder for open drafts, then removing references from the processes that hold them',
   verifying: 'Reading each edited process back to check nothing is left',
   'archiving-targets': 'Archiving the targets before deleting them',
   'deleting-targets': 'Deleting the targets',
@@ -210,8 +210,9 @@ function DeleteFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
           'Delete anyway, leaving these references broken',
         ),
       publishDrafts: (holders) => new Promise<string[]>((resolve) => setQuestion({ kind: 'drafts', holders, resolve })),
-      confirmDelete: (count) =>
-        askYesNo('Permanent deletion', [`About to permanently delete ${count} process(es). This cannot be undone.`], `Delete ${count} process(es)`, 'Cancel and put things back'),
+      // Names what goes, what stays and why, and which drafts go live (F6, after R13).
+      confirmDelete: (c) =>
+        askYesNo('Permanent deletion', deleteConfirmationLines(c), `Delete ${c.deleting.length} process(es)`, 'Cancel and put things back'),
     };
     await withLog('Delete finished', (onEvent) =>
       runBulkDelete(gateway, {

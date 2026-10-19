@@ -38,8 +38,8 @@ import {
   type CollateralGateway,
 } from './collateral.ts';
 import type { DeleteEventSink } from './events.ts';
-import type { DeleteGateway } from './gateway.ts';
-import type { DependencyPlan } from './ledger.ts';
+import type { ActiveRead, DeleteGateway } from './gateway.ts';
+import type { DependencyPlan, RevisionBeforeRestore } from './ledger.ts';
 import { nodeInt, nodeString, type ProcessModel } from './model.ts';
 import { resolveClaimName } from './names.ts';
 import { reArchiveOperation } from './runOutcome.ts';
@@ -143,6 +143,13 @@ export interface SaveModelOptions {
    * W5 phase 5). The operator ticks each holder this applies to.
    */
   publishOpenDraft?: boolean | undefined;
+  /**
+   * Set for a holder this run restored whose archived model had no open draft: the
+   * in-progress revision the live read shows is the restore's own (R13), so the path is
+   * chosen as for a clean holder. Published before, it is published; never published, it
+   * is saved only. Absent, the live read decides.
+   */
+  restoredWithoutDraft?: RevisionBeforeRestore | undefined;
   /** Default true: these edits publish a version the owner never asked for. */
   suppressChangeNotification?: boolean | undefined;
   /** A dead session is rethrown rather than reported as a failed save. */
@@ -190,16 +197,20 @@ export async function saveProcessModel(
     return { success: false, stage, error: failure.detail ?? failure.error, statusCode: failure.status };
   };
 
-  const state = writeStateOf(model, options.processActions);
+  const restored = options.restoredWithoutDraft;
+  const live = writeStateOf(model, options.processActions);
+  // What was published before the restore is what the restore's revision sits over.
+  const state = restored && restored.publishedVersionExists !== null ? { ...live, publishedVersionExists: restored.publishedVersionExists } : live;
   const path = chooseWritePath(state, {
-    publish: 'match-state',
+    publish: restored?.publishedVersionExists === false ? 'save-only' : 'match-state',
     overridePendingApproval: options.approvalsEnabled ?? false,
-    openDraft: options.publishOpenDraft === true ? 'publish' : 'refuse',
+    openDraft: restored || options.publishOpenDraft === true ? 'publish' : 'refuse',
   });
   if (!isWritePath(path)) {
     return { success: false, stage: 'Refused', error: SAVE_REFUSALS[path.refused], statusCode: 0, refusal: path.refused };
   }
-  const draftPublished = path !== 'save-only' && state.revisionStateId === 1;
+  // The restore's own revision going live is not someone's draft going live.
+  const draftPublished = !restored && path !== 'save-only' && state.revisionStateId === 1;
 
   try {
     await gateway.saveModel(
@@ -273,6 +284,67 @@ export interface ReferenceRemovalRun {
   heldBack: HeldBackTarget[];
 }
 
+/** Which holders an open draft keeps from being edited, decided before anything is saved. */
+export interface DraftCheck {
+  /** Each target a refused holder keeps alive, once, with the first such holder and why. */
+  heldBack: HeldBackTarget[];
+  /** Holders refused for an open draft the operator did not tick. */
+  refusedHolderIds: string[];
+}
+
+const draftReason = (name: string) => `${name} has an unpublished draft; removing its reference would publish it`;
+
+/**
+ * Every holder's write state, reads only (Cowork's review of W5 phase 6). Deciding at
+ * edit time meant a clean holder earlier in the list lost its link to a target that a
+ * draft holder later kept alive: a published change for nothing, and nothing puts
+ * references back. Run before the final confirmation, so it can say what will be kept
+ * and why (F6, R13); the save re-checks each holder and reports a draft opened since.
+ */
+export async function checkHolderDrafts(
+  gateway: Pick<DeleteGateway, 'readModel'>,
+  plan: Pick<DependencyPlan, 'workItems' | 'ledger' | 'claims'>,
+  options: EngineOptions & { publishDrafts?: readonly string[] | undefined; onEvent?: DeleteEventSink | undefined } = {},
+): Promise<DraftCheck> {
+  const isFatal = options.isFatal ?? defaultIsFatal;
+  const ticked = new Set((options.publishDrafts ?? []).map((id) => id.toLowerCase()));
+  const recordOf = (uniqueId: string) => plan.ledger.find((r) => r.uniqueId.toLowerCase() === uniqueId.toLowerCase());
+  const nameOf = (uniqueId: string) => recordOf(uniqueId)?.name || resolveClaimName(plan.claims, uniqueId);
+  const heldBack: HeldBackTarget[] = [];
+  const held = new Set<string>();
+  const refused: string[] = [];
+  for (const [i, item] of plan.workItems.entries()) {
+    options.onEvent?.({ kind: 'progress', label: 'Checking holders for open drafts', done: i + 1, total: plan.workItems.length });
+    if (ticked.has(item.holderUniqueId.toLowerCase())) continue;
+    // A holder this run restored is judged from its archived model, read before the
+    // restore: the live read shows the restore's own in-progress revision, which R13
+    // took for a draft on every restored holder and held back all their targets.
+    const record = recordOf(item.holderUniqueId);
+    const before = record?.restoredByThisRun ? record.revisionBeforeRestore : undefined;
+    let openDraft: boolean;
+    if (before) {
+      openDraft = before.openDraft;
+    } else {
+      let read: ActiveRead | null = null;
+      try {
+        read = await gateway.readModel(item.holderUniqueId);
+      } catch (error) {
+        if (isFatal(error)) throw error;
+        // Unreadable here is left to the edit, which reports it.
+      }
+      openDraft = read?.kind === 'model' && isOpenDraft(writeStateOf(read.model, read.processActions));
+    }
+    if (!openDraft) continue;
+    refused.push(item.holderUniqueId);
+    for (const target of item.targetsAffected) {
+      if (held.has(target.toLowerCase())) continue;
+      held.add(target.toLowerCase());
+      heldBack.push({ targetUniqueId: target, holderUniqueId: item.holderUniqueId, reason: draftReason(nameOf(item.holderUniqueId)) });
+    }
+  }
+  return { heldBack, refusedHolderIds: refused };
+}
+
 /**
  * Removes every reference the plan found, one save per holder, then re-reads each holder
  * and walks it for anything left. Port of `Invoke-ProcessDeletePlan`.
@@ -286,6 +358,8 @@ export async function removePlanReferences(
     changeDescription?: string | undefined;
     /** Holders with an open draft the operator ticked: their draft is published with the removal. */
     publishDrafts?: readonly string[] | undefined;
+    /** From `checkHolderDrafts`, when the run already made it for the confirmation. Absent: made here. */
+    draftCheck?: DraftCheck | undefined;
     onEvent?: DeleteEventSink | undefined;
   } = {},
 ): Promise<ReferenceRemovalRun> {
@@ -294,8 +368,13 @@ export async function removePlanReferences(
   const heldBack: HeldBackTarget[] = [];
   const ticked = new Set((options.publishDrafts ?? []).map((id) => id.toLowerCase()));
   const workItems = plan.workItems;
-  const nameOf = (uniqueId: string) =>
-    plan.ledger.find((r) => r.uniqueId.toLowerCase() === uniqueId.toLowerCase())?.name || resolveClaimName(plan.claims, uniqueId);
+  const recordOf = (uniqueId: string) => plan.ledger.find((r) => r.uniqueId.toLowerCase() === uniqueId.toLowerCase());
+  const nameOf = (uniqueId: string) => recordOf(uniqueId)?.name || resolveClaimName(plan.claims, uniqueId);
+  // As in `checkHolderDrafts`: a restored holder's open revision is the restore's own.
+  const beforeRestore = (uniqueId: string) => {
+    const record = recordOf(uniqueId);
+    return record?.restoredByThisRun ? record.revisionBeforeRestore : undefined;
+  };
 
   // Read fresh for the edit, never from the plan: planning may be minutes old, and saving a
   // stale model would discard whatever changed since.
@@ -323,22 +402,17 @@ export async function removePlanReferences(
       heldBack.push({ targetUniqueId: target, holderUniqueId: holderId, reason });
     }
   };
-  const draftReason = (name: string) => `${name} has an unpublished draft; removing its reference would publish it`;
   const keptOut = (n: number) => (n === 1 ? 'the target it holds is' : `the ${n} targets it holds are`);
 
-  // Every holder's write state before the first save (Cowork's review of W5 phase 6).
-  // Deciding at edit time meant a clean holder earlier in the list lost its link to a
-  // target that a draft holder later kept alive: a published change for nothing, and
-  // nothing puts references back.
-  options.onEvent?.({ kind: 'stage', stage: 'removing-references' });
-  for (const [i, item] of workItems.entries()) {
-    options.onEvent?.({ kind: 'progress', label: 'Checking holders for open drafts', done: i + 1, total: workItems.length });
-    if (ticked.has(item.holderUniqueId.toLowerCase())) continue;
-    const { model, processActions } = await readForEdit(item.holderUniqueId);
-    // Unreadable here is left to the edit, which reports it.
-    if (model && isOpenDraft(writeStateOf(model, processActions))) {
-      holdBack(item.holderUniqueId, item.targetsAffected, draftReason(nameOf(item.holderUniqueId)));
-    }
+  // Every holder's write state before the first save (`checkHolderDrafts`). The run makes
+  // it earlier, for the confirmation, and has raised the stage already.
+  if (!options.draftCheck) options.onEvent?.({ kind: 'stage', stage: 'removing-references' });
+  const check = options.draftCheck ?? (await checkHolderDrafts(gateway, plan, { isFatal, publishDrafts: options.publishDrafts, onEvent: options.onEvent }));
+  for (const holderId of check.refusedHolderIds) refusedHolders.add(holderId.toLowerCase());
+  for (const h of check.heldBack) {
+    if (heldBackIds.has(h.targetUniqueId.toLowerCase())) continue;
+    heldBackIds.add(h.targetUniqueId.toLowerCase());
+    heldBack.push({ ...h });
   }
 
   /** Target to the holders whose references to it were removed, for the backstop's log line. */
@@ -351,9 +425,11 @@ export async function removePlanReferences(
       resultRow({ objectId: holderId, name, operation: 'RemoveReferences', status, message, statusCode });
 
     if (refusedHolders.has(holderId.toLowerCase())) {
+      // Skipped, not Failed: left unticked, it did what the operator asked (R13). Failed
+      // is kept for errors, including the backstop below, which nobody chose.
       results.push(
         row(
-          'Failed',
+          'Skipped',
           `Not saved: ${SAVE_REFUSALS['open-draft']}. Its references remain, so ${keptOut(item.targetsAffected.length)} left out of the delete. Tick it to publish the draft with the removal.`,
         ),
       );
@@ -380,12 +456,15 @@ export async function removePlanReferences(
     }
 
     // Decided again from this read: the pre-pass is the decision, this is the backstop
-    // for a draft opened since.
+    // for a draft opened since. A restored holder has no backstop: its draft is ours.
+    const before = beforeRestore(holderId);
+    const restoredWithoutDraft = before && !before.openDraft ? before : undefined;
     const save = await saveProcessModel(gateway, holderId, removal.cleaned, {
       processActions,
       changeDescription: options.changeDescription,
       approvalsEnabled: options.approvalsEnabled ?? true,
       publishOpenDraft: ticked.has(holderId.toLowerCase()),
+      restoredWithoutDraft,
       suppressChangeNotification: true,
       isFatal,
     });
@@ -414,7 +493,7 @@ export async function removePlanReferences(
       row(
         save.success ? 'Success' : 'Failed',
         save.success
-          ? `Removed ${removal.referencesRemoved} reference(s), ${save.stage}${save.draftPublished ? '; its open draft went live with the removal' : ''}`
+          ? `Removed ${removal.referencesRemoved} reference(s), ${save.stage}${save.draftPublished ? '; its open draft went live with the removal' : ''}${before ? '; restored from the archive for the edit, and archived again at the end of the run' : ''}`
           : save.stage === 'Refused'
             ? `Not saved: ${save.error ?? ''}. Its references to the targets remain.`
             : `${save.stage} failed: ${save.error ?? ''}`.trimEnd(),
@@ -571,8 +650,15 @@ export async function deletePlanTargets(
       await gateway.deleteProcess(target, record?.originalGroupUniqueId || null);
     } catch (error) {
       if (isFatal(error)) throw error;
+      // Never resent (the write policy): a refusal is the tenant's answer, not a fault.
       const status = failureOf(error).status;
-      results.push(row('Failed', `Delete failed (HTTP ${status})`, status > 0 ? status : null));
+      const refusal = deleteRefusalText(error);
+      let message = `Delete failed (HTTP ${status})${refusal ? `: ${refusal}` : ''}`;
+      // The tenant answered, so it is still there. An archived target goes home with the
+      // unwind as a held-back one does; an active one the archive pass archived is made
+      // active again in its own group, which is where a held-back active target stays.
+      if (status > 0 && record && !record.wasArchived) message += await returnActiveTarget(gateway, target, record.originalGroupId, isFatal);
+      results.push(row('Failed', message, status > 0 ? status : null));
       continue;
     }
     // So the unwind does not try to re-archive something that no longer exists: before
@@ -599,6 +685,59 @@ export async function deletePlanTargets(
     }
   }
   return results;
+}
+
+/**
+ * Why the tenant refused a delete, in words for the row. A still-referenced target is
+ * answered HTTP 500 "Process Cannot Be Deleted" with `additionalInfos` naming what holds
+ * it (R13, measured from the browser; shape not captured). So the names are read from
+ * any strings under `additionalInfos`, or the `name`/`Name`/`title` of objects there,
+ * with the raw body as the fallback and the tenant's message before both.
+ */
+export function deleteRefusalText(error: unknown): string {
+  const record = (typeof error === 'object' && error !== null ? error : {}) as Record<string, unknown>;
+  const message = failureOf(error).detail ?? '';
+  const raw = typeof record['detail'] === 'string' ? record['detail'].trim() : '';
+  let body: unknown = null;
+  try {
+    body = raw ? JSON.parse(raw) : null;
+  } catch {
+    body = null;
+  }
+  const infos = typeof body === 'object' && body !== null ? (body as Record<string, unknown>)['additionalInfos'] : undefined;
+  const names: string[] = [];
+  const collect = (value: unknown, depth: number) => {
+    if (depth > 4 || value === null || value === undefined) return;
+    if (typeof value === 'string') {
+      if (value.trim()) names.push(value.trim());
+    } else if (Array.isArray(value)) {
+      for (const item of value) collect(item, depth + 1);
+    } else if (typeof value === 'object') {
+      const item = value as Record<string, unknown>;
+      const label = ['name', 'Name', 'title', 'processName'].map((k) => item[k]).find((v) => typeof v === 'string' && v.trim());
+      if (typeof label === 'string') names.push(label.trim());
+      else for (const v of Object.values(item)) collect(v, depth + 1);
+    }
+  };
+  collect(infos, 0);
+  const unique = [...new Set(names)].filter((n) => n !== message);
+  if (unique.length > 0) return `${message || 'refused'}. Still referenced by: ${unique.join('; ')}`;
+  if (message) return message;
+  return raw.slice(0, 500);
+}
+
+/** Makes an active target the archive pass archived active again in its own group; the row's suffix. */
+async function returnActiveTarget(
+  gateway: DeleteGateway,
+  target: string,
+  groupId: number | null,
+  isFatal: (error: unknown) => string | null,
+): Promise<string> {
+  if (groupId === null) return '. It was archived before the delete and no original group was recorded, so it stays archived';
+  const restored = await restoreProcess(gateway, target, groupId, { isFatal });
+  return restored.ok
+    ? `. Not deleted, so made active again in group ${groupId}, as it was before the run`
+    : `. It was archived before the delete and could not be made active again in group ${groupId} (HTTP ${restored.statusCode}); restore it manually`;
 }
 
 /**

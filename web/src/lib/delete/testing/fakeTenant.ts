@@ -90,6 +90,7 @@ export type FakeOp =
   | 'listGroups'
   | 'createGroup'
   | 'renameGroup'
+  | 'groupFound'
   | 'deleteGroup'
   | 'groupProcesses';
 
@@ -124,6 +125,8 @@ export interface FakeFailure {
   status: number;
   /** The tenant's own words, as `failureOf` reads them. */
   message?: string;
+  /** The raw response body, which the proxy passes on as `detail`. */
+  body?: string;
 }
 
 /** What RestoreProcess does with a process that is already active. */
@@ -156,6 +159,14 @@ export interface FakeTenantOptions {
 }
 
 const key = (uniqueId: string): string => uniqueId.toLowerCase();
+
+/** 1.0 to 1.1 (an edit or a restore opening a revision) or to 2.0 (a publish). Anything else is left alone. */
+function bumpVersion(version: unknown, part: 'minor' | 'major'): unknown {
+  if (typeof version !== 'string') return version;
+  const [major, minor] = version.split('.').map(Number);
+  if (!Number.isInteger(major) || !Number.isInteger(minor)) return version;
+  return part === 'major' ? `${major! + 1}.0` : `${major}.${minor! + 1}`;
+}
 
 export class FakeTenant implements DeleteGateway {
   readonly calls: FakeCall[] = [];
@@ -354,6 +365,14 @@ export class FakeTenant implements DeleteGateway {
       return null;
     });
     if (skip) return {};
+    if (process!.archived) {
+      // Measured in R13: un-archiving opens an in-progress revision, 1.0 becoming 1.1
+      // with ProcessRevisionStateId 1, which a draft check cannot tell from someone's.
+      if (process!.model) {
+        process!.model['Version'] = bumpVersion(process!.model['Version'], 'minor');
+        process!.model['ProcessRevisionStateId'] = 1;
+      }
+    }
     if (process!.archived || this.restoreActive === 'relocate') {
       process!.archived = false;
       this.#place(process!, processGroupId);
@@ -384,6 +403,12 @@ export class FakeTenant implements DeleteGateway {
     this.#groups.set(id, group);
     this.#end(call);
     return { ...group };
+  }
+
+  async groupFound(groupUniqueId: string): Promise<boolean> {
+    this.#begin({ op: 'groupFound', groupUniqueId });
+    const group = [...this.#groups.values()].find((g) => g.uniqueId.toLowerCase() === groupUniqueId.toLowerCase());
+    return group !== undefined && !this.missingGroupIds.has(group.id);
   }
 
   async renameGroup(groupUniqueId: string, newName: string): Promise<unknown> {
@@ -432,6 +457,7 @@ export class FakeTenant implements DeleteGateway {
       throw new PmRequestError(failure.message ?? `Request failed (HTTP ${failure.status}).`, {
         status: failure.status,
         tenantMessage: failure.message ?? null,
+        detail: failure.body ?? null,
       });
     }
     return this.noEffect?.(call, this) ?? false;
@@ -449,6 +475,11 @@ export class FakeTenant implements DeleteGateway {
   ): Promise<unknown> {
     const call: FakeCall = { op, uniqueId: processUniqueId, revisionEditId: processRevisionEditId, comment: publishMessage };
     this.#begin(call, () => (this.exists(processUniqueId) ? null : notFound()));
+    const model = this.process(processUniqueId)?.model;
+    if (model) {
+      model['Version'] = bumpVersion(model['Version'], 'major');
+      model['ProcessRevisionStateId'] = 3;
+    }
     this.#end(call);
     return { actionUrl: '' };
   }

@@ -644,7 +644,7 @@ stays as it is for now. Not a task.
 
 ## F6. Fixes from live round R13
 
-Status: Ready (after F5, before W6)
+Status: Done (5cc92e1, 7530db3, c72f5ec, 2a031c9, 8a6de40, e6a092c)
 
 From Cowork's live test R13 (under W5). Items 1 and 2 are engine bugs; do them first.
 

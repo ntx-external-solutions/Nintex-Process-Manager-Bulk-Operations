@@ -108,10 +108,46 @@ test('a refused delete is a Failed row with the status, and the ledger is not ma
   const rows = rowsOf(await deletePlanTargets(tenant, plan), 'Delete');
 
   assert.equal(rows[0]?.status, 'Failed');
-  assert.equal(rows[0]?.message, 'Delete failed (HTTP 409)');
+  assert.match(rows[0]?.message ?? '', /^Delete failed \(HTTP 409\): In use\. Not deleted, so made active again in group 100, as it was before the run$/);
   assert.equal(rows[0]?.statusCode, '409');
   assert.equal(plan.ledger[0]?.deleted, false, 'so the unwind still puts it back');
   assert.equal(rows[1]?.status, 'Success', 'one refusal does not stop the others');
+});
+
+// ---------------------------------------------------------------- F6 item 6: why the tenant refused
+
+const STILL_REFERENCED = (holders: unknown) =>
+  JSON.stringify({ errorCode: 'ProcessCannotBeDeleted', message: 'Process Cannot Be Deleted', additionalInfos: holders });
+
+test('a delete refused for a remaining reference names what holds it, is sent once, and the target is kept where it was', async () => {
+  // R13: HTTP 500 "Process Cannot Be Deleted", additionalInfos naming the holder. The
+  // shape was not captured, so the names are read from strings or name fields alike.
+  for (const infos of [{ processes: ['Order intake'] }, [{ name: 'Order intake', id: 'x' }], { items: [{ Name: 'Order intake' }] }]) {
+    const tenant = tenantWith({
+      fail: (call) => (call.op === 'deleteProcess' && call.uniqueId === T1 ? { status: 500, message: 'Process Cannot Be Deleted', body: STILL_REFERENCED(infos) } : null),
+    });
+    const plan = planFor([{ uniqueId: T1, name: 'Raise invoice' }]);
+    const rows = rowsOf(await deletePlanTargets(tenant, plan), 'Delete');
+
+    assert.equal(tenant.callsTo('deleteProcess', T1).length, 1, 'never resent');
+    assert.equal(rows[0]?.status, 'Failed');
+    assert.equal(rows[0]?.statusCode, '500');
+    assert.match(rows[0]?.message ?? '', /HTTP 500\): Process Cannot Be Deleted\. Still referenced by: Order intake\./);
+    assert.equal(tenant.isArchived(T1), false, 'active before the run, so active again');
+    assert.equal(tenant.groupOf(T1), HOME.id);
+  }
+});
+
+test('a refusal whose body has no names falls back to the tenant\'s words, then the raw body', async () => {
+  const run = async (failure: { status: number; message?: string; body?: string }) => {
+    const tenant = tenantWith({ fail: (call) => (call.op === 'deleteProcess' ? failure : null) });
+    const plan = planFor([{ uniqueId: T2, name: 'Close account', wasArchived: true, restoredByThisRun: true }]);
+    return rowsOf(await deletePlanTargets(tenant, plan), 'Delete')[0]?.message ?? '';
+  };
+  assert.equal(await run({ status: 500, message: 'Process Cannot Be Deleted', body: '{"message":"Process Cannot Be Deleted"}' }), 'Delete failed (HTTP 500): Process Cannot Be Deleted');
+  assert.equal(await run({ status: 500, body: 'Server Error in Application' }), 'Delete failed (HTTP 500): Server Error in Application');
+  // An archived target is left to the unwind, which sends it home as a held-back one.
+  assert.doesNotMatch(await run({ status: 500 }), /made active/);
 });
 
 test('an archive that fails is logged with its reason, and the delete still goes ahead', async () => {
@@ -317,14 +353,14 @@ test('the plan lists a holder with an open draft under its own heading, with the
   assert.ok(lines.slice(heading).some((l) => l.includes(`blocks ${target.Name}`)), 'naming the target it blocks');
 });
 
-test('unticked, a draft holder is Failed before any save, and its target is left out of the delete', async () => {
+test('unticked, a draft holder is Skipped before any save (R13: it did what was asked), and its target is left out of the delete', async () => {
   const { tenant, holder, target } = draftTenant();
   const { plan } = await draftPlan(tenant, target.UniqueId);
   const removal = await removePlanReferences(tenant, plan);
 
   assert.equal(tenant.callsTo('saveModel').length, 0, 'nothing is saved');
   const row = removal.results[0];
-  assert.equal(row?.status, 'Failed');
+  assert.equal(row?.status, 'Skipped');
   assert.match(row?.message ?? '', /has an unpublished draft; removing the reference would publish it/);
   assert.match(row?.message ?? '', /the target it holds is left out of the delete/);
   assert.deepEqual(removal.heldBack.map((h) => [h.targetUniqueId, h.holderUniqueId]), [[target.UniqueId, holder.UniqueId]]);
@@ -363,7 +399,7 @@ test('the run decides from its own read: a draft opened after planning is refuse
 
   if (proc?.model) Object.assign(proc.model, { ProcessRevisionStateId: 1, Version: '3.1' });
   const removal = await removePlanReferences(tenant, plan);
-  assert.equal(removal.results[0]?.status, 'Failed');
+  assert.equal(removal.results[0]?.status, 'Skipped');
   assert.equal(removal.heldBack.length, 1);
 });
 
@@ -463,7 +499,7 @@ test('a clean holder listed before a draft holder keeps its link to the target t
   assert.deepEqual(removal.heldBack.map((h) => h.targetUniqueId), [T1], 'T1 is held back before any save');
   assert.deepEqual(links(tenant, H2), [T1], 'H2 lost its link to T3, which is deleted, and kept its link to T1, which is not');
   assert.equal(tenant.callsTo('saveModel', H1).length, 0, 'the draft holder is not saved');
-  assert.equal(removal.results.find((r) => r.objectId === H1)?.status, 'Failed');
+  assert.equal(removal.results.find((r) => r.objectId === H1)?.status, 'Skipped');
   assert.equal(removal.verificationFailed.length, 0);
 
   const rows = await deletePlanTargets(tenant, plan, { heldBack: removal.heldBack });
