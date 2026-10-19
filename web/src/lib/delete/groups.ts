@@ -110,14 +110,20 @@ export interface GroupExistsCoverage {
   state: GroupExistsCoverageState;
 }
 
-export type CoverageEntry = Pick<DeleteIndexEntry, 'groupExists' | 'groupExistsReported'>;
+export type CoverageEntry = Pick<DeleteIndexEntry, 'groupExists' | 'groupExistsReported'> & { isArchived?: boolean | undefined };
 
-/** Whether this tenant's listing reports `groupExists` at all. Port of `Get-NpmGroupExistsCoverage`. */
+/**
+ * Whether this tenant's listing reports `groupExists` at all, over archived rows only.
+ * Port of `Get-NpmGroupExistsCoverage`. Active rows never carry the field, so counting
+ * them made every run warn "194 of 673 listing row(s) do not report groupExists" (R13).
+ * An entry with no `isArchived` is counted, as the script counted every row.
+ */
 export function groupExistsCoverage(index: ReadonlyMap<string, CoverageEntry> | null): GroupExistsCoverage {
   let total = 0;
   let reported = 0;
   let orphans = 0;
   for (const entry of index?.values() ?? []) {
+    if (entry.isArchived === false) continue;
     total++;
     if (!entry.groupExistsReported) continue;
     reported++;
@@ -139,7 +145,7 @@ export function groupExistsCoverageLines(coverage: GroupExistsCoverage | null): 
   }
   if (coverage?.state === 'Mixed') {
     return [
-      `${coverage.missing} of ${coverage.total} listing row(s) do not report groupExists, while ${coverage.reported} do. Those rows are treated as though their group exists, which is the safe default but may be wrong: on a listing that reports the field everywhere else, a missing one is more likely to mean the group is gone than that the field was omitted. Check those processes before relying on this run's orphan count.`,
+      `${coverage.missing} of ${coverage.total} archived listing row(s) do not report groupExists, while ${coverage.reported} do. Those rows are treated as though their group exists, which is the safe default but may be wrong: on a listing that reports the field everywhere else, a missing one is more likely to mean the group is gone than that the field was omitted. Check those processes before relying on this run's orphan count.`,
     ];
   }
   return [];

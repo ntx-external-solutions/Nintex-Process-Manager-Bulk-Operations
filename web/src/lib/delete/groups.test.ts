@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 
 import { readGroupExists } from '../select/archived.ts';
 import type { IndexEntry } from '../tenant/state.ts';
-import { findOrphanedGroupProcesses, groupDescendantIds, groupExistsCoverage, processesInGroups, type CoverageEntry } from './groups.ts';
+import { findOrphanedGroupProcesses, groupDescendantIds, groupExistsCoverage, groupExistsCoverageLines, processesInGroups, type CoverageEntry } from './groups.ts';
 import { orphanedGroupIndex } from './testing/index.ts';
 
 test('only an explicit false says the group is gone', () => {
@@ -82,6 +82,26 @@ test('a listing that reports the flag on some rows is its own case', () => {
   assert.equal(cov.state, 'Mixed', 'some rows carrying the flag and some not is its own case');
   assert.equal(cov.missing, 1, 'and the unreported rows are counted');
   assert.equal(cov.reported, 2, 'alongside the reported ones');
+});
+
+test('active rows, which never carry the flag, are not counted (R13)', () => {
+  // Every run warned "194 of 673 listing row(s) do not report groupExists": the active ones.
+  const cov = groupExistsCoverage(
+    coverage(
+      { groupExists: false, groupExistsReported: true, isArchived: true },
+      { groupExists: true, groupExistsReported: true, isArchived: true },
+      { groupExists: true, groupExistsReported: false, isArchived: false },
+      { groupExists: true, groupExistsReported: false, isArchived: false },
+    ),
+  );
+  assert.equal(cov.state, 'Full', 'every archived row reports it');
+  assert.equal(cov.total, 2);
+  assert.equal(cov.missing, 0);
+  assert.deepEqual(groupExistsCoverageLines(cov), [], 'so nothing is said');
+  const mixed = groupExistsCoverage(
+    coverage({ groupExists: true, groupExistsReported: true, isArchived: true }, { groupExists: true, groupExistsReported: false, isArchived: true }),
+  );
+  assert.match(groupExistsCoverageLines(mixed)[0] ?? '', /^1 of 2 archived listing row\(s\) do not report groupExists/);
 });
 
 test('no index, or an empty one, has no coverage', () => {
