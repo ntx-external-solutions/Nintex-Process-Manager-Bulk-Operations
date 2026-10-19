@@ -23,7 +23,6 @@ import type { Reconciliation } from '@/lib/delete/claims.ts';
 import { collateralLines, variationWarningLines } from '@/lib/delete/collateral.ts';
 import type { DeleteEvent, DeleteStage } from '@/lib/delete/events.ts';
 import { REFERENCE_REMOVAL_DESCRIPTION } from '@/lib/delete/executor.ts';
-import { HOLDING_GROUP_NAME } from '@/lib/delete/gateway.ts';
 import { findOrphanedGroupProcesses, groupExistsCoverage, groupExistsCoverageLines } from '@/lib/delete/groups.ts';
 import { orphanedTargetWarningLines } from '@/lib/delete/holdingGroup.ts';
 import { parsePlan, serializePlan, type DependencyPlan, type DraftHolder } from '@/lib/delete/ledger.ts';
@@ -219,7 +218,6 @@ function DeleteFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
         siteUrl: session.siteUrl,
         source: { kind: 'ids', ids: plan.targetUniqueIds },
         planStore: store,
-        holdingGroupName: HOLDING_GROUP_NAME,
         thoroughScan: thorough,
         approvalsEnabled: options.approvalsEnabled,
         acceptCollateral: options.acceptCollateral,
@@ -527,7 +525,8 @@ function QuestionPanel({ question, onAnswer }: { question: Question; onAnswer: (
 function dryRunLines(plan: DependencyPlan, index: DeleteIndex): string[] {
   const targets = plan.targetUniqueIds;
   const warnings = [
-    ...orphanedTargetWarningLines(findOrphanedGroupProcesses(index, targets), targets.length, HOLDING_GROUP_NAME),
+    // The run names its holding group by its start time (F5), which a preview doesn't have yet.
+    ...orphanedTargetWarningLines(findOrphanedGroupProcesses(index, targets), targets.length, 'Bulk Delete holding group (temporary, <run start> UTC)'),
     ...groupExistsCoverageLines(groupExistsCoverage(index)),
   ];
   return warnings.length > 0 ? [...warnings, '', ...planSummaryLines(plan, index)] : planSummaryLines(plan, index);

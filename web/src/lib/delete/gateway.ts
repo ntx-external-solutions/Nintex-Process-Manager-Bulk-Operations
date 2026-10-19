@@ -30,6 +30,16 @@ export { ARCHIVED_BATCH_SIZE, DEPENDENCY_SEARCH_BEHAVIOR, type ActiveRead } from
 /** The script's default `-TempGroupName`. */
 export const HOLDING_GROUP_NAME = 'Bulk Delete Temporary Group';
 
+/**
+ * What a run renames its holding group to (F5). Every group stranded in rounds 2 to 4 had
+ * the tenant's default name and could not be told from a real one; this one says what it
+ * is and which run made it.
+ */
+export function holdingGroupNameFor(runStart: Date): string {
+  const utc = runStart.toISOString().slice(0, 19).replace('T', ' ');
+  return `Bulk Delete holding group (temporary, ${utc} UTC)`;
+}
+
 /** A process group as `Get-ProcessGroups` and `New-ProcessGroup` return it. */
 export interface GroupRef {
   id: number;
@@ -95,8 +105,14 @@ export interface DeleteGateway extends ArchiveGateway {
   /** Every process group, for numeric id to UniqueId (the listing gives only the number). */
   listGroups(): Promise<GroupRef[]>;
 
-  /** `POST /Process/Edit/CreateGroup`, then the new group's numeric id. */
+  /**
+   * `POST /Process/Edit/CreateGroup`, then the new group's numeric id. The tenant names the
+   * group itself; the name returned is the one it gave, which `renameGroup` then replaces.
+   */
   createGroup(name: string, parentGroupUniqueId: string | null): Promise<GroupRef>;
+
+  /** `POST /Process/Edit/RenameGroup`: one group, one new name. */
+  renameGroup(groupUniqueId: string, newName: string): Promise<unknown>;
 
   /** The proxy's `group.delete`. Deletes a group holding archived processes without asking (S1). */
   deleteGroup(groupUniqueId: string): Promise<unknown>;

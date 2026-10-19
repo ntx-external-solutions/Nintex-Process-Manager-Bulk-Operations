@@ -9,7 +9,7 @@
 // dependency check and batch read a Bulk Delete plan is built from (Elsewhere links to
 // Old thing, which an archived process also takes as an Input), and the writes a real
 // delete makes: RestoreProcess (500 for an active process or a group that is gone, as
-// measured), DeleteProcess, CreateGroup and a group's process listing.
+// measured), DeleteProcess, CreateGroup, RenameGroup and a group's process listing.
 // For ownership, start the app with SCIM_BASE_URL=http://localhost:<port>.
 //
 //   node dev/mock-pm.mjs [port]      (default 4999; sign in to http://localhost:4999/tenant)
@@ -233,6 +233,12 @@ http.createServer(async (req, res) => {
     // The tenant takes no name here; the group gets its default one.
     groups[created] = { parent: JSON.parse(body).parentProcessGroupUniqueId ?? '', title: 'New Group' };
     return send(res, 200, { groupid: created });
+  }
+  if (p === '/Process/Edit/RenameGroup') {
+    const { processGroupUniqueId: g, newName } = JSON.parse(body);
+    if (!groups[g]) return send(res, 404, { message: 'Group not found' });
+    groups[g].title = newName;
+    return send(res, 200, { isValid: true });
   }
   if (p === '/bff/navigation/api/v1/breadcrumb/children') {
     const g = url.searchParams.get('id');

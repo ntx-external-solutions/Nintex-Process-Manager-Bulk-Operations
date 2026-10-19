@@ -19,6 +19,7 @@ import type { PmContext } from './client.ts';
 import {
   createTopLevelGroup,
   deleteGroup,
+  renameGroup,
   getChildGroups,
   getGroupProcesses,
   getGroupBreadcrumb,
@@ -139,6 +140,8 @@ export type Operation =
   | { op: 'process.delete'; processUniqueId: string; processGroupUniqueId: string | null }
   /** Make one group at the top level: the delete run's holding group. Takes no id. */
   | { op: 'group.create' }
+  /** Rename one group: the holding group, straight after it is made (F5). */
+  | { op: 'group.rename'; groupUniqueId: string; newName: string }
   /** The live processes directly in one group. */
   | { op: 'group.processes'; groupUniqueId: string };
 
@@ -168,6 +171,7 @@ export const OPERATION_NAMES: readonly OperationName[] = [
   'process.restore',
   'process.delete',
   'group.create',
+  'group.rename',
   'group.processes',
 ];
 
@@ -187,6 +191,8 @@ export const WRITE_OPERATIONS: readonly OperationName[] = [
   'process.restore',
   'process.delete',
   'group.create',
+  // F5: the holding group is named for what it is, so a stranded one can be found.
+  'group.rename',
 ];
 
 /**
@@ -308,6 +314,10 @@ export async function execute(ctx: PmContext, operation: Operation): Promise<unk
 
     case 'group.create':
       return createTopLevelGroup(ctx);
+
+    case 'group.rename':
+      await renameGroup(ctx, operation.groupUniqueId, operation.newName);
+      return { renamed: true };
 
     case 'group.processes':
       return getGroupProcesses(ctx, operation.groupUniqueId);
@@ -631,6 +641,16 @@ export function parseOperation(input: unknown): ParseResult {
       return { ok: true, operation: { op } };
     }
 
+    case 'group.rename': {
+      const groupUniqueId = singleId(body, op, 'groupUniqueId', ['groupUniqueId', 'newName']);
+      if (typeof groupUniqueId !== 'string') return groupUniqueId;
+      const newName = requiredString(body['newName']);
+      if (newName === null || newName.length > MAX_GROUP_NAME_LENGTH || /[\u0000-\u001f]/.test(newName)) {
+        return { ok: false, error: `${op}: "newName" must be one line of up to ${MAX_GROUP_NAME_LENGTH} characters.` };
+      }
+      return { ok: true, operation: { op, groupUniqueId, newName: newName.trim() } };
+    }
+
     default:
       return { ok: false, error: `Unknown operation "${op}".` };
   }
@@ -643,6 +663,9 @@ const MAX_PROCESS_JSON_LENGTH = 8_000_000;
 
 /** Longer than any real key, short enough that a body cannot smuggle much in. */
 const MAX_KEY_LENGTH = 4_096;
+
+/** Room for the holding group's name and then some. */
+const MAX_GROUP_NAME_LENGTH = 200;
 
 /** Longer than any display name a directory holds. */
 const MAX_USER_NAME_LENGTH = 256;

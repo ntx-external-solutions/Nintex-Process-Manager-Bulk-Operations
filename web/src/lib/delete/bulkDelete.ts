@@ -48,7 +48,7 @@ import {
   type EngineOptions,
   type VerificationFailure,
 } from './executor.ts';
-import { HOLDING_GROUP_NAME, type DeleteGateway, type GroupRef } from './gateway.ts';
+import { HOLDING_GROUP_NAME, holdingGroupNameFor, type DeleteGateway, type GroupRef } from './gateway.ts';
 import { findOrphanedGroupProcesses, groupExistsCoverage } from './groups.ts';
 import { removeHoldingGroup } from './holdingGroup.ts';
 import {
@@ -113,7 +113,7 @@ export interface BulkDeleteOptions extends EngineOptions {
   source: TargetSource;
   /** Saved before the first call that changes a process, and after every step that changes the ledger. */
   planStore: PlanStore;
-  /** Default `HOLDING_GROUP_NAME`. */
+  /** What the holding group is renamed to. Default `holdingGroupNameFor(run start)`. */
   holdingGroupName?: string | undefined;
   /** A preview: reads only, restores nothing, and says its plan understates the work. */
   dryRun?: boolean | undefined;
@@ -168,7 +168,7 @@ export async function runBulkDelete(gateway: DeleteGateway, options: BulkDeleteO
   const decisions = options.decisions ?? {};
   const emit = (event: DeleteEvent) => options.onEvent?.(event);
   const now = () => options.now?.() ?? new Date();
-  const holdingGroupName = options.holdingGroupName ?? HOLDING_GROUP_NAME;
+  const holdingGroupName = options.holdingGroupName ?? holdingGroupNameFor(now());
   const dryRun = options.dryRun === true;
   const acceptCollateral = options.acceptCollateral === true;
   const acceptanceAuthority = acceptCollateral ? ACCEPTANCE_AUTHORITY.inAdvance : ACCEPTANCE_AUTHORITY.atGate;
@@ -283,11 +283,13 @@ export async function runBulkDelete(gateway: DeleteGateway, options: BulkDeleteO
       const rows = await removeHoldingGroup(
         gateway,
         tempGroup,
-        { groupName: holdingGroupName, targetUniqueIds: targets, reportedUniqueIds: plan.collateral.map((c) => c.uniqueId), nameLookup: tenantBaseline },
+        // The name it has on the tenant: the run's own, or the default if the rename failed.
+        { groupName: tempGroup.name, targetUniqueIds: targets, reportedUniqueIds: plan.collateral.map((c) => c.uniqueId), nameLookup: tenantBaseline },
         isFatal,
       );
       results.push(...rows);
       plan.holdingGroupRemoved = rows.some((r) => r.operation === 'Cleanup' && r.status === 'Success');
+      if (!plan.holdingGroupRemoved) emit({ kind: 'log', line: holdingGroupLeftLine(tempGroup) });
       await save(plan);
     };
     const unwind = async (plan: DependencyPlan) => {
@@ -314,7 +316,24 @@ export async function runBulkDelete(gateway: DeleteGateway, options: BulkDeleteO
       preliminary.holdingGroup = tempGroup;
       preliminary.ledger = snapshotToPlanLedger(snapshot);
       runLedger = preliminary.ledger;
-      holdLog.push(`Holding group '${holdingGroupName}' created: id ${tempGroup.id}, uniqueId ${tempGroup.uniqueId}`);
+      holdLog.push(`Holding group created as '${tempGroup.name}': id ${tempGroup.id}, uniqueId ${tempGroup.uniqueId}`);
+      preliminary.log = [...holdLog];
+      // On record before the rename, so a run that dies here still knows to remove it.
+      await save(preliminary);
+
+      // F5: named for what it is. A failed rename is logged and the run carries on: the
+      // group is on record under its default name and is removed at cleanup all the same.
+      try {
+        await gateway.renameGroup(tempGroup.uniqueId, holdingGroupName);
+        tempGroup = { ...tempGroup, name: holdingGroupName };
+        holdLog.push(`Holding group renamed to '${holdingGroupName}'`);
+      } catch (error) {
+        if (isFatal(error)) throw error;
+        const line = `Could not rename the holding group (${failureOf(error).error}); it keeps the name '${tempGroup.name}' (id ${tempGroup.id})`;
+        holdLog.push(line);
+        emit({ kind: 'log', line });
+      }
+      preliminary.holdingGroup = tempGroup;
       holdLog.push(`About to restore ${archivedTargets.length} archived target(s) into the holding group`);
       preliminary.log = [...holdLog];
       // B4: on record before the first call that changes a process.
@@ -569,6 +588,11 @@ export async function runBulkDelete(gateway: DeleteGateway, options: BulkDeleteO
   }
 }
 
+/** What the operator is told when cleanup leaves the holding group: enough to find it in the tree. */
+function holdingGroupLeftLine(group: GroupRef): string {
+  return `The holding group '${group.name}' (id ${group.id}) was left in place. It is at the top level of the tree; the results file says why.`;
+}
+
 /** One entry per process, first seen wins: the checkpoints and the plan can both carry one. */
 function dedupeCollateral(collateral: readonly CollateralChange[]): CollateralChange[] {
   const seen = new Map<string, CollateralChange>();
@@ -627,6 +651,7 @@ export async function resumeUnwind(gateway: DeleteGateway, plan: DependencyPlan,
     );
     results.push(...rows);
     plan.holdingGroupRemoved = rows.some((r) => r.operation === 'Cleanup' && r.status === 'Success');
+    if (!plan.holdingGroupRemoved) options.onEvent?.({ kind: 'log', line: holdingGroupLeftLine(plan.holdingGroup) });
   }
   plan.log.push(`Unwound from the saved plan on ${new Date().toISOString()}`);
   await save();

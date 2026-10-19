@@ -93,12 +93,13 @@ test('there is no way to name a URL', () => {
   }
 });
 
-test('the only writes are archive, publish, group delete, move, ownership, and the delete run\'s four', () => {
+test('the only writes are archive, publish, group delete, move, ownership, and the delete run\'s five', () => {
   // Adding a write has to be a decision made here, not a side effect of a new case. The
-  // delete run's writes arrived with the unwind (W5 phase 7), not before.
+  // delete run's writes arrived with the unwind (W5 phase 7), not before; the rename with F5.
   assert.deepEqual([...WRITE_OPERATIONS].sort(), [
     'group.create',
     'group.delete',
+    'group.rename',
     'node.move',
     'process.archive',
     'process.delete',
@@ -164,8 +165,28 @@ test('restore, delete and create each name at most one thing', async () => {
 
 test('a new group\'s numeric id is read from the top level of the tree', async () => {
   const h = harness([{ groupid: OTHER_ID }, { treeItems: [{ id: 830, uniqueId: OTHER_ID, title: 'New group' }], parentUniqueId: null }]);
-  assert.deepEqual(await execute(h.ctx, { op: 'group.create' }), { id: 830, uniqueId: OTHER_ID });
+  // The tenant's own name comes back too, for a run whose rename then fails (F5).
+  assert.deepEqual(await execute(h.ctx, { op: 'group.create' }), { id: 830, uniqueId: OTHER_ID, name: 'New group' });
   assert.deepEqual(JSON.parse(h.calls[0]?.body ?? '{}'), { parentProcessGroupUniqueId: '' });
+});
+
+test('a rename names exactly one group and one line of text', async () => {
+  const name = 'Bulk Delete holding group (temporary, 2026-10-19 14:03:22 UTC)';
+  assert.equal(parseOperation({ op: 'group.rename', groupUniqueId: OTHER_ID, newName: name }).ok, true);
+  assert.equal(parseOperation({ op: 'group.rename', groupUniqueId: `${OTHER_ID},${PROCESS}`, newName: name }).ok, false);
+  assert.equal(parseOperation({ op: 'group.rename', groupUniqueId: OTHER_ID }).ok, false, 'a name is required');
+  assert.equal(parseOperation({ op: 'group.rename', groupUniqueId: OTHER_ID, newName: '  ' }).ok, false);
+  assert.equal(parseOperation({ op: 'group.rename', groupUniqueId: OTHER_ID, newName: 'a\nb' }).ok, false);
+  assert.equal(parseOperation({ op: 'group.rename', groupUniqueId: OTHER_ID, newName: 'x'.repeat(201) }).ok, false);
+  assert.equal(parseOperation({ op: 'group.rename', groupUniqueId: OTHER_ID, newName: name, parentUniqueId: PROCESS }).ok, false);
+
+  const h = harness([{ isValid: true }]);
+  assert.deepEqual(await execute(h.ctx, { op: 'group.rename', groupUniqueId: OTHER_ID, newName: name }), { renamed: true });
+  assert.match(h.calls[0]?.url ?? '', /\/Process\/Edit\/RenameGroup$/);
+  assert.deepEqual(JSON.parse(h.calls[0]?.body ?? '{}'), { processGroupUniqueId: OTHER_ID, newName: name });
+
+  const refused = harness([{ isValid: false }]);
+  await assert.rejects(execute(refused.ctx, { op: 'group.rename', groupUniqueId: OTHER_ID, newName: name }), /refused the rename/);
 });
 
 // ----------------------------------------------------------------- ownership
