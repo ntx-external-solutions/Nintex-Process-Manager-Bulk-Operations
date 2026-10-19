@@ -6,6 +6,192 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## F6. Fixes from live round R13
+
+Commits on `claude/web-f6-r13-fixes`. The branch is cut from the F5 branch because both
+change the orchestrator, so the F6 PR shows F5's two commits until F5 is merged.
+
+- `5cc92e1`: item 1, restored holders;
+- `7530db3`: item 2, confirm an orphan;
+- `c72f5ec`: item 3, coverage over archived rows;
+- `2a031c9`: item 5, unticked is `Skipped`;
+- `8a6de40`: item 4, the confirmation;
+- `e6a092c`: item 6, a refused delete.
+
+Item 5 went before item 4 because item 4 rebuilds the same check.
+
+**1. The restore's own revision is no longer taken for a draft.**
+- Just before the planner restores an archived holder, it records the holder's write
+  state from its archived model as `revisionBeforeRestore` (`openDraft`,
+  `publishedVersionExists`). This is kept on the plan ledger row, so a saved plan
+  carries it.
+- The draft check judges a restored holder from that record instead of the live read.
+  It no longer reads the holder at all.
+- **No draft before the restore:** `saveProcessModel` gets `restoredWithoutDraft`.
+  - Published before: the restore's revision is published with the removal.
+  - Never published (0.x): saved only, whatever the live read says.
+  - The row reads "Removed N reference(s), Published; restored from the archive for the
+    edit, and archived again at the end of the run", or "SavedUnpublished; …". It never
+    says "its open draft went live".
+- **A draft before the restore:** refused as before. The holder is already offered as a
+  tick, because the plan's draft list is built from the archived model.
+- **The never-published case.** I couldn't find why R13 refused one, and I don't know
+  what the live read shows for a restored never-published process. The fix doesn't
+  depend on it, because the decision comes from the archived model. The test makes the
+  live read show 1.1 in progress, which the old code refused.
+- **The fake tenant** now does what R13 measured: a restore opens an in-progress
+  revision (1.0 becomes 1.1, state 1), and a publish moves to the next major version
+  with state 3. With that, the phase 7 test for a scan-found holder fails on the old
+  code, which is R13's bug reproduced offline.
+
+**2. An orphan is confirmed before it is parked.**
+- **The check.** When the listing says a process's group is gone, the run reads the
+  group its model names (`ProcessGroupItems.ProcessGroup`) and looks it up with the
+  breadcrumb read: found when the breadcrumb is not empty. That read was already on the
+  allowlist. No new proxy operation.
+- **Found:** restored into that group as an ordinary holder, with a `GroupCheck` /
+  `Warning` row naming the disagreement. It is archived again in its own group and
+  gets a `ReArchiveHolder` row.
+- **Not found, or the model names no group:** parked as before. The parked message
+  ("its original group N no longer exists") now only appears after this check.
+- **The lookup fails:** I took a decision here. The run tries the model's group first
+  and parks only if the tenant refuses it, because that refusal is the measured answer
+  for a deleted group. That way a failed read can't repeat R13's damage.
+- **Extended to targets, also a decision.** An archived target that the listing calls
+  orphaned gets the same check before the orphan warning. A held-back one would
+  otherwise be archived in the holding group, and the group deleted around it, the same
+  way. If its group is found, the snapshot is corrected and a `GroupCheck` row is added.
+
+**3. The coverage warning counts archived rows only.** The words now say "N of M archived
+listing row(s) …".
+
+**4. The confirmation names what happens.**
+- The draft check is now a read-only function of its own, `checkHolderDrafts`. The run
+  calls it after the draft ticks and before "Permanent deletion".
+- The confirmation lists:
+  - the targets to be deleted, by name and id;
+  - each target kept, with the holder whose unticked draft keeps it;
+  - the ticked holders whose drafts go live;
+  - how many holders are edited first.
+- The question is now asked **before any reference is removed**, so cancelling edits
+  nothing. It used to come after the removal. The cancel stop reads "Nothing has been
+  edited or deleted."
+- The save-time backstop is unchanged. It reports a draft opened since the check.
+- The page shows these lines (`deleteConfirmationLines`). I checked the rendered panel
+  in the offline drive.
+
+**5. Unticked draft holders are `Skipped`.** The backstop, where a draft is opened after
+the check, stays `Failed`.
+
+**6. A refused delete says why.**
+- `deleteRefusalText` reads the raw body, which the proxy already forwards as `detail`:
+  - any strings under `additionalInfos`, or the `name`/`Name`/`title`/`processName` of
+    objects there, give "Still referenced by: …";
+  - otherwise the tenant's message;
+  - otherwise the first 500 characters of the raw body.
+- The row stays `Failed` with StatusCode 500. The write policy never resends after a 5xx,
+  and a test now pins that.
+- An archived target goes home archived through the unwind, as a held-back one does.
+- **A decision to check:** an *active* target that the pre-delete pass archived is made
+  active again in its own group, and the row says so. The task says "re-archive as for
+  any held-back target". A held-back active target is never archived, so this is the
+  state it would be in. Before this change it was silently left archived.
+
+**Functions touched.**
+- `delete/executor.ts`:
+  - new: `checkHolderDrafts`, `DraftCheck`, `deleteRefusalText`, `returnActiveTarget`;
+  - changed: `saveProcessModel` (`restoredWithoutDraft`), `removePlanReferences`
+    (takes `draftCheck`; unticked is `Skipped`), `deletePlanTargets` (refusal text,
+    active target returned).
+- `delete/planner.ts`: `restoreForReading`, which confirms orphans and records
+  `revisionBeforeRestore`, and `afterRestore`, which is new. `DeletePlanOptions.onRow`.
+  `PlanningGateway` gains `groupFound`.
+- `delete/groups.ts`:
+  - new: `modelGroupOf`, `confirmOrphan`, `groupDisagreementRow`;
+  - changed: `groupExistsCoverage` (archived only), `CoverageEntry.isArchived`.
+- `delete/bulkDelete.ts`:
+  - new: `DeleteConfirmation`, `deleteConfirmationLines`, `deleteConfirmationOf`,
+    `confirmOrphanedTargets`;
+  - `DeleteDecisions.confirmDelete` now takes a `DeleteConfirmation` instead of a count;
+  - the order is now: draft ticks, draft check, confirmation, removal, verification,
+    delete.
+- `delete/ledger.ts`: `PlanLedgerRow.revisionBeforeRestore`, `RevisionBeforeRestore`.
+- `delete/gateway.ts`: `DeleteGateway.groupFound`.
+- `ui/gateway.ts`: `groupFound`, via `group.breadcrumb`, on the planning gateway.
+- `delete/testing/fakeTenant.ts`: the restore's revision, the version after a publish,
+  `groupFound`, and `FakeFailure.body`.
+- `app/delete/page.tsx`: the confirmation lines and the stage text.
+
+**Results-file operations.**
+- New: `GroupCheck`, with the new status `Warning`. The results screen lists any status
+  outside Success, Skipped, Failed and Accepted as unexpected, so it will show there;
+  the summary counts don't include it.
+- Changed messages: `RemoveReferences` for a restored holder and for an unticked draft
+  holder (now `Skipped`), and `Delete` for a refusal.
+- No renames.
+
+**Tests.** 547 tests, all pass, none skipped. That's 533 after F5 and 530 before F5.
+Typecheck and build are clean.
+
+New tests:
+- `orchestrator.test.ts`, 11:
+  - item 1: restored published holder; restored never-published holder; draft before
+    the restore, unticked and ticked;
+  - item 2: model's group found; not found; no model group; lookup failed, accepted and
+    refused; target the listing calls orphaned;
+  - item 4: kept targets named before any save; ticked draft named, and declining edits
+    nothing;
+  - item 6: refused archived target goes home.
+- `deletion.test.ts`, 2: refusal names in three `additionalInfos` shapes, sent once, and
+  an active target made active again; fallbacks to the message, then the raw body.
+- `groups.test.ts`, 1: active rows aren't counted.
+
+Updated:
+- four status assertions to `Skipped`;
+- the wording of the coverage line in `hold.test.ts`;
+- the refused-delete message in `deletion.test.ts`.
+
+Checked against the old code:
+- item 1: 3 tests fail, including the phase 7 scan-found holder test, now that the fake
+  opens a revision;
+- item 2: 4 tests fail. The "names no group" test passes either way, as it should.
+
+**Offline drive.** These ran against the mock tenant in headless Chrome:
+- `drive-delete-run`: one question, whose panel lists the target and says 2 holders
+  are edited first. 5 rows, all Success, with the writes in the expected order.
+- `drive-delete-resume`: 4 rows, all Success.
+- `drive-delete`, the dry run: no writes.
+- `drive-archive`: passes.
+
+**Not verified offline. For Cowork in the R13 re-run:**
+1. What the live read shows after restoring a **never-published** archived process: its
+   `Version` and `ProcessRevisionStateId`. This explains R13's refusal. The fix doesn't
+   rely on it.
+2. A restored published holder ends at the next major version with the link gone, and
+   is archived again in its own group.
+3. **A deleted group's breadcrumb.** `groupFound` treats an empty breadcrumb as not
+   found. F1 said a deleted group's list "can be" empty, not that it always is. If it
+   isn't empty, the run tries that group, the tenant refuses, and the run falls back to
+   parking, so nothing is lost. But please confirm.
+4. The `additionalInfos` shape of a refused `DeleteProcess`, so the parser can be pinned
+   to it.
+5. The holding group's new name in the tree (F5).
+
+**Decisions I'd like from Cowork.**
+- Item 2 checks targets as well as holders, and tries the model's group when the lookup
+  fails. OK?
+- Item 6 makes a refused active target active again. OK, or should it stay archived?
+- Item 4 asks the confirmation before the removal rather than after. Verification still
+  asks separately if references remain.
+- The restored holder's row doesn't give the new version ("published as 2.0"), because
+  it isn't read back after the publish. Adding it costs one read per restored holder.
+  Want it?
+
+**Deferred or disputed.** Nothing deferred. The decisions above are the only places I
+went beyond the task text.
+
+---
+
 ## F5. Name the holding group so it can't be mistaken for a real one
 
 Commit `0460630` on `claude/web-f5-holding-group-name`, branched from `claude/main` after
