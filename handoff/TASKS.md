@@ -625,7 +625,7 @@ placeholder, new expert). Two fixes:
 
 ## F5. Name the holding group so it can't be mistaken for a real one
 
-Status: Ready (before W6)
+Status: Done (0460630)
 
 After `group.create`, record the new group's ids in the plan **first** (already done),
 then rename it with `POST /Process/Edit/RenameGroup` `{processGroupUniqueId, newName}`

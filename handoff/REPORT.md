@@ -6,6 +6,97 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## F5. Name the holding group so it can't be mistaken for a real one
+
+Commit `0460630` on `claude/web-f5-holding-group-name`, branched from `claude/main` after
+PR #69.
+
+**What changed.**
+
+- **Order of operations.** After `group.create` the run saves the group's ids in the plan
+  first, then renames the group to `Bulk Delete holding group (temporary, <run start UTC>)`,
+  for example `… (temporary, 2026-10-19 14:03:22 UTC)`. The time is the run's start, to
+  the second. The rename is sent before any process is touched.
+- **A failed rename** goes in the plan log as "Could not rename the holding group
+  (<reason>); it keeps the name '<default>' (id N)", and is also shown on screen. The run
+  carries on. The group is still on record and is still removed at cleanup. A dead
+  session still stops the run, as everywhere else.
+- **The default name is now read back.** `group.create` returns the title the tenant gave
+  the group, taken from the top-level tree read it already makes for the numeric id. The
+  run starts out with that name, so a run whose rename fails still names the group as it
+  appears in the tree. Before this, the run reported it under a name the tenant never
+  gave it.
+- **When cleanup can't remove the group,** the `Cleanup` row's message now carries the name
+  as well as its Name column: "'<name>' left in place: still holds …", "Could not verify
+  '<name>' is empty; find it at the top level of the tree …", or "Delete failed; remove
+  '<name>' manually from the top level of the tree". The run log adds "The holding group
+  '<name>' (id N) was left in place. It is at the top level of the tree; the results file
+  says why." This is said once the stop's unwind has run, so it follows the stop reason.
+  A resumed unwind ("Finish it") does the same.
+- **The page** no longer forces the script's `Bulk Delete Temporary Group` name. The dry
+  run's orphan warning says `Bulk Delete holding group (temporary, <run start> UTC)`,
+  because a preview has no start time yet.
+
+**Functions touched.**
+
+- `delete/gateway.ts`:
+  - `holdingGroupNameFor(runStart)`, new;
+  - `DeleteGateway.renameGroup`, new;
+  - the `createGroup` doc now says the returned name is the tenant's.
+- `delete/bulkDelete.ts`:
+  - `runBulkDelete`: the rename step, the `cleanup` closure, and the default for
+    `holdingGroupName`;
+  - `resumeUnwind`: logs when it leaves the group in place;
+  - `holdingGroupLeftLine`, new.
+- `delete/holdingGroup.ts`: the three `removeHoldingGroup` messages for a group left in
+  place.
+- `pm/groups.ts`: `renameGroup`, new, which treats a body with `isValid: false` as a
+  refusal even under a 200. `createTopLevelGroup` now also returns `name`.
+- `pm/operations.ts`:
+  - `group.rename`: exactly one group GUID, plus `newName`, which must be one line of up
+    to 200 characters with no control characters and nothing else alongside it;
+  - added to `OPERATION_NAMES` and `WRITE_OPERATIONS`.
+- `ui/gateway.ts`: `renameGroup`; `createGroup` returns the tenant's name.
+- `delete/testing/fakeTenant.ts`:
+  - `renameGroup`, and `groupName()` for asserting a rename;
+  - `createGroup` gives the group its `holdingGroup` name, as the tenant names a new group
+    itself.
+- `dev/mock-pm.mjs`: a RenameGroup endpoint.
+- `app/delete/page.tsx`: see "The page" above.
+
+**Results-file operations.** None new or renamed. The `Cleanup` messages are reworded as
+above.
+
+**Tests.** 533 tests, all pass, none skipped (530 before). Typecheck and build are clean.
+
+New tests:
+- `orchestrator.test.ts`, "the holding group is renamed for the run, after its ids are
+  saved". It checks that the plan named the group before the rename was sent, and that
+  create, rename and the first process change come in that order. It also checks the name
+  format and that the `Cleanup` row and the saved plan use the new name.
+- `orchestrator.test.ts`, "a failed rename is logged and the run carries on, reporting the
+  group by its default name". A process stranded in the group keeps cleanup from
+  removing it, so the test checks the row and the log line name it by its default name.
+- `operations.test.ts`, "a rename names exactly one group and one line of text".
+
+Both orchestrator tests fail on the code before this change. The write-list test now
+includes `group.rename`.
+
+**Offline drive.** These ran against the mock tenant in headless Chrome:
+- `drive-delete-run`: CreateGroup, then RenameGroup with the timestamped name, then the
+  process writes, then DeleteGroup. 5 rows, all Success.
+- `drive-delete-resume`: 4 rows, all Success.
+- `drive-delete`, the dry run: no writes.
+
+**Not verified offline.** The RenameGroup response body. The task says it was measured in
+PGM and in S1, but the shape isn't in the repo, so the proxy accepts any 2xx and only
+treats `isValid: false` as a refusal. **For Cowork in the R13 re-run:** check that the
+group shows up in the tree under the new name, and whether the tenant caps name length.
+
+**Deferred or disputed.** Nothing.
+
+---
+
 ## W5 phase 7. Unwind, orchestrator, run page and the allowlist writes
 
 Commits on `claude/web-w5-7-unwind`, branched from `claude/main` after PR #67:
