@@ -54,6 +54,22 @@ test('a group left empty is deleted, with the archived processes it orphans', ()
   assert.deepEqual(d[0]?.action === 'delete' ? d[0].orphans : null, [{ uniqueId: 'a-1', name: 'Petty cash' }]);
 });
 
+test('after a delete, a group still holding an archived process is kept, and its parent with it', () => {
+  // W6: after Archive an archived process is what the run made; after a Delete it is one
+  // the run kept, and deleting its group would strand it.
+  const facts = new Map([
+    ['top', { ...EMPTY, children: [item('mid', 'group')] }],
+    ['mid', { ...EMPTY, archived: [{ uniqueId: 'a-1', name: 'Petty cash' }] }],
+  ]);
+  const d = planCleanup([TOP, MID], facts, { archivedProcesses: 'keep' });
+  assert.deepEqual(actions(d), [
+    ['mid', 'keep'],
+    ['top', 'keep'],
+  ]);
+  assert.match(d[0]?.action === 'keep' ? d[0].reason : '', /1 archived process the delete did not remove: 'Petty cash'\. Deleting the group would leave them with no group/);
+  assert.deepEqual(actions(planCleanup([MID], new Map([['mid', { ...EMPTY }]]), { archivedProcesses: 'keep' })), [['mid', 'delete']], 'an empty one still goes');
+});
+
 test('a group holding a document is kept, and says so', () => {
   const d = decide({ leaf: { documents: { total: 2, names: ['Policy.pdf', 'Old form.docx'] } } }, [LEAF]);
   assert.deepEqual(actions(d), [['leaf', 'keep']]);

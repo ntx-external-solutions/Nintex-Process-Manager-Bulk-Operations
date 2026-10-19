@@ -15,6 +15,7 @@ import assert from 'node:assert/strict';
 import { findVariationMasters } from '../archive/plan.ts';
 import { compareTenantState, type ProcessIndex } from '../tenant/state.ts';
 import {
+  collateralEntries,
   collateralLines,
   restoreCollateral,
   variationWarning,
@@ -316,4 +317,22 @@ test('an unnamed collateral row says so, and prints its id once', () => {
   assert.match(shown, /not in any process list/, 'the collateral list says the name is unavailable');
   assert.ok(shown.includes(ghostId), 'while still printing the id, which is what identifies it');
   assert.equal(shown.split(ghostId).length - 1, 1, 'the id appears once, not twice over as name and id');
+});
+
+test('the on-screen table carries the same words as the list, one entry per process', () => {
+  // W6: the confirmation shows the list as a table; it must not say anything the text does not.
+  const row: CollateralChange = {
+    uniqueId: 'ffff0000-0000-0000-0000-0000000000aa',
+    name: 'Order Handling',
+    change: 'Archived',
+    wasArchived: false,
+    isArchivedNow: true,
+    originalGroupId: 100,
+    originalGroupExists: true,
+    currentGroupId: 100,
+  };
+  const entries = collateralEntries([row]);
+  assert.deepEqual(entries, [{ uniqueId: row.uniqueId, name: 'Order Handling', changes: ['was ACTIVE, is now ARCHIVED (group 100)'] }]);
+  const text = collateralLines([row]).join('\n');
+  for (const line of entries[0]!.changes) assert.ok(text.includes(line));
 });

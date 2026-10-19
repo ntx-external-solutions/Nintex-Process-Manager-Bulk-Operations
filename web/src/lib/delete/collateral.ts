@@ -131,6 +131,11 @@ function displayName(item: Pick<CollateralChange, 'name' | 'uniqueId'>): string 
   return name && name.toLowerCase() !== item.uniqueId.toLowerCase() ? name : UNKNOWN_NAME;
 }
 
+/** The collateral list as entries, for the on-screen confirmation's table (W6). Same words as `collateralLines`. */
+export function collateralEntries(collateral: readonly CollateralChange[]): Array<{ uniqueId: string; name: string; changes: string[] }> {
+  return collateral.map((item) => ({ uniqueId: item.uniqueId, name: displayName(item), changes: changeLines(item) }));
+}
+
 /**
  * The collateral list as the operator reads it: one entry per process, its name or
  * `UNKNOWN_NAME` (never the id twice), its id, and what happened to it. Port of
@@ -145,12 +150,15 @@ export function collateralLines(collateral: readonly CollateralChange[], phase?:
     lines.push(`  ${displayName(item)}  (${item.uniqueId})`);
     for (const line of changeLines(item)) lines.push(`      ${line}`);
   }
-  lines.push(
-    'The usual cause is a process VARIATION. Nintex Process Manager stores a variation as its own record in its own group, and acting on one can act on its master too. The coupling is not visible in the process model or the process lists, so it can only be caught by comparing tenant state before and after, which is what this check does.',
-    'Another user editing the tenant during the run produces the same signal.',
-  );
+  lines.push(...COLLATERAL_NOTES);
   return lines;
 }
+
+/** Why processes that were not targets change, under every collateral list. */
+export const COLLATERAL_NOTES = [
+  'The usual cause is a process VARIATION. Nintex Process Manager stores a variation as its own record in its own group, and acting on one can act on its master too. The coupling is not visible in the process model or the process lists, so it can only be caught by comparing tenant state before and after, which is what this check does.',
+  'Another user editing the tenant during the run produces the same signal.',
+] as const;
 
 /**
  * Who let a collateral change through, for its `Accepted` row. The file distinguishes an
