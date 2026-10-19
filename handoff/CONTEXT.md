@@ -2,7 +2,7 @@
 
 Maintained by the Cowork session. Claude Code reads this but does not edit it.
 
-## Where things stand (18 Oct 2026, evening)
+## Where things stand (19 Oct 2026)
 
 - Product is a web app, live at `https://bulk.ntx-poc.com/` against the demo tenant.
   PowerShell frozen at v4.11.
@@ -44,10 +44,18 @@ Maintained by the Cowork session. Claude Code reads this but does not edit it.
   refuse by default with an opt-in to publish, handed to phase 6.
 - W5 phase 6 (delete) reviewed and approved; held-back targets must be decided before any
   reference is removed (fix at the start of phase 7).
-- Next for Cowork: plan R13, the first live delete, on Cowork-built test content: targets
-  with an active holder, an archived holder, an archived holder whose group is gone, a
-  holder with an open draft (unticked and ticked), and two holders of one target where
-  one has a draft (the ordering case). Run it once phase 7 deploys.
+- W5 phase 7 (unwind, orchestrator, run page) reviewed and approved. F5 (name the holding
+  group) handed over.
+- R13 (19 Oct), the first live delete, through the app on Cowork-built test content. Deletes,
+  held-back re-archives, the ordering fix, the ticked draft publish and holding-group
+  cleanup all worked; no collateral. Two engine bugs: every restored archived holder was
+  refused as an open draft (the restore's own in-progress revision), and a false
+  `groupExists: false` led the run to park a holder and then delete the group it was
+  re-archived in, orphaning it. Both are in F6 with three smaller fixes. All R13 content
+  removed; tenant back to 13 top-level groups, 186 active, 463 archived, every
+  pre-existing id present.
+- Next: Claude Code works F5 then F6. Cowork then re-runs the R13 cases live before W6.
+- Token duration (60000 minutes) deferred by JB; not a task.
 - Process and group names were removed from Cowork's handoff text (18 Oct) per CLAUDE.md.
 - Spikes S1 to S3 and the variation test are in `API_ARCHITECTURE.md`. One lasting change
   on the tenant: the variation set used for the S2 move test is published at 3.0 (both variations).
@@ -66,10 +74,10 @@ Maintained by the Cowork session. Claude Code reads this but does not edit it.
 
 ## Still open, not yet tasks
 
-- The post-delete collateral checkpoint has not been exercised in four rounds, because no
-  run has reached a delete. It needs R12 to get past planning.
-- Link reconciliation still reports 24 mismatches, all `claimed 2, located 1`. Not yet
-  diagnosed.
+- The post-delete collateral checkpoint ran live in R13 and found none, which was right;
+  it has not yet seen real collateral live.
+- Edits over a revision awaiting approval can't be tested on the demo tenant (no
+  approvals). Offline only.
 - Three temporary groups on the tenant still hold eight processes stranded in rounds 2 to 4.
   This is manual tenant cleanup, not code.
 - `Compare-TenantState` can only classify processes in the index, and the listing endpoints

@@ -8,14 +8,13 @@ earlier task; don't start them.
 The R11 tasks for the PowerShell (old T1 and T2) are superseded. They're folded into W5.
 The PowerShell is frozen at v4.11: don't change it.
 
-## Next handover (18 Oct, evening): F1, then W4, then W5
+## Next handover (19 Oct): F5, then F6, then stop
 
-W0 to W3 are merged and the app is live at `https://bulk.ntx-poc.com/` on the demo
-tenant. Cowork runs the live tests there (round R12: Archive, folder cleanup, Move) in
-parallel with this work, and writes any findings as new F tasks. Don't run anything
-against it yourself.
-
-Work F1 first (small, from Cowork's review of your W2 to W3 reports), then W4, then W5.
+W5 is done and R13, the first live delete, ran on 19 Oct (review under W5). It worked
+where it was meant to and found two engine bugs, one of which damaged test content.
+Work F5, then F6, one PR each, then stop for review. W6 stays Queued until both are
+merged and Cowork has re-run the R13 cases live. Don't run anything against the tenant
+yourself.
 
 ---
 
@@ -250,9 +249,78 @@ results row (report: project doc `claude/bulk-ops-r12-2026-10-18.md`). Three fix
 
 ## W5. Bulk Delete engine
 
-Status: Ready. Phases 1 to 6 done and **reviewed by Cowork**; phase 7 (the ordering fix,
-unwind, orchestrator, run page, allowlist writes) done in 38eb4c4, b638b88, 32585a1, 8e918dd
-and 89372a5; stopped for review before R13
+Status: Done (phases 1 to 7), reviewed by Cowork. Live test R13 run 19 Oct; fixes in F6
+
+### Cowork's live test R13 (19 Oct)
+
+The first live delete, through the app, on Cowork-built test content: 7 archived targets
+and 10 holders covering every case in the R13 plan, plus probes. Drafts refused by
+default, one draft holder ticked. All test content was removed afterwards and the tenant
+is back to its baseline (top level, active and archived counts, and every pre-existing
+process id).
+
+**What worked**
+
+- The two targets nothing blocked were deleted. The five held-back targets were
+  re-archived in their own group. The holding group was created, used and removed. No
+  collateral outside the test content.
+- The ordering fix: of two holders of one target, the one with an open draft was refused
+  and the clean one was left unedited ("every target it references is being kept"). Same
+  for an active holder whose target another holder kept alive.
+- The ticked draft holder published with the removal (1.1 to 2.0). A plain published
+  holder republished at 2.0 with the link gone. The two deliberate open-draft holders,
+  left unticked, were refused and their targets kept.
+- An archived holder whose group had really been deleted was parked, re-archived in the
+  holding group, and its row says the original group no longer exists.
+
+**Your four open items**
+
+1. **Delete with only the draft clean:** measured outside the app. The tenant refuses:
+   HTTP 500 "Process Cannot Be Deleted", with `additionalInfos` naming the holder. A link
+   is counted once per stored revision, so the published revision still holds it. Refusing
+   draft holders by default is right; cleaning the draft alone frees nothing.
+2. **Edit over a revision awaiting approval:** not measurable here. The demo tenant has no
+   approvals (submit for approval answers 400). It stays offline-tested only.
+3. **`breadcrumb/children` on a brand-new top-level group:** works, and lists a process
+   restored into it.
+4. **The new group in the tree:** appears at once, with its numeric id.
+
+**Found (fixes in F6)**
+
+1. **Every archived holder the run restored was refused as an open draft.** All four, one
+   of them never published. Their targets were held back with no tick offered, because
+   the holders were archived when the plan was made. A restore creates an in-progress
+   revision (1.0 becomes 1.1, revision state 1), and the pre-save check in `executor.ts`
+   can't tell that from a real draft.
+2. **A false orphan, and the run made it real.** One archived holder's listing row said
+   `groupExists: false` (group id 1), while its model named a group that was in the tree.
+   The run parked it, re-archived it in the holding group, then deleted the holding
+   group, so the process is now orphaned for real. Not reproduced; the cause is the
+   listing's. This is the one that matters: the app destroyed a restorable location.
+3. The `groupExists` coverage warning counted active rows, which never carry the field
+   ("194 of 673 listing row(s) do not report groupExists"). Noise on every run.
+4. The final "Permanent deletion" confirmation doesn't name the targets, or say which
+   will be held back and why. That's decided after the confirmation today.
+5. Holders refused because the operator left them unticked are `Failed` rows. They did
+   what was asked.
+
+### Cowork's review of phase 7 (18 Oct)
+
+Code approved. The two engine defects you found offline (an archived holder only the
+scan finds was never restored; a dead run's rows were lost) are real, and the script has
+them too. Good catches. Decisions:
+
+- **A holding group on every real run:** agreed.
+- **The holding group's default name: not OK, fix as F5 before W6.** Every stranded group
+  from rounds 2 to 4 was a default-named group nobody could tell from a real one, and PGM
+  flagged the same risk (create-then-rename debris). See F5.
+- **RestoreProcess not resent after a 5xx, the probe sent once:** agreed.
+- **Variation siblings from `variationSetData` in W6, using the tree's `variationSetId`:**
+  agreed.
+
+R13 runs on Cowork-built test content and measures your four open items: a delete with
+only the draft clean, an edit over a revision awaiting approval, `breadcrumb/children` on a
+brand-new top-level group, and the new group appearing in the tree with its numeric id.
 
 ### Cowork's review of phase 6 (18 Oct)
 
@@ -555,9 +623,73 @@ placeholder, new expert). Two fixes:
 
 ---
 
+## F5. Name the holding group so it can't be mistaken for a real one
+
+Status: Ready (before W6)
+
+After `group.create`, record the new group's ids in the plan **first** (already done),
+then rename it with `POST /Process/Edit/RenameGroup` `{processGroupUniqueId, newName}`
+(PGM's `renameGroup`; measured working with a bearer token in PGM and from the browser in
+S1). Name it `Bulk Delete holding group (temporary, <run start UTC>)`. Add
+`group.rename` to the allowlist, taking exactly one group GUID and a name. A failed
+rename is logged in the plan and the run carries on: the group is still recorded and
+still removed at cleanup. If cleanup can't remove it, the stop message and the
+`Cleanup` row give its name, so an admin can find it in the tree. Tests: the rename is
+sent after the ids are saved; a failed rename doesn't stop the run.
+
+**Deferred by JB (19 Oct):** the sign-in token duration (`duration=60000`, about 41 days)
+stays as it is for now. Not a task.
+
+---
+
+## F6. Fixes from live round R13
+
+Status: Ready (after F5, before W6)
+
+From Cowork's live test R13 (under W5). Items 1 and 2 are engine bugs; do them first.
+
+1. **Don't take the revision our own restore created for an open draft.** Restoring an
+   archived published process creates an in-progress revision (measured: 1.0 becomes 1.1,
+   `ProcessRevisionStateId` 1), so the pre-save check (`isOpenDraft` in `executor.ts`,
+   "Checking holders for open drafts") refuses every restored published holder. A
+   restored never-published holder was refused too, so `writeStateOf` likely doesn't see
+   `publishedVersionExists: false` after a restore; check, and add a fixture for it.
+   Fix: for a holder with `restoredByThisRun`, judge the draft from its archived model,
+   read before the restore (the batch read already has it). No draft there means the
+   in-progress revision is ours: choose the path as for a clean holder (publish when a
+   published version exists, save-only when not), and the unwind re-archives it as now.
+   A real draft there keeps today's refusal, and the holder is offered as a tick like an
+   active one. The row should say what happened, e.g. "Removed 1 reference(s), published
+   as 2.0, re-archived". Tests: restored published holder with no prior draft is edited
+   and published; restored never-published holder is saved only; archived holder with a
+   draft before the restore is refused and offered as a tick.
+2. **Confirm an orphan before parking it.** `findOrphanedGroupProcesses` trusts the
+   listing's `groupExists`. Measured once: `false` with group id 1 on a process whose
+   model (`ProcessGroupItems.ProcessGroup`) named a group that exists. Treat a process as
+   orphaned only when the listing says so **and** that group isn't in the tree discovery
+   already walked (or a breadcrumb read fails to find it). When they disagree, restore it
+   into its group as an ordinary archived holder and add a warning row naming the
+   disagreement. When the model is unreadable or names no group, keep today's behavior.
+   The `ReArchiveOrphanedHolder` message ("its original group N no longer exists") must
+   only appear after this check. Tests for all three cases.
+3. **Coverage warning over archived rows only.** Active rows never carry `groupExists`, so
+   `groupExistsCoverage` should count archived entries only.
+4. **Name the targets in the final confirmation.** Run the draft check (item 1, reads
+   only) before the "Permanent deletion" confirmation, so it can list the targets that
+   will be deleted, the ones held back with the holder and reason, and the holders that
+   will be published. The executor still re-checks at save time and reports any change.
+5. **Unticked draft holders are `Skipped`, not `Failed`.** Keep `Failed` for errors.
+6. **Show why the tenant refused a delete.** `DeleteProcess` refuses a still-referenced
+   target with HTTP 500 "Process Cannot Be Deleted" and `additionalInfos` naming the
+   blocking items (measured from the browser; shape not captured, so read it defensively
+   and fall back to the raw body). Put those names in the `Delete` row with StatusCode
+   500, re-archive the target as for any held-back target, and don't retry.
+
+---
+
 ## W6. Bulk Delete UI, and folder cleanup
 
-Status: Queued (after W5)
+Status: Queued (after F5 and F6, and Cowork re-running the R13 cases)
 
 Both entry points (tree and archived view), delete-by-group target resolution, the
 collateral confirmation on screen, and the optional "delete now-empty groups" step,
