@@ -558,3 +558,23 @@ test('a ticked draft holder is named in the confirmation, and declining it edits
   assert.equal(tenant.exists(target.UniqueId), true);
   assert.equal(rowsOf(rows, 'RemoveReferences').length, 0);
 });
+
+// ---------------------------------------------------------------- F6 item 6: a refused delete, end to end
+
+test('an archived target the tenant refuses to delete goes home archived, with the holder named in its row', async () => {
+  const tenant = scenario([{ uniqueId: T1, name: 'Raise invoice', archived: true, groupId: HOME.id }], {
+    fail: (call) =>
+      call.op === 'deleteProcess'
+        ? { status: 500, message: 'Process Cannot Be Deleted', body: JSON.stringify({ message: 'Process Cannot Be Deleted', additionalInfos: { processes: ['Order intake'] } }) }
+        : null,
+  });
+  const { rows } = await run(tenant);
+
+  assert.match(rowsOf(rows, 'Delete')[0]?.message ?? '', /Still referenced by: Order intake/);
+  assert.equal(rowsOf(rows, 'Delete')[0]?.statusCode, '500');
+  assert.equal(tenant.callsTo('deleteProcess').length, 1);
+  assert.equal(tenant.isArchived(T1), true);
+  assert.equal(tenant.groupOf(T1), HOME.id, 'archived again in its own group, not the holding group');
+  assert.equal(rowsOf(rows, 'ReArchive')[0]?.status, 'Success');
+  assert.equal(rowsOf(rows, 'Cleanup')[0]?.status, 'Success', 'so the holding group is empty and removed');
+});

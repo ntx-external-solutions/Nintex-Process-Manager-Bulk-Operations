@@ -125,6 +125,8 @@ export interface FakeFailure {
   status: number;
   /** The tenant's own words, as `failureOf` reads them. */
   message?: string;
+  /** The raw response body, which the proxy passes on as `detail`. */
+  body?: string;
 }
 
 /** What RestoreProcess does with a process that is already active. */
@@ -455,6 +457,7 @@ export class FakeTenant implements DeleteGateway {
       throw new PmRequestError(failure.message ?? `Request failed (HTTP ${failure.status}).`, {
         status: failure.status,
         tenantMessage: failure.message ?? null,
+        detail: failure.body ?? null,
       });
     }
     return this.noEffect?.(call, this) ?? false;

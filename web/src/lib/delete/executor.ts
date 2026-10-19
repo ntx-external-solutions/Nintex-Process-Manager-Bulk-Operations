@@ -650,8 +650,15 @@ export async function deletePlanTargets(
       await gateway.deleteProcess(target, record?.originalGroupUniqueId || null);
     } catch (error) {
       if (isFatal(error)) throw error;
+      // Never resent (the write policy): a refusal is the tenant's answer, not a fault.
       const status = failureOf(error).status;
-      results.push(row('Failed', `Delete failed (HTTP ${status})`, status > 0 ? status : null));
+      const refusal = deleteRefusalText(error);
+      let message = `Delete failed (HTTP ${status})${refusal ? `: ${refusal}` : ''}`;
+      // The tenant answered, so it is still there. An archived target goes home with the
+      // unwind as a held-back one does; an active one the archive pass archived is made
+      // active again in its own group, which is where a held-back active target stays.
+      if (status > 0 && record && !record.wasArchived) message += await returnActiveTarget(gateway, target, record.originalGroupId, isFatal);
+      results.push(row('Failed', message, status > 0 ? status : null));
       continue;
     }
     // So the unwind does not try to re-archive something that no longer exists: before
@@ -678,6 +685,59 @@ export async function deletePlanTargets(
     }
   }
   return results;
+}
+
+/**
+ * Why the tenant refused a delete, in words for the row. A still-referenced target is
+ * answered HTTP 500 "Process Cannot Be Deleted" with `additionalInfos` naming what holds
+ * it (R13, measured from the browser; shape not captured). So the names are read from
+ * any strings under `additionalInfos`, or the `name`/`Name`/`title` of objects there,
+ * with the raw body as the fallback and the tenant's message before both.
+ */
+export function deleteRefusalText(error: unknown): string {
+  const record = (typeof error === 'object' && error !== null ? error : {}) as Record<string, unknown>;
+  const message = failureOf(error).detail ?? '';
+  const raw = typeof record['detail'] === 'string' ? record['detail'].trim() : '';
+  let body: unknown = null;
+  try {
+    body = raw ? JSON.parse(raw) : null;
+  } catch {
+    body = null;
+  }
+  const infos = typeof body === 'object' && body !== null ? (body as Record<string, unknown>)['additionalInfos'] : undefined;
+  const names: string[] = [];
+  const collect = (value: unknown, depth: number) => {
+    if (depth > 4 || value === null || value === undefined) return;
+    if (typeof value === 'string') {
+      if (value.trim()) names.push(value.trim());
+    } else if (Array.isArray(value)) {
+      for (const item of value) collect(item, depth + 1);
+    } else if (typeof value === 'object') {
+      const item = value as Record<string, unknown>;
+      const label = ['name', 'Name', 'title', 'processName'].map((k) => item[k]).find((v) => typeof v === 'string' && v.trim());
+      if (typeof label === 'string') names.push(label.trim());
+      else for (const v of Object.values(item)) collect(v, depth + 1);
+    }
+  };
+  collect(infos, 0);
+  const unique = [...new Set(names)].filter((n) => n !== message);
+  if (unique.length > 0) return `${message || 'refused'}. Still referenced by: ${unique.join('; ')}`;
+  if (message) return message;
+  return raw.slice(0, 500);
+}
+
+/** Makes an active target the archive pass archived active again in its own group; the row's suffix. */
+async function returnActiveTarget(
+  gateway: DeleteGateway,
+  target: string,
+  groupId: number | null,
+  isFatal: (error: unknown) => string | null,
+): Promise<string> {
+  if (groupId === null) return '. It was archived before the delete and no original group was recorded, so it stays archived';
+  const restored = await restoreProcess(gateway, target, groupId, { isFatal });
+  return restored.ok
+    ? `. Not deleted, so made active again in group ${groupId}, as it was before the run`
+    : `. It was archived before the delete and could not be made active again in group ${groupId} (HTTP ${restored.statusCode}); restore it manually`;
 }
 
 /**
