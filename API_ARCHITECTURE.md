@@ -1562,3 +1562,21 @@ mismatches are the dependency API over-claiming:
   ids and names, `Objective`, plus the anti-forgery token as a form field. The new
   process starts at 0.2, in progress.
 
+### Measured in R15, W6 live (30 Oct 2026)
+
+- **The archived listing's `groupExists: false` is wrong on a fixed share of rows.** Of 191
+  such rows, 26 have a model whose `GroupUniqueId` resolves by breadcrumb to a live group
+  (the model's `ProcessGroupItems.ProcessGroup` agrees with `GroupUniqueId` on all 191).
+  The other 165 return an empty breadcrumb. Unlike R13's single case, this reproduces on
+  every read. Never treat the flag alone as proof of an orphan.
+- **`GetChildProcessGroupTreeItems` can fail transiently.** One call took about 60 seconds
+  and answered 500 "Your request could not be completed at this time. Please try again
+  later or contact your Promaster.", with an empty `additionalInfos`. The same read
+  succeeded at once on retry.
+- **The cookie session can't use the mobile batch read.** `GET
+  /mobile/api/v1/processes?processUniqueIds=...` from a signed-in browser session answers
+  302 with `"caption":"Session Timeout"`. It needs the bearer token, as the app's proxy
+  sends.
+- **`RestoreProcess` on an active process** answers 500 "Process cannot be restored as it
+  is not archived". That's the run's relocation probe, and the run handles it as expected.
+

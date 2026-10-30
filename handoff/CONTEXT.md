@@ -2,7 +2,7 @@
 
 Maintained by the Cowork session. Claude Code reads this but does not edit it.
 
-## Where things stand (19 Oct 2026)
+## Where things stand (30 Oct 2026)
 
 - Product is a web app, live at `https://bulk.ntx-poc.com/` against the demo tenant.
   PowerShell frozen at v4.11.
@@ -61,7 +61,18 @@ Maintained by the Cowork session. Claude Code reads this but does not edit it.
   Found: archiving publishes a new major version (so there's no archived draft, and no
   restored never-published process). All content removed; tenant back to 13 top-level
   groups, 186 active, 463 archived, every pre-existing id present.
-- Next: W6 is Ready, with three small R14 additions. Cowork tests it live after.
+- W6 done and merged (30 Oct, PRs #74 and #75; #75 opened the home-page tile, which was
+  still disabled). 570 offline tests.
+- R15 (30 Oct), W6 live through the app on Cowork-built test content: pass. Delete 17 rows
+  (15 Success, 2 Skipped, 0 Failed), cleanup 4 rows (2 deleted, 2 kept); the tenant matched
+  every row. Confirmed live: delete by group across levels never expanded, an unchecked
+  subgroup kept out, the three ways in adding up, the holder preview, the final
+  confirmation, `Archive` rows before `Delete`, cleanup deepest first with kept-subgroup
+  reasons, and the archived view's orphan check (26 of 191 `groupExists: false` rows
+  corrected, each verified by breadcrumb). Three small UI items in F7. All content
+  removed; tenant back to 13 top-level groups, 186 active, 463 archived, every
+  pre-existing id present.
+- Next: F7 is Ready. Variations are still untested live (see below).
 - Token duration (60000 minutes) deferred by JB; not a task.
 - Process and group names were removed from Cowork's handoff text (18 Oct) per CLAUDE.md.
 - Spikes S1 to S3 and the variation test are in `API_ARCHITECTURE.md`. One lasting change
@@ -81,6 +92,12 @@ Maintained by the Cowork session. Claude Code reads this but does not edit it.
 
 ## Still open, not yet tasks
 
+- Variation sets in Bulk Delete (the partial-set default, and the R3 risk of deleting a
+  variation archiving its master) are untested live: there is no test set, and creating
+  one through the API is unmeasured. It's also the only realistic way to make the
+  post-delete collateral checkpoint fire.
+- Cleanup's "group still holding a held-back archived process" warning hasn't fired live.
+  Such a group is only a candidate when the run also deleted something from it.
 - The post-delete collateral checkpoint ran live in R13 and found none, which was right;
   it has not yet seen real collateral live.
 - Edits over a revision awaiting approval can't be tested on the demo tenant (no
