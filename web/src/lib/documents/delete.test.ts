@@ -70,7 +70,7 @@ test('the plan archives active targets first and deletes archived ones straight 
   ]);
   // An archived document a draft points at breaks that process just as an active one does (spike).
   const scan: ReferenceScan = {
-    holders: [{ uniqueId: p(3), name: 'Close the month', published: false, references: [{ documentId: 4, documentUniqueId: d(4), type: 'Form', text: 'x', path: '', segments: [] }] }],
+    holders: [{ uniqueId: p(3), name: 'Close the month', published: false, version: '1.1', revisionStateId: 1, references: [{ documentId: 4, documentUniqueId: d(4), type: 'Form', text: 'x', path: '', segments: [] }] }],
     unread: [],
     read: 2,
   };

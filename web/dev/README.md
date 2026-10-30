@@ -31,6 +31,7 @@ node dev/drive-delete-refused.mjs  # the tenant refuses an active target's delet
 node dev/drive-docs-archive.mjs    # Archive documents by group, list and CSV: holders skipped, re-check, errors in a 200 (W8a)
 node dev/drive-docs-delete.mjs     # Delete documents: archive first, typed DELETE, re-check, put back, cleanup (W8b)
 node dev/drive-docs-restore.mjs    # Restore documents from the archived list and a Delete results file (W8c)
+node dev/drive-docs-repair.mjs     # Repair document references: scan, repair published and draft holders, read back (W8d)
 ```
 
 Each script prints the screens it passes through and the write calls the mock received.

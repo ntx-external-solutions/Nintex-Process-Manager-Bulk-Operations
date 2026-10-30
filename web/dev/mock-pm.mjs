@@ -32,6 +32,11 @@
 // breadcrumb is empty, as a deleted group's is), one the bulk restore refuses inside a
 // 200, and one a Delete run archived and left archived. The restore answers NotArchived
 // for an active document.
+// For Repair document references (W8d): Outright (published) points at a deleted image
+// and at an archived document, which is not dead; Needs approval's open draft points at a
+// deleted image; Elsewhere points at a deleted image and at a form that is missing at the
+// scan and reappears before the repair; Archived input, archived, points at a deleted
+// image and is reported only.
 // For ownership, start the app with SCIM_BASE_URL=http://localhost:<port>.
 //
 //   node dev/mock-pm.mjs [port]      (default 4999; sign in to http://localhost:4999/tenant)
@@ -91,6 +96,8 @@ const docs = Object.fromEntries([
   doc(218, 'Orphan archive.pdf', id(912), { archived: true }),
   doc(219, 'Restore refused.pdf', MAN, { archived: true, refuseRestore: 'Locked' }),
   doc(220, 'Run archived.pdf', SHARED, { archived: true }),
+  // Not in either list for the first two list reads (a scan's), there from the third on.
+  doc(232, 'Reappeared form.docx', SHARED, { appearsOnListRead: 3 }),
 ].map((d) => [Number(d.uniqueId.slice(-3)), d]));
 const docNumber = (d) => Number(d.uniqueId.slice(-3));
 const within = (g, top) => {
@@ -118,14 +125,22 @@ procs[id(7)] = { name: 'Archived input', group: OTHER, archived: true, mode: 'ou
 procs[id(8)] = { name: 'Old retired step', group: RET, archived: true, mode: 'outright', rev: 800, version: '3.0', state: null, owner, expert };
 // The tenant refuses to delete it, as it did R14's still-linked target.
 procs[id(9)] = { name: 'Pinned', group: OTHER, archived: false, mode: 'outright', rev: 900, version: '1.0', state: 3, owner, expert, refuseDelete: true };
-const formIn = (n, name) => ({ Activity: [{ Id: n * 10, Text: 'Do the step', ChildProcessProcedures: { Form: [{ Id: n * 10 + 1, DocumentId: n, DocumentUniqueId: id(n), Text: name }] } }] });
+const docItem = (n, name) => ({ Id: n * 10 + 1, DocumentId: n, DocumentUniqueId: id(n), Text: name });
+const formIn = (n, name, images = []) => ({ Activity: [{ Id: n * 10, Text: 'Do the step', ChildProcessProcedures: { Form: [docItem(n, name)], Image: images } }] });
+// Documents 230, 231, 233 and 234 were deleted: no list has them (W8d).
 const links = {
-  [id(5)]: { ProcessProcedures: { ProcessLink: [{ Id: 501, LinkedProcessUniqueId: id(6), LinkedProcessName: 'Old thing' }] } },
+  [id(5)]: {
+    ProcessProcedures: {
+      ProcessLink: [{ Id: 501, LinkedProcessUniqueId: id(6), LinkedProcessName: 'Old thing' }],
+      ...formIn(232, 'Reappeared form', [docItem(233, 'Deleted photo')]),
+    },
+  },
   // Needs approval's open draft points at a document no properties answer lists (W8 spike).
-  [id(2)]: { ProcessProcedures: formIn(204, 'Draft-only form') },
+  [id(2)]: { ProcessProcedures: formIn(204, 'Draft-only form', [docItem(231, 'Deleted chart')]) },
+  [id(1)]: { ProcessProcedures: formIn(101, 'Old policy', [docItem(230, 'Deleted diagram')]) },
   // Disabled owner's model and the document's properties both name the attachment.
   [id(3)]: { ProcessProcedures: formIn(201, 'Payables checklist') },
-  [id(7)]: { Inputs: { Input: [{ Id: 701, FromProcessUniqueId: id(6), Name: 'From old thing' }] } },
+  [id(7)]: { Inputs: { Input: [{ Id: 701, FromProcessUniqueId: id(6), Name: 'From old thing' }] }, ProcessProcedures: { Image: [docItem(234, 'Deleted logo')] } },
 };
 const dependencies = {
   [id(6)]: [{ Type: 'Linked Process', Dependencies: [{ Name: 'Elsewhere', UniqueId: id(5) }] }],
@@ -163,6 +178,7 @@ const chain = (g) => {
 };
 
 const log = [];
+let listReads = 0;
 let expired = null;
 let expireOn = null;
 const REDIRECTING = [/^\/Api\/v1\/Processes\/[^/]+$/, /^\/Process\/Edit\/ArchiveProcess$/];
@@ -249,10 +265,11 @@ http.createServer(async (req, res) => {
     return send(res, 200, { success: true, errors: [] });
   }
   if (p === '/bff/document/api/v1/documents') {
+    listReads++;
     const archived = url.searchParams.get('ListType') === 'Archived';
     const g = url.searchParams.get('ProcessGroupId');
     const all = Object.values(docs)
-      .filter((d) => d.archived === archived)
+      .filter((d) => d.archived === archived && !(d.appearsOnListRead > listReads))
       // Recursive, and associated groups count (spike).
       .filter((d) => !g || [d.primary, ...d.associated].some((at) => within(at, g)));
     const size = Number(url.searchParams.get('PageSize') ?? 20);

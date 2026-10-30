@@ -78,7 +78,7 @@ const DOCUMENT_OPERATIONS: readonly OperationTile[] = [
     title: 'Repair document references',
     summary: 'Find processes pointing at deleted documents and remove those references.',
     icon: <ScrewdriverWrench />,
-    href: null,
+    href: '/documents/repair',
   },
 ];
 
