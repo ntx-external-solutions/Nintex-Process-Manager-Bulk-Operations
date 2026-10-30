@@ -10,6 +10,10 @@
 // Old thing, which an archived process also takes as an Input), and the writes a real
 // delete makes: RestoreProcess (500 for an active process or a group that is gone, as
 // measured), DeleteProcess, CreateGroup, RenameGroup and a group's process listing.
+// For Bulk Delete's ways in (W6): an archived process inside Retired, so checking that
+// group takes it in beside Old thing, and Pinned, whose delete the tenant refuses with the body R14
+// captured. Archiving publishes a new major version and a restore opens a minor one on
+// top, as R13 and R14 measured.
 // For ownership, start the app with SCIM_BASE_URL=http://localhost:<port>.
 //
 //   node dev/mock-pm.mjs [port]      (default 4999; sign in to http://localhost:4999/tenant)
@@ -54,6 +58,10 @@ const procs = {
 // Elsewhere holds a ProcessLink to Old thing; Archived input holds an Input from it, which
 // no dependency answer names because its holder is archived (the API's blind spot).
 procs[id(7)] = { name: 'Archived input', group: OTHER, archived: true, mode: 'outright', rev: 700, version: '1.0', state: 3, owner, expert };
+// Archived from Retired: checking Retired in the tree takes it in (delete by group).
+procs[id(8)] = { name: 'Old retired step', group: RET, archived: true, mode: 'outright', rev: 800, version: '3.0', state: null, owner, expert };
+// The tenant refuses to delete it, as it did R14's still-linked target.
+procs[id(9)] = { name: 'Pinned', group: OTHER, archived: false, mode: 'outright', rev: 900, version: '1.0', state: 3, owner, expert, refuseDelete: true };
 const links = {
   [id(5)]: { ProcessProcedures: { ProcessLink: [{ Id: 501, LinkedProcessUniqueId: id(6), LinkedProcessName: 'Old thing' }] } },
   [id(7)]: { Inputs: { Input: [{ Id: 701, FromProcessUniqueId: id(6), Name: 'From old thing' }] } },
@@ -156,6 +164,9 @@ http.createServer(async (req, res) => {
     if (x.mode === 'pending') { x.rev++; x.pendingArchive = true; return send(res, 200, {}); }
     x.archived = true;
     x.rev++;
+    // R14: archiving publishes a new major version, draft included.
+    x.version = `${Number(x.version.split('.')[0]) + 1}.0`;
+    x.state = null;
     if (x.mode === 'fail-but-works') return send(res, 500, { message: 'Timeout' });
     return send(res, 200, {});
   }
@@ -219,11 +230,24 @@ http.createServer(async (req, res) => {
     x.archived = false;
     x.group = g;
     x.groupGone = false;
+    // R13: a restore opens an in-progress revision on top.
+    const [major, minor] = x.version.split('.').map(Number);
+    x.version = `${major}.${minor + 1}`;
+    x.state = 1;
     return send(res, 200, {});
   }
   if (p === '/Process/Edit/DeleteProcess') {
     const { processUniqueId } = JSON.parse(body);
     if (!procs[processUniqueId]) return send(res, 404, { message: 'not found' });
+    if (procs[processUniqueId].refuseDelete) {
+      // The body R14 captured, with a made-up holder name.
+      return send(res, 500, {
+        additionalInfos: { 'linked Process': ['Somewhere else'] },
+        caption: 'Process Cannot Be Deleted',
+        errorMessage: 'Process cannot be deleted as it has links to the following items',
+        field: '',
+      });
+    }
     delete procs[processUniqueId];
     delete dependencies[processUniqueId];
     return send(res, 200, { isValid: true });

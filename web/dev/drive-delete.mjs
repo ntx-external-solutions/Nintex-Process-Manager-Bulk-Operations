@@ -6,7 +6,10 @@ import { connect } from './cdp.mjs';
 
 const b = await connect();
 await b.signIn();
-await b.go('/delete', `!!document.querySelector('#ids')`, 'dry run page');
+await b.go('/delete', `document.body.innerText.includes('Choose what to delete')`, 'dry run page');
+// The ids box is the third way in (W6).
+await b.js(`$btn('By id or CSV')`);
+await b.until(`!!document.querySelector('#ids')`, 'the ids box');
 await b.js(`(() => { const el = document.querySelector('#ids'); const s = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; s.call(el, '6'); el.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
 await b.js(`$btn('Build the plan')`);
 await b.until(`document.body.innerText.includes('Download the plan') || document.body.innerText.includes('Problem')`, 'plan');

@@ -341,6 +341,13 @@ export class FakeTenant implements DeleteGateway {
     const process = this.process(processUniqueId);
     const call: FakeCall = { op: 'archive', uniqueId: processUniqueId, comment };
     if (this.#begin(call, () => (process ? null : notFound()))) return {};
+    // Measured in R14: archiving publishes a new major version, draft included (1.0 or
+    // 1.1 becomes 2.0, a never-published 0.3 becomes 1.0), and the archived model shows
+    // it with no revision state.
+    if (process!.model && !process!.archived) {
+      process!.model['Version'] = bumpVersion(process!.model['Version'], 'major');
+      process!.model['ProcessRevisionStateId'] = null;
+    }
     process!.archived = true;
     this.#end(call);
     return {};

@@ -72,5 +72,14 @@ export async function connect({ chromePort = 9333, app = 'http://localhost:3919'
     (await import('node:fs')).writeFileSync(file, Buffer.from(shot.result.data, 'base64'));
   };
 
-  return { cdp, js, until, go, signIn, upload, sent, screenshot, close: () => ws.close() };
+  // The results file as the operator would download it: the screen lists only the rows
+  // that need attention.
+  const resultsCsv = async () => {
+    await js(`(() => { window.__csv = null; const make = URL.createObjectURL; URL.createObjectURL = (blob) => { blob.text().then((t) => { window.__csv = t; }); return make(blob); }; return true; })()`);
+    await js(`$btn('Download the results')`);
+    await until(`window.__csv !== null`, 'the results file');
+    return js(`window.__csv`);
+  };
+
+  return { cdp, js, until, go, signIn, upload, sent, screenshot, resultsCsv, close: () => ws.close() };
 }

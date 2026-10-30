@@ -1,14 +1,17 @@
 'use client';
 
 /**
- * Step 4 of Bulk Archive: delete the groups the archive left empty.
+ * The last, optional step of Bulk Archive and Bulk Delete: delete the groups the run left
+ * empty.
  *
- * Offered only once the archive has finished and been re-read. It is its own step with
- * its own confirmation, because it is the one part of Archive that cannot be undone: a
- * deleted group's archived processes can never be restored to it (spike S1).
+ * Offered only once the run has finished and been re-read. It is its own step with its
+ * own confirmation, because it cannot be undone: a deleted group's archived processes can
+ * never be restored to it (spike S1). A group still holding archived processes is
+ * offered after either run, with a warning naming each one it would orphan (W2b; W6 keeps
+ * that after a Delete, where they are targets the run held back).
  */
 
-import { useMemo, useRef, useState } from 'react';
+import { useMemo, useRef, useState, type ReactNode } from 'react';
 
 import { gatherFacts } from '@/lib/cleanup/facts.ts';
 import { describeGroupPath, planCleanup, type CleanupDecision } from '@/lib/cleanup/plan.ts';
@@ -34,13 +37,18 @@ export function CleanupPanel({
   index,
   onRows,
   onError,
+  heading,
+  offer,
 }: {
   tenant: string;
   groups: readonly CoveredGroup[];
-  /** The archive run's final read. */
+  /** The run's final read. */
   index: ProcessIndex;
   onRows: (rows: ResultRow[]) => void;
   onError: (error: unknown) => void;
+  heading: string;
+  /** What the step checks, shown before anything is read. */
+  offer: ReactNode;
 }) {
   const gateway = useMemo(() => browserCleanupGateway(), []);
   const [step, setStep] = useState<Step>({ kind: 'offer' });
@@ -102,17 +110,13 @@ export function CleanupPanel({
 
   return (
     <div className="panel">
-      <h2>4. Delete the groups this left empty (optional)</h2>
+      <h2>{heading}</h2>
 
       {error !== null && <p className="error-text">{error}</p>}
 
       {step.kind === 'offer' && (
         <>
-          <p>
-            The selection covered {groups.length} group{groups.length === 1 ? '' : 's'}. This checks
-            which of them now hold nothing but archived processes, and lets you delete those. Nothing
-            is deleted until you confirm.
-          </p>
+          <p>{offer}</p>
           <button type="button" className="secondary" onClick={() => void check()}>
             Check which groups are empty
           </button>

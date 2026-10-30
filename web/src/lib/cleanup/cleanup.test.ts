@@ -54,6 +54,32 @@ test('a group left empty is deleted, with the archived processes it orphans', ()
   assert.deepEqual(d[0]?.action === 'delete' ? d[0].orphans : null, [{ uniqueId: 'a-1', name: 'Petty cash' }]);
 });
 
+test('after a delete, nested: an emptied group goes, one with a document stays, one with a held-back process is offered with a warning', () => {
+  // W6 reuses W2b as it is: an archived process left in a group (a target the run held
+  // back) does not keep the group, but the warning names it. A document does keep it.
+  const DOCS = group('docs', 'top', 1);
+  const facts = new Map([
+    ['top', { ...EMPTY, children: [item('mid', 'group'), item('docs', 'group')] }],
+    ['mid', { ...EMPTY, children: [item('leaf', 'group')] }],
+    ['leaf', { ...EMPTY, archived: [{ uniqueId: 'a-1', name: 'Petty cash' }] }],
+    ['docs', { ...EMPTY, documents: { total: 1, names: ['Policy.pdf'] } }],
+  ]);
+  const d = planCleanup([TOP, MID, LEAF, DOCS], facts);
+  assert.deepEqual(actions(d), [
+    ['leaf', 'delete'],
+    ['mid', 'delete'],
+    ['docs', 'keep'],
+    ['top', 'keep'],
+  ]);
+  const byId = new Map(d.map((x) => [x.group.uniqueId, x]));
+  const leaf = byId.get('leaf');
+  assert.deepEqual(leaf?.action === 'delete' ? leaf.orphans : null, [{ uniqueId: 'a-1', name: 'Petty cash' }], 'the held-back process is named in the warning');
+  const docs = byId.get('docs');
+  assert.match(docs?.action === 'keep' ? docs.reason : '', /1 document: 'Policy\.pdf'\. Documents, archived or not, stop a group from being deleted/);
+  const top = byId.get('top');
+  assert.match(top?.action === 'keep' ? top.reason : '', /1 subgroup that is kept: 'docs'/);
+});
+
 test('a group holding a document is kept, and says so', () => {
   const d = decide({ leaf: { documents: { total: 2, names: ['Policy.pdf', 'Old form.docx'] } } }, [LEAF]);
   assert.deepEqual(actions(d), [['leaf', 'keep']]);

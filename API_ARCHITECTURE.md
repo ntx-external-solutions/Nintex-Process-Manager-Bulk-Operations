@@ -1521,9 +1521,10 @@ mismatches are the dependency API over-claiming:
   holder's draft but still in its published revision, `DeleteProcess` on the target
   answers **HTTP 500** "Process Cannot Be Deleted", with `additionalInfos` naming the
   holder. The removal has to be published.
-- **Restoring an archived published process creates an in-progress revision.** 1.0
-  becomes 1.1 with `ProcessRevisionStateId` 1. Anything that tests "open draft" on a
-  restored process sees one that the restore made.
+- **Restoring an archived process creates an in-progress revision** (`ProcessRevisionStateId`
+  1). Anything that tests "open draft" on a restored process sees one that the restore
+  made. (Corrected in R14: the archive itself publishes a new major version first, see
+  below.)
 - **The archived listing's `groupExists` can be wrong.** Once, a row said `false` (group
   id 1) while the process model's `ProcessGroupItems.ProcessGroup` named a group that was
   in the tree. A second, real orphan in the same set was reported correctly. Not
@@ -1534,3 +1535,30 @@ mismatches are the dependency API over-claiming:
 - **No approvals on the demo tenant:** submit for approval answers 400, so the
   awaiting-approval paths can't be measured here.
 - `DeleteGroup` on an empty group: 200 `{"isValid":true, "deletedGroupId": ...}`.
+
+### Measured in R14, the re-run (19 Oct 2026)
+
+- **Archiving publishes a new major version.** A published 1.0 is archived as 2.0; a
+  never-published 0.3 is archived as 1.0; a published 1.0 with an open 1.1 draft is
+  archived as 2.0 with the draft in it. The archived model (mobile batch read) shows that
+  version with `ProcessRevisionStateId` null. A restore then opens an in-progress revision
+  on top (2.1, 1.1). So there is no archived process with an open draft, and no restored
+  process that was never published.
+- **Links are counted once per stored revision, confirmed.** On one archived target,
+  `CheckProcessDependencies` returned `[{"Type":"Linked Process","Dependencies":[...]}]`
+  with the published holder listed twice and a never-published holder (0.3) once. A
+  holder that was never published but has been archived counts twice, because the
+  archive published it.
+- **A refused delete:** HTTP 500
+  `{"additionalInfos":{"linked Process":["<holder name>"]},"caption":"Process Cannot Be Deleted","errorMessage":"Process cannot be deleted as it has links to the following items","field":""}`.
+  `additionalInfos` is an object keyed by category, each a list of names.
+- **A deleted group's breadcrumb:** HTTP 200 `{"isChildren":false,"breadcrumbItems":[]}`.
+  A live group lists the tenant, its parents and itself.
+- **Browser-session writes to `/Process/Edit/*` need the anti-forgery token** from the
+  page's `__RequestVerificationToken` input, sent as a header of that name. Without it
+  `CreateGroup` answers 500 with an HTML error page. The bearer-token proxy doesn't need it.
+- **Creating a process:** form POST to `/Process/Edit/CreateProcess` with `Id=-1`,
+  `ProcessState=0`, `Name`, `ProcessGroupId`, `ProcessGroupUniqueId`, owner and expert
+  ids and names, `Objective`, plus the anti-forgery token as a form field. The new
+  process starts at 0.2, in progress.
+

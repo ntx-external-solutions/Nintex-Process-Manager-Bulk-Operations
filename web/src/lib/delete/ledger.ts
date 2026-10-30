@@ -192,9 +192,16 @@ export interface PlanLedgerRow {
 }
 
 export interface RevisionBeforeRestore {
-  /** An open draft over a published version: someone's unpublished edits. */
+  /**
+   * An open draft over a published version: someone's unpublished edits. Archiving
+   * publishes the draft (R14), so an archived model never shows one; true is a guard.
+   */
   openDraft: boolean;
-  /** False for a process never published (0.x); null when the version was unreadable. */
+  /**
+   * False for a process never published (0.x); null when the version was unreadable.
+   * Archiving publishes a never-published process too (R14: 0.3 is archived as 1.0), so
+   * on the measured tenant this is true; false is a guard.
+   */
   publishedVersionExists: boolean | null;
 }
 
