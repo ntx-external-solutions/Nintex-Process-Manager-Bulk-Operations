@@ -7,7 +7,7 @@
  */
 
 import { ActionHeader, Breadcrumbs, Header, MainNav, PageLayout } from '@exp-textura/react';
-import { Archive, ArchiveBoxSolid, Delete, Documents, DocumentsSolid, FolderOpen, Home, HomeSolid, Undo, Users } from '@exp-textura/icons';
+import { Archive, ArchiveBoxSolid, Delete, Documents, DocumentsSolid, FolderOpen, Home, HomeSolid, ScrewdriverWrench, Undo, Users } from '@exp-textura/icons';
 import { NintexLogo, NintexLogoSquare } from '@exp-textura/icons/brand';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
@@ -131,7 +131,7 @@ function Sidebar() {
           <Link href="/ownership">Bulk Update Ownership</Link>
         </MainNav.Item>
 
-        {/* Documents are their own section (W8 decision 2); a page joins it as its task lands. */}
+        {/* Documents are their own section (W8 decision 2). */}
         <MainNav.Divider />
 
         <MainNav.Item asChild isCurrent={isSection('/documents/archive')} icon={<Documents />} hoverIcon={<DocumentsSolid />}>
@@ -142,6 +142,9 @@ function Sidebar() {
         </MainNav.Item>
         <MainNav.Item asChild isCurrent={isSection('/documents/restore')} icon={<Undo />}>
           <Link href="/documents/restore">Restore documents</Link>
+        </MainNav.Item>
+        <MainNav.Item asChild isCurrent={isSection('/documents/repair')} icon={<ScrewdriverWrench />}>
+          <Link href="/documents/repair">Repair document references</Link>
         </MainNav.Item>
       </MainNav.Content>
     </MainNav>

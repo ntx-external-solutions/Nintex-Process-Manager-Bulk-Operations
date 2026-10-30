@@ -156,7 +156,7 @@ test('every attachment source skips the document, naming its holders', () => {
   ]);
   // The draft reference: attachedProcesses misses it, the scan of models finds it.
   const scan: ReferenceScan = {
-    holders: [{ uniqueId: p(3), name: 'Close the month', published: false, references: findDocumentReferences({ ProcessProcedures: { Form: [{ DocumentId: 4 }] } }) }],
+    holders: [{ uniqueId: p(3), name: 'Close the month', published: false, version: '1.1', revisionStateId: 1, references: findDocumentReferences({ ProcessProcedures: { Form: [{ DocumentId: 4 }] } }) }],
     unread: [],
     read: 3,
   };
@@ -177,7 +177,7 @@ test('a process both lists and the scan finds is named once; holders of several 
   const props = free({ attachedProcesses: [{ processName: 'Pay a supplier', processUniqueId: p(1) }], attachedTrainings: [{ name: 'A' }, { name: 'B' }] });
   const refs = findDocumentReferences({ ProcessProcedures: { Form: [{ DocumentId: 1 }] } });
   assert.equal(
-    holdersMessage(props, [{ uniqueId: p(1), name: 'Pay a supplier', published: false, references: refs }, { uniqueId: p(3), name: 'Close the month', published: false, references: refs }], INDEX),
+    holdersMessage(props, [{ uniqueId: p(1), name: 'Pay a supplier', published: false, version: '1.1', revisionStateId: 1, references: refs }, { uniqueId: p(3), name: 'Close the month', published: false, version: '1.1', revisionStateId: 1, references: refs }], INDEX),
     'Attached to 1 process: Pay a supplier. Used by 2 training units: A, B. In the unpublished draft of Close the month.',
   );
 });

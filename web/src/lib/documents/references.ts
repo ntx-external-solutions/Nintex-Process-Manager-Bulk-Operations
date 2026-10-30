@@ -26,19 +26,31 @@ export interface DocumentReference {
   path: string;
   /** Keys and indexes from the model's root to the item, for removing it (W8d). */
   segments: Array<string | number>;
+  /**
+   * The activity it sits under, as the process numbers it: the activity's own `Number`
+   * when the model has one (not measured), otherwise its position, counting from 1.
+   * Absent for an item outside any activity.
+   */
+  activity?: string | undefined;
 }
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
-function referenceAt(node: Record<string, unknown>, type: string, path: string, segments: Array<string | number>): DocumentReference | null {
+function referenceAt(
+  node: Record<string, unknown>,
+  type: string,
+  path: string,
+  segments: Array<string | number>,
+  activity: string | undefined,
+): DocumentReference | null {
   const id = nodeInt(node, 'DocumentId');
   const guid = nodeString(node, 'DocumentUniqueId').trim();
   const documentId = id !== null && id > 0 ? id : null;
   const documentUniqueId = guid !== '' && !/^0{8}-0{4}-0{4}-0{4}-0{12}$/.test(guid) ? guid : null;
   if (documentId === null && documentUniqueId === null) return null;
   const text = ['Text', 'Name', 'DocumentName', 'Title'].map((f) => nodeString(node, f).trim()).find((t) => t !== '') ?? '';
-  return { documentId, documentUniqueId, type, text, path, segments };
+  return { documentId, documentUniqueId, type, text, path, segments, ...(activity === undefined ? {} : { activity }) };
 }
 
 /** Every document reference in one model, in the order the walk meets them. */
@@ -47,22 +59,25 @@ export function findDocumentReferences(model: unknown): DocumentReference[] {
   const root = isObject(model) ? Object.keys(model).find((k) => k.toLowerCase() === 'processprocedures') : undefined;
   if (root === undefined) return out;
 
-  const walk = (value: unknown, type: string, path: string, segments: Array<string | number>, depth: number): void => {
+  const walk = (value: unknown, type: string, path: string, segments: Array<string | number>, depth: number, activity: string | undefined): void => {
     // Models nest a few levels; the limit only guards against a payload that loops.
     if (depth > 64) return;
     if (Array.isArray(value)) {
-      value.forEach((item, i) => walk(item, type, `${path}[${i}]`, [...segments, i], depth + 1));
+      value.forEach((item, i) => {
+        const own = type === 'Activity' ? (['Number', 'ActivityNumber'].map((f) => nodeString(item, f).trim()).find((n) => n !== '') ?? String(i + 1)) : activity;
+        walk(item, type, `${path}[${i}]`, [...segments, i], depth + 1, own);
+      });
       return;
     }
     if (!isObject(value)) return;
-    const found = referenceAt(value, type, path, segments);
+    const found = referenceAt(value, type, path, segments, activity);
     if (found) out.push(found);
     for (const [key, child] of Object.entries(value)) {
-      if (typeof child === 'object' && child !== null) walk(child, key, `${path}.${key}`, [...segments, key], depth + 1);
+      if (typeof child === 'object' && child !== null) walk(child, key, `${path}.${key}`, [...segments, key], depth + 1, activity);
     }
   };
 
-  walk((model as Record<string, unknown>)[root], root, root, [root], 0);
+  walk((model as Record<string, unknown>)[root], root, root, [root], 0, undefined);
   return out;
 }
 
@@ -78,6 +93,10 @@ export interface ReferencingProcess {
   name: string;
   /** False when the model read is an open draft, or its state is not known. */
   published: boolean;
+  /** The model's `Version`, e.g. "1.2". */
+  version: string;
+  /** `ProcessRevisionStateId`: 1 in progress, 2 awaiting approval, 3 published. */
+  revisionStateId: number | null;
   references: DocumentReference[];
 }
 
@@ -124,8 +143,15 @@ export async function scanProcessesForDocuments(
           read++;
           const references = findDocumentReferences(answer.model);
           if (references.length === 0) return;
-          const state = nodeValue(answer.model, 'ProcessRevisionStateId');
-          holders.push({ uniqueId: p.uniqueId, name: p.name, published: Number(state) === PUBLISHED_STATE, references });
+          const state = Number(nodeValue(answer.model, 'ProcessRevisionStateId'));
+          holders.push({
+            uniqueId: p.uniqueId,
+            name: p.name,
+            published: state === PUBLISHED_STATE,
+            version: nodeString(answer.model, 'Version'),
+            revisionStateId: Number.isInteger(state) && state > 0 ? state : null,
+            references,
+          });
         } catch (error) {
           if (options.isFatal?.(error)) throw error;
           unread.push({ uniqueId: p.uniqueId, name: p.name, error: options.errorText?.(error) ?? String(error) });

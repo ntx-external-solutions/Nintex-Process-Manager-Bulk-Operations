@@ -144,6 +144,13 @@ export interface SaveModelOptions {
    */
   publishOpenDraft?: boolean | undefined;
   /**
+   * Save into an open draft without publishing it, rather than refusing. Never set by Bulk
+   * Delete. Repair document references (W8d) sets it: its edit removes a reference to a
+   * document that no longer exists, which is safe to leave in someone's draft for them to
+   * publish.
+   */
+  saveIntoOpenDraft?: boolean | undefined;
+  /**
    * Set for a holder this run restored whose archived model had no open draft: the
    * in-progress revision the live read shows is the restore's own (R13), so the path is
    * chosen as for a clean holder. Published before, it is published; never published, it
@@ -204,7 +211,7 @@ export async function saveProcessModel(
   const path = chooseWritePath(state, {
     publish: restored?.publishedVersionExists === false ? 'save-only' : 'match-state',
     overridePendingApproval: options.approvalsEnabled ?? false,
-    openDraft: restored || options.publishOpenDraft === true ? 'publish' : 'refuse',
+    openDraft: restored || options.publishOpenDraft === true ? 'publish' : options.saveIntoOpenDraft === true ? 'save-only' : 'refuse',
   });
   if (!isWritePath(path)) {
     return { success: false, stage: 'Refused', error: SAVE_REFUSALS[path.refused], statusCode: 0, refusal: path.refused };
