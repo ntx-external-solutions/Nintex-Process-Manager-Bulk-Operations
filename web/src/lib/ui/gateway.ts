@@ -24,6 +24,7 @@ import type { PlanGateway } from '../plan/load.ts';
 import type { Operation, ProcessSummary } from '../pm/operations.ts';
 import type { ProcessListPage, VariationSet } from '../pm/processes.ts';
 import type { ChildTreeItemsResponse } from '../pm/types.ts';
+import { slowCalls } from './slowCalls.ts';
 
 export class PmRequestError extends Error {
   /** The session is gone. Stop the run and send them back to sign in. */
@@ -64,6 +65,16 @@ interface ProxyResponse {
 }
 
 export async function callPm<T>(operation: Operation): Promise<T> {
+  // Every page's progress line says when a call is slow to answer (F7).
+  const done = slowCalls.begin();
+  try {
+    return await sendToProxy<T>(operation);
+  } finally {
+    done();
+  }
+}
+
+async function sendToProxy<T>(operation: Operation): Promise<T> {
   let response: Response;
   try {
     response = await fetch('/api/pm', {
