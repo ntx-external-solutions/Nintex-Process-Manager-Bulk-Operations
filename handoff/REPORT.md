@@ -6,6 +6,187 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## W8a. Archive documents
+
+Commit `619309a` on `claude/w8a-archive-documents`. PR #80 (the W8 handover) was still
+open, not merged, when I started, so this branch is built on
+`claude/w8-documents-handoff`. Merge #80 first and this PR's diff shrinks to W8a.
+
+**The page.** `/documents/archive`, "Archive documents", in a new Documents section of the
+side nav (below a divider). The home page has a Documents row of four tiles; the three
+not built yet say "Not available yet", and the nav lists only built pages. The process
+pages don't change: the two shared components gained an option each, off by default
+(`TreeBrowser groupsOnly`, `ProcessIdInput kind="document"`).
+
+**Choosing.** Three tabs that add up, each document once, first way kept:
+- **From the tree:** groups only. Checking a group reads the levels under it, then lists
+  documents once per topmost checked group (the tenant's filter is recursive). A document
+  whose primary group is in the checked subtree is included. One that's only associated
+  is listed apart, unticked, with "(primary group: ...)" and a note that ticking archives
+  it everywhere. The first preview stops to show that list when it has anything in it.
+- **From the document list:** the active list, read when the tab is first opened, with
+  breadcrumbs for each distinct primary group. Searchable by name (every word must
+  match). Columns: group path, type, location (Cloud, External link, Network). The first
+  300 matches are drawn; the search narrows the rest.
+- **By id or CSV:** the shared box with `kind="document"`. A GUID resolves against
+  `documentUniqueId`, a number against `documentId`. The label says "On this page a number
+  is a document id, never a process id". The template is a `DocumentID` column; a results
+  file from this page feeds back in by `ObjectID`. The CSV note names documents, not
+  processes.
+
+**Planning.**
+1. Both document lists, read whole (pages of 500).
+2. `properties` for every chosen document, 4 at a time, with progress. I read it for
+   archived and pending ones too, so their rows get a GroupId; that's a few extra GETs.
+3. Both process lists, then the current model of every active process, 4 at a time
+   (`scanProcessesForDocuments`). The walk takes anything under `ProcessProcedures` with a
+   `DocumentId` or `DocumentUniqueId`, at any depth (`findDocumentReferences`, which
+   W8d will reuse). It records each reference's path and key segments for W8d's removal.
+4. The plan. Left out, in this order: "Already archived", "Pending in Process Manager",
+   "Could not read what holds it (...)", or the holders, e.g. "Attached to 2 processes:
+   Old payroll (archived), Pay a supplier. Used by training unit Induction. In the
+   unpublished draft of Close the month." A process both `attachedProcesses` and the scan
+   name is named once. A scanned process whose current model is published but which
+   `attachedProcesses` doesn't list is named "Referenced by ..." (shouldn't happen, but
+   it still holds the document).
+
+If any process model can't be read, the plan lists them and **won't run**: a draft
+reference in one of them can't be ruled out. "Build the plan again" retries.
+
+**Running.** Batches of up to 50 (`runDocumentArchive`):
+- Each batch re-reads its documents' `properties` first. A document now attached, archived
+  or pending is `Skipped` ("Attached since the plan was built. Attached to 1 process:
+  ..."). A re-read that fails skips it too. The plan page says the draft scan isn't
+  repeated, so a draft reference added mid-run isn't caught.
+- `POST .../documents/bulk/archive`. **Every `errors` entry is a `Failed` row** with its
+  code ("Process Manager refused: NotFound"). An entry naming no document in the batch is
+  carried on every row of that batch, and the final read decides.
+- A thrown call fails the batch's rows; the final read decides those too. A dead session
+  stops the run and the rest are "Not attempted".
+- Then a fresh read of both lists settles each row (`settleDocumentArchive`): failed but
+  archived becomes Success, "success" but still active becomes Failed, in neither list is
+  Unverified.
+
+**Results file.** Same columns. `ObjectType` `Document`, `ObjectID` the
+`documentUniqueId`, `GroupId` the primary group's numeric id, every row. Operations:
+`Archive` (`Success`, `Skipped`, `Failed`, `Unverified`; `Preview` in the preview file)
+and `Resolve` `Skipped` for an id that matches no document, which isn't in the brief's
+list. I kept it from W7 so an unmatched id still has a row. Its Name is "(name
+unavailable; not in either document list)", not the process pages' wording. Skipped rows
+come first, then the run's rows. No cleanup step, as the brief says.
+
+**Allowlist.** `documents.list` (`All` or `Archived`, page, optional group GUID, 500 a
+page fixed on the server), `document.properties` (one numeric id) and `documents.archive`
+(1 to 50 distinct positive integers, nothing else), which joins `WRITE_OPERATIONS`. The
+header comment says the document writes are the one exception to "one id per write"
+because the tenant only offers them in bulk. No anti-forgery token was added.
+
+**Functions touched.**
+- New `pm/documents.ts`: `listDocuments`, `getDocumentProperties`,
+  `bulkArchiveDocuments`.
+- New `documents/list.ts`: `toDocumentEntry`, `locationOf`, `loadDocumentList`,
+  `loadDocumentIndex`, `documentPath`.
+- New `documents/references.ts`: `findDocumentReferences`, `refersTo`,
+  `scanProcessesForDocuments`, `processesReferencing`.
+- New `documents/holders.ts`: `toDocumentProperties`, `holdersMessage`, `attachedNow`,
+  `nameList`.
+- New `documents/select.ts`: `splitByPrimaryGroup`, `resolveDocumentIds`,
+  `combineChosen`, `searchDocuments`.
+- New `documents/archive.ts`: `buildDocumentArchivePlan`, `documentPreviewRows`,
+  `runDocumentArchive`, `rowsFromAnswer`, `settleDocumentArchive`.
+- Changed: `pm/operations.ts` (three operations), `ui/gateway.ts`
+  (`browserDocumentGateway`), `select/rows.ts` (`visibleRows` option), `select/ids.ts`
+  (`DOCUMENT_ID_TEMPLATE_CSV`; `csvReadNote` and `afterFileRead` take a kind).
+- Components: new `DocumentList`; `TreeBrowser`, `ProcessIdInput`, `AppShell`, home page.
+
+**Tests.** 614 tests, all pass, none skipped (591 before). Typecheck and build clean.
+- `documents/archive.test.ts`, 18 tests. They cover:
+  - primary-in-subtree against associated-only;
+  - GUID against number, not found, not an id, each document once;
+  - the three ways adding up;
+  - a document results file and the CSV note's wording;
+  - paging;
+  - a list row read case-insensitively;
+  - the walk finding references off the measured path;
+  - each attachment source: active holder, archived holder, training unit, draft only;
+  - holders of several kinds named once each;
+  - archived, pending and unreadable documents;
+  - the scan's unread list and a dead session;
+  - unread processes kept on the plan;
+  - batches of 50 with the re-check dropping two newly attached documents;
+  - `NotFound` and another code inside a 200;
+  - an unattributed error;
+  - a failed re-check and a dead session mid-run;
+  - a stopped run;
+  - settling from the final read.
+- `pm/operations.test.ts`: the write list now includes `documents.archive`, plus 4 tests
+  for the document operations' bounds and the requests sent.
+- `select/rows.test.ts`: 1 test for the groups-only tree.
+- **New driver `dev/drive-docs-archive.mjs`, 30 checks, all pass against the mock.** It
+  checks Library (groups only), ticks the associated-only document, ticks two documents
+  from the list (one already in by tree), uploads an Excel-style CSV (pending, archived by
+  number, unknown, a non-id, a duplicate of a tree pick), then plans and runs. It checks
+  every left-out reason, the five targets and how each was chosen, the mid-run note, the
+  results file (Resolve rows first, a late attachment dropped by the re-check, a `Locked`
+  refusal inside a 200 as Failed, three archived), and that the one bulk call left out the
+  late attachment.
+- **The mock learns documents**: a store with Library, Manuals and Shared groups (new, so
+  no existing driver's groups change), a recursive group filter that takes in associated
+  documents, `properties`, `bulk/archive` answering 200 with `errors`, and draft
+  references in two process models. `DeleteGroup` now refuses a group any document names
+  as primary or associated. Every other driver was re-run on a fresh mock and matches its
+  expectations.
+
+`Tests/Run-AllTests.ps1` wasn't run and the PowerShell is untouched (frozen at 4.11).
+
+**Deferred, or for you to decide.**
+- **No journal for an interrupted run.** The process archive keeps one per tab; this page
+  doesn't. If the tab closes mid-run, building the plan again lists whatever was archived
+  as "Already archived". Say if you want the banner too.
+- **A CSV cell with a space is split** by the shared box (`typedIds` splits on
+  whitespace, from W7), so a name "Expense form.docx" in an ObjectID column becomes two
+  "Not a document id" rows. Same on the process pages. Harmless (nothing matches), but
+  noisy. I left it, since changing it changes the process pages.
+- **Field names not measured.** Read defensively and worth a look in R16:
+  - whether the `properties` path takes the numeric `documentId` (assumed, as the bulk
+    calls do) or the GUID;
+  - whether `primaryProcessGroupId` is a number (if not, the primary group's id comes
+    from its entry in `associatedGroups`, matched by name);
+  - the training unit's name field;
+  - whether the list carries a type field (otherwise the type is the file extension).
+- **Unread models block the run.** I chose that over archiving with a warning, because an
+  unread draft is the exact case decision 1 is about.
+- For W8b: the process pages' cleanup check (`group.documents`) lists by
+  `ProcessGroupId`, which the spike shows is recursive and includes associated documents.
+  So it already counts an associated-only archived document, as W8b asks. It also counts
+  subgroups' documents, which only ever keeps a group that would be kept anyway.
+
+**For R16.**
+- **Bearer token** on each new call: list (`All`, `Archived`, with and without
+  `ProcessGroupId`), `properties`, `bulk/archive`. Any refusal comes back as a fix.
+- **Properties:** the GUID-or-number question, `primaryProcessGroupId`'s type (check the
+  results file's GroupId), and a training unit's name in a skipped row.
+- **One of each holder on ZZ content:** attached to a published process, to an archived
+  process, used by a training unit, and referenced only in an unpublished draft. All four
+  should be left out with their holders named, and nothing sent for them.
+- **The one process already broken on the demo tenant** (a draft pointing at a deleted
+  image): the scan should read it without error. Its dead reference matches no document,
+  so it holds nothing here (W8d's job).
+- **A pending document** is left out as "Pending in Process Manager".
+- **Associated-only:** check a group holding a document whose primary group is elsewhere.
+  It should be listed apart, unticked, and archived only when ticked.
+- **Mid-run attachment:** with 51+ ZZ documents, attach one in the second batch to a
+  process while the first batch runs. It should be Skipped "Attached since the plan was
+  built".
+- **An `errors` entry:** archive a document deleted after the plan was built (expect
+  `NotFound` as a Failed row), and confirm the tenant answered 200.
+- **Timing:** the planning scan on the demo tenant (about 186 model reads).
+- **A results file from this page as input** resolves by `ObjectID`.
+- **Location and type** columns for an uploaded file, an external link, and a network
+  link if one can be made.
+
+---
+
 ## W7. Pick processes by id or CSV in Bulk Archive, shared with Bulk Delete
 
 Commit `865c22b` on `claude/w7-archive-ids`, branched from `claude/main` as asked, with
