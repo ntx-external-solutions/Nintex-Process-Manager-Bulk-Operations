@@ -178,7 +178,11 @@ export async function loadArchived(
 export async function loadGroupPaths(
   groupUniqueIds: readonly string[],
   breadcrumb: (groupUniqueId: string) => Promise<string[]>,
-  options: { concurrency?: number; isFatal?: (error: unknown) => string | null } = {},
+  options: {
+    concurrency?: number;
+    isFatal?: (error: unknown) => string | null;
+    onProgress?: (done: number, total: number) => void;
+  } = {},
 ): Promise<Map<string, string[]>> {
   const concurrency = Math.max(1, options.concurrency ?? 4);
   const unique = [...new Set(groupUniqueIds)];
@@ -196,6 +200,7 @@ export async function loadGroupPaths(
         }
       }),
     );
+    options.onProgress?.(Math.min(i + concurrency, unique.length), unique.length);
   }
 
   return paths;

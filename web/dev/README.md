@@ -18,6 +18,7 @@ AUTH_SECRET=... SCIM_BASE_URL=http://localhost:4999 npx next start -p 3919
 
 # 4. A scenario. Restart the mock between scenarios.
 node dev/drive-archive.mjs
+node dev/drive-archive-ids.mjs    # Archive by tree and CSV together: plan, run, rows, cleanup offer (W7)
 node dev/drive-move.mjs
 node dev/drive-ownership.mjs   # SCIM key: scim-key
 node dev/drive-expired.mjs     # the session dies between preview and run (R12)

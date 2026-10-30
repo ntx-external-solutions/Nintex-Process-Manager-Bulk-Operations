@@ -1,7 +1,11 @@
 'use client';
 
 /**
- * Bulk Archive: choose in the tree, preview, apply, download the results.
+ * Bulk Archive: choose in the tree or by id, preview, apply, download the results.
+ *
+ * The tree and the id box add up, each process once (W7). Ids are resolved against the
+ * process lists this page reads anyway (lib/archive/ids.ts): an active process is a
+ * target, an archived one or an id nothing matches is left out with a row saying why.
  *
  * The preview is the dry run and is where every run starts. Nothing is written until
  * the operator has entered a change description, reviewed any variation warnings, and
@@ -13,6 +17,18 @@
 import { Button, Input } from '@exp-textura/react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
+import {
+  CHOSEN_FROM_TREE,
+  combineSelections,
+  groupsOfPicked,
+  idTargetFindings,
+  idTargetsNeedingSetReads,
+  LARGE_ID_LIST,
+  readGroupLevels,
+  resolveArchiveIds,
+  withGroupPaths,
+  type ArchiveIdResolution,
+} from '@/lib/archive/ids.ts';
 import type { ArchivePlan } from '@/lib/archive/plan.ts';
 import {
   buildArchivePlan,
@@ -30,17 +46,21 @@ import { Journal, loadJournal, sessionJournalStore, type JournalEntry } from '@/
 import { resultsToCsv, type ResultRow } from '@/lib/exec/report.ts';
 import { createControls, errorMessage } from '@/lib/exec/runner.ts';
 import { revalidatePlacements, type StaleFinding } from '@/lib/plan/revalidate.ts';
-import { loadForSelection } from '@/lib/select/resolve.ts';
+import { loadGroupPaths } from '@/lib/select/archived.ts';
+import { chosenLabel, EMPTY_ID_INPUT, typedIds, type IdInput } from '@/lib/select/ids.ts';
+import { loadForSelection, type Resolution } from '@/lib/select/resolve.ts';
 import { hasSelection } from '@/lib/select/selection.ts';
 import { loadProcessIndex } from '@/lib/tenant/state.ts';
 import { datedFilename, downloadCsv } from '@/lib/ui/download.ts';
 import {
   browserArchiveGateway,
   browserGateway,
+  groupBreadcrumb,
   PmRequestError,
   type SessionInfo,
 } from '@/lib/ui/gateway.ts';
 import { CleanupPanel } from '../components/CleanupPanel.tsx';
+import { ProcessIdInput } from '../components/ProcessIdInput.tsx';
 import { ResultsSummary } from '../components/ResultsSummary.tsx';
 import { SessionGate } from '../components/SessionGate.tsx';
 import { TreeBrowser, useBrowseTree } from '../components/TreeBrowser.tsx';
@@ -81,6 +101,10 @@ function ArchiveFlow({ session, onSignedOut }: { session: SessionInfo; onSignedO
   const browse = useBrowseTree(gateway, handleError);
 
   const [stage, setStage] = useState<Stage>({ kind: 'select' });
+  const [source, setSource] = useState<'tree' | 'ids'>('tree');
+  const [idInput, setIdInput] = useState<IdInput>(EMPTY_ID_INPUT);
+  /** The id count the operator agreed to build a plan for, above LARGE_ID_LIST. */
+  const [largeConfirmed, setLargeConfirmed] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [changeDescription, setChangeDescription] = useState('');
   const [approvalOverride, setApprovalOverride] = useState(true);
@@ -102,25 +126,62 @@ function ArchiveFlow({ session, onSignedOut }: { session: SessionInfo; onSignedO
     setError(errorMessage(cause));
   };
 
+  const ids = typedIds(idInput.text);
+  const treeChosen = hasSelection(browse.selection);
+  const askLarge = ids.length > LARGE_ID_LIST && largeConfirmed !== ids.length;
+
   async function buildPlan() {
     setError(null);
     setStale([]);
     setVariationsAccepted(false);
     setConfirming(false);
-    setStage({ kind: 'planning', progress: 'Reading the selected groups…' });
+    if (askLarge) return;
     try {
-      const { tree, resolution } = await loadForSelection(gateway, browse.tree, browse.selection, {
-        onProgress: (n) => setStage({ kind: 'planning', progress: `Reading the selected groups… ${n} read` }),
-      });
-      browse.setTree(tree);
+      let resolution: Extract<Resolution, { status: 'complete' }> | null = null;
+      if (treeChosen) {
+        setStage({ kind: 'planning', progress: 'Reading the selected groups…' });
+        const loaded = await loadForSelection(gateway, browse.tree, browse.selection, {
+          onProgress: (n) => setStage({ kind: 'planning', progress: `Reading the selected groups… ${n} read` }),
+        });
+        browse.setTree(loaded.tree);
+        resolution = loaded.resolution;
+      }
       setStage({ kind: 'planning', progress: 'Reading the process lists…' });
       const index = await loadProcessIndex(gateway.processesList, {
         onProgress: (n) => setStage({ kind: 'planning', progress: `Reading the process lists… ${n} processes` }),
       });
+
+      let picked: ArchiveIdResolution | null = null;
+      let idSetReads: string[] = [];
+      if (ids.length > 0) {
+        picked = resolveArchiveIds(ids, index, (value) => chosenLabel(idInput, value));
+        const resolvedAny = picked.processes.length > 0 || picked.skipped.some((r) => r.operation === 'Select');
+        if (!resolvedAny && (resolution?.processes.length ?? 0) === 0) {
+          setError(`None of the ids matched a process: ${picked.unknown.join(', ')}`);
+          setStage({ kind: 'select' });
+          return;
+        }
+        const isFatal = (e: unknown) => e instanceof PmRequestError && e.signedOut;
+        const groups = groupsOfPicked(picked.processes);
+        // The path each id target is shown under, one breadcrumb per group, as the archived view reads it.
+        const paths = await loadGroupPaths(groups, groupBreadcrumb, {
+          isFatal: (e) => (isFatal(e) ? 'signed out' : null),
+          onProgress: (done, total) => setStage({ kind: 'planning', progress: `Reading group paths… ${done} of ${total}` }),
+        });
+        picked = { ...picked, processes: withGroupPaths(picked.processes, paths) };
+        // One level per group says which id targets are variations (archive/ids.ts).
+        const levels = await readGroupLevels(groups, async (g) => (await gateway.groupsTree(g)).treeItems ?? [], {
+          isFatal,
+          onProgress: (done, total) => setStage({ kind: 'planning', progress: `Reading each group's processes… ${done} of ${total}` }),
+        });
+        idSetReads = idTargetsNeedingSetReads(picked.processes, levels);
+      }
+      const combined = combineSelections(resolution, picked);
+
       // Siblings are not in the tree, so each variation's set is read from the process.
       const sets = new Map<string, VariationSet>();
       const unread = new Map<string, string>();
-      const inSets = targetsInVariationSets(resolution.processes);
+      const inSets = [...new Set([...targetsInVariationSets(resolution?.processes ?? []), ...idSetReads])];
       for (const [i, uniqueId] of inSets.entries()) {
         setStage({ kind: 'planning', progress: `Reading variation sets… ${i + 1} of ${inSets.length}` });
         try {
@@ -132,7 +193,7 @@ function ArchiveFlow({ session, onSignedOut }: { session: SessionInfo; onSignedO
           unread.set(uniqueId.toLowerCase(), errorMessage(cause));
         }
       }
-      setStage({ kind: 'plan', plan: buildArchivePlan(resolution, index, sets, unread) });
+      setStage({ kind: 'plan', plan: buildArchivePlan(combined, index, sets, unread) });
     } catch (cause) {
       fail(cause);
       setStage({ kind: 'select' });
@@ -147,12 +208,16 @@ function ArchiveFlow({ session, onSignedOut }: { session: SessionInfo; onSignedO
     try {
       const findings = await revalidatePlacements(
         gateway,
-        plan.targets.map((t) => ({
-          uniqueId: t.uniqueId,
-          parentUniqueId: t.groupUniqueId,
-          display: t.name,
-          parentDisplay: describeGroup(t),
-        })),
+        plan.targets
+          // A target picked by id with no group in the listing has no level to look in;
+          // the check against the fresh lists below still covers it.
+          .filter((t) => t.groupUniqueId !== null || (t.chosen ?? CHOSEN_FROM_TREE) === CHOSEN_FROM_TREE)
+          .map((t) => ({
+            uniqueId: t.uniqueId,
+            parentUniqueId: t.groupUniqueId,
+            display: t.name,
+            parentDisplay: describeGroup(t),
+          })),
       );
       if (findings.length > 0) {
         setStale(findings);
@@ -162,6 +227,13 @@ function ArchiveFlow({ session, onSignedOut }: { session: SessionInfo; onSignedO
 
       setStage({ kind: 'running', plan, progress: 'Reading the process lists before the first change…' });
       const baseline = await loadProcessIndex(gateway.processesList);
+      // Each id target still active and still in the group the plan showed (W7).
+      const idFindings = idTargetFindings(plan.targets, baseline);
+      if (idFindings.length > 0) {
+        setStale(idFindings);
+        setStage({ kind: 'plan', plan });
+        return;
+      }
 
       const journal = Journal.start(crypto.randomUUID(), session.tenant, Date.now(), sessionJournalStore());
       abort.current = new AbortController();
@@ -211,6 +283,9 @@ function ArchiveFlow({ session, onSignedOut }: { session: SessionInfo; onSignedO
 
   function startOver() {
     browse.refresh();
+    setIdInput(EMPTY_ID_INPUT);
+    setLargeConfirmed(null);
+    setSource('tree');
     setChangeDescription('');
     setStage({ kind: 'select' });
   }
@@ -249,13 +324,36 @@ function ArchiveFlow({ session, onSignedOut }: { session: SessionInfo; onSignedO
           <div className="panel">
             <h2>1. Choose what to archive</h2>
             <p>
-              Checking a group means everything under it, including subgroups you have not opened.
-              Document groups and shortcuts cannot be archived from here.
+              Pick from the tree, or by id; the two add up, each process once. Checking a group means everything
+              under it, including subgroups you have not opened. Document groups and shortcuts cannot be archived
+              from here; a shortcut&rsquo;s id is its home process&rsquo;s, so by id it picks the home process.
             </p>
+            <div className="row" role="tablist">
+              {(
+                [
+                  ['tree', `From the tree${treeChosen ? ' (some checked)' : ''}`],
+                  ['ids', `By id or CSV${ids.length > 0 ? ` (${ids.length})` : ''}`],
+                ] as const
+              ).map(([key, label]) => (
+                <Button key={key} role="tab" aria-selected={source === key} buttonType={source === key ? 'primary' : 'secondary'} onClick={() => setSource(key)}>
+                  {label}
+                </Button>
+              ))}
+            </div>
           </div>
-          <TreeBrowser state={browse} />
+          {source === 'tree' && <TreeBrowser state={browse} />}
+          {source === 'ids' && <ProcessIdInput value={idInput} onChange={setIdInput} />}
+          {askLarge && (
+            <Notice tone="warning" title={`${ids.length} ids`}>
+              That is more than {LARGE_ID_LIST}. Building the plan reads the group of each one, and the variation set of
+              each that is a variation, which takes a while.{' '}
+              <Button buttonType="secondary" onClick={() => setLargeConfirmed(ids.length)}>
+                Build the plan for all {ids.length}
+              </Button>
+            </Notice>
+          )}
           <div className="row">
-            <Button disabled={!hasSelection(browse.selection)} onClick={() => void buildPlan()}>
+            <Button disabled={(!treeChosen && ids.length === 0) || askLarge} onClick={() => void buildPlan()}>
               Preview what would be archived
             </Button>
           </div>
@@ -308,19 +406,29 @@ function ArchiveFlow({ session, onSignedOut }: { session: SessionInfo; onSignedO
                   The selection covered {stage.plan.groups.length} group{stage.plan.groups.length === 1 ? '' : 's'}. This
                   checks which of them now hold nothing but archived processes, and lets you delete those. Nothing is
                   deleted until you confirm.
+                  {pickedById(stage.plan) &&
+                    ' Only groups checked in the tree are offered. Processes picked by id cover no group, so they never make a group a candidate, even if this run emptied it.'}
                 </>
               }
             />
-          ) : (
-            stage.plan.groups.length > 0 && (
-              <div className="panel">
-                <h2>4. Delete the groups this left empty</h2>
-                <p>
-                  Not offered, because the run did not finish cleanly or could not be re-read. Archive
-                  again to get a confirmed result first.
-                </p>
-              </div>
-            )
+          ) : null}
+          {stage.after !== null && !stage.warning && stage.plan.groups.length === 0 && pickedById(stage.plan) && (
+            <div className="panel">
+              <h2>4. Delete the groups this left empty</h2>
+              <p>
+                Not offered. Only groups checked in the tree are offered, and nothing was checked. Processes picked by id
+                cover no group, so they never make a group a candidate, even if this run emptied it.
+              </p>
+            </div>
+          )}
+          {(stage.after === null || stage.warning) && stage.plan.groups.length > 0 && (
+            <div className="panel">
+              <h2>4. Delete the groups this left empty</h2>
+              <p>
+                Not offered, because the run did not finish cleanly or could not be re-read. Archive
+                again to get a confirmed result first.
+              </p>
+            </div>
           )}
         </>
       )}
@@ -435,6 +543,7 @@ function PlanView(props: {
             <tr>
               <th>Process</th>
               <th>Group</th>
+              <th>Chosen</th>
             </tr>
           </thead>
           <tbody>
@@ -445,6 +554,7 @@ function PlanView(props: {
                   {!t.inIndex && <span className="tag">not in either list</span>}
                 </td>
                 <td>{describeGroup(t)}</td>
+                <td>{t.chosen ?? CHOSEN_FROM_TREE}</td>
               </tr>
             ))}
           </tbody>
@@ -457,7 +567,8 @@ function PlanView(props: {
           <ul className="checklist">
             {plan.skipped.map((row) => (
               <li key={`${row.operation}|${row.objectId}`}>
-                {row.name}: {row.message}
+                {/* An id that matched nothing has no name; the id is what the operator can look for (W7). */}
+                {row.operation === 'Resolve' ? row.objectId : row.name}: {row.message}
               </li>
             ))}
           </ul>
@@ -546,4 +657,9 @@ function ResultsView({
       }
     />
   );
+}
+
+/** Whether any target was picked by id, so the cleanup step can say ids never offer a group. */
+function pickedById(plan: ArchivePlan): boolean {
+  return plan.targets.some((t) => (t.chosen ?? CHOSEN_FROM_TREE) !== CHOSEN_FROM_TREE);
 }

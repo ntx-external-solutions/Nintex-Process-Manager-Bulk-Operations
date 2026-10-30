@@ -20,6 +20,8 @@ export interface ArchiveTarget {
   path: string[];
   /** Neither listing returned it, so the final read will not be able to confirm it. */
   inIndex: boolean;
+  /** How it was chosen: "From the tree", "By id" or "From <file name>" (W7). */
+  chosen?: string | undefined;
 }
 
 /**
@@ -33,7 +35,8 @@ export interface ArchiveTarget {
  *    It had no false negatives on the only sample measured, a sample of five;
  *  - `set`: the target's `variationSetData` from the process GET names every sibling
  *    (API_ARCHITECTURE.md, "Variations", corrected 18 Oct 2026). Read for targets the
- *    tree marks with a `variationSetId`.
+ *    tree marks with a `variationSetId`, and for targets picked by id that their group's
+ *    level marks or does not show (archive/ids.ts, W7).
  */
 export interface VariationMatch {
   targetUniqueId: string;
@@ -161,16 +164,18 @@ function dedupeMatches(matches: readonly VariationMatch[]): VariationMatch[] {
 
 export function buildArchivePlan(
   resolved: {
-    processes: readonly ResolvedProcess[];
+    processes: readonly (ResolvedProcess & { chosen?: string })[];
     excluded: readonly ExcludedItem[];
     groups?: readonly CoveredGroup[];
+    /** Rows resolving ids already made (archive/ids.ts). They go first, as in Delete. */
+    skipped?: readonly ResultRow[];
   },
   index: ProcessIndex,
   variationSets: ReadonlyMap<string, VariationSet> = new Map(),
   unreadVariationSets: ReadonlyMap<string, string> = new Map(),
 ): ArchivePlan {
   const targets: ArchiveTarget[] = [];
-  const skipped: ResultRow[] = [];
+  const skipped: ResultRow[] = [...(resolved.skipped ?? [])];
 
   for (const process of resolved.processes) {
     const entry = indexEntry(index, process.uniqueId);
@@ -194,6 +199,7 @@ export function buildArchivePlan(
       groupId: entry?.groupId ?? process.groupId,
       path: process.path,
       inIndex: entry !== null,
+      ...(process.chosen === undefined ? {} : { chosen: process.chosen }),
     });
   }
 
