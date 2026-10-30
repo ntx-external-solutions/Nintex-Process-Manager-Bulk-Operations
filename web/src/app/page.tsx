@@ -30,7 +30,7 @@ const OPERATIONS: readonly OperationTile[] = [
     title: 'Bulk Delete',
     summary:
       'Pick from the tree or the archived list and delete, removing references first.',
-    href: null,
+    href: '/delete',
   },
   {
     title: 'Bulk Move',
