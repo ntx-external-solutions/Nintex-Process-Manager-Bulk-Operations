@@ -20,6 +20,7 @@ import {
   deletePlacements,
   deleteVariations,
   groupsTheRunDeletedFrom,
+  holderCountLine,
   previewHolders,
   resolveDeleteSelection,
   selectionIds,
@@ -348,6 +349,23 @@ test('the preview names the holders edited, the draft holders skipped, and the t
   assert.deepEqual(holders.edited, [{ uniqueId: 'h-clean', name: 'Clean holder', sites: 2 }]);
   assert.deepEqual(holders.skipped.map((h) => [h.displayName, h.version]), [['Draft holder', '2.1']]);
   assert.deepEqual(holders.heldBack, [{ uniqueId: 'p-pay', name: 'Pay a supplier', holderUniqueId: 'h-draft', holderName: 'Draft holder' }]);
+});
+
+test('the plan summary counts only the holders it will edit, and names the skipped one (R15)', () => {
+  const plan = {
+    ledger: [
+      { uniqueId: 'h-clean', name: 'Clean holder' },
+      { uniqueId: 'h-draft', name: 'Draft holder' },
+    ],
+    workItems: [
+      { holderUniqueId: 'h-clean', sites: [{}], targetsAffected: ['p-close'] },
+      { holderUniqueId: 'h-draft', sites: [{}], targetsAffected: ['p-pay'] },
+    ],
+    draftHolders: [{ holderUniqueId: 'h-draft', name: 'Draft holder', version: '2.1', targetsBlocked: ['p-pay'] }],
+  } as unknown as DependencyPlan;
+  assert.equal(holderCountLine(previewHolders(plan, INDEX)), '2 holders: 1 to edit, 1 skipped (open draft)');
+  assert.equal(holderCountLine({ edited: [{ uniqueId: 'h', name: 'H', sites: 1 }], skipped: [] }), '1 holder to edit');
+  assert.equal(holderCountLine({ edited: [], skipped: [] }), '0 holders to edit');
 });
 
 test('the run re-reads each checked group and each tree target where the preview saw it', () => {

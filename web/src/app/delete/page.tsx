@@ -47,6 +47,7 @@ import {
   deletePlacements,
   deleteVariations,
   groupsTheRunDeletedFrom,
+  holderCountLine,
   previewHolders,
   resolveDeleteSelection,
   selectionIds,
@@ -70,7 +71,7 @@ import { CleanupPanel } from '../components/CleanupPanel.tsx';
 import { ResultsSummary } from '../components/ResultsSummary.tsx';
 import { SessionGate } from '../components/SessionGate.tsx';
 import { TreeBrowser, useBrowseTree } from '../components/TreeBrowser.tsx';
-import { Notice, valueOf } from '../_ui/kit.tsx';
+import { Notice, Progress, valueOf } from '../_ui/kit.tsx';
 
 const RESULT_STATUSES = ['Success', 'Skipped', 'Failed', 'Accepted', 'Warning', 'Blocked', 'Orphaned'] as const;
 
@@ -529,7 +530,7 @@ function DeleteFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
 
           {source === 'archived' && (
             <>
-              {archivedNote !== null && <p className="pending">{archivedNote}</p>}
+              {archivedNote !== null && <Progress>{archivedNote}</Progress>}
               {orphanCheck !== null && (orphanCheck.corrections.length > 0 || orphanCheck.unchecked > 0) && (
                 <div className="panel warning">
                   {orphanCheck.corrections.length > 0 && (
@@ -588,7 +589,7 @@ function DeleteFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
         </>
       )}
 
-      {stage.kind === 'planning' && <p className="pending">{stage.progress}</p>}
+      {stage.kind === 'planning' && <Progress>{stage.progress}</Progress>}
 
       {stage.kind === 'plan' && (
         <PlanView
@@ -604,7 +605,7 @@ function DeleteFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
       {stage.kind === 'running' && (
         <div className="panel">
           <h2>Running</h2>
-          {stage.progress !== '' && <p className="pending">{stage.progress}</p>}
+          <Progress>{stage.progress}</Progress>
           <pre className="plan-text">{stage.log.join('\n')}</pre>
         </div>
       )}
@@ -717,7 +718,7 @@ function PlanView({
         <h2>2. The plan ({plan.status}). Nothing has been changed.</h2>
         <p>{selectionSummary(selection)}</p>
         <p>
-          {plan.workItems.length} process(es) to edit, {plan.sites.length} reference site(s), {plan.claims.length} claim(s). Built in{' '}
+          {holderCountLine(holders)}, {plan.sites.length} reference site(s), {plan.claims.length} claim(s). Built in{' '}
           {preview.seconds}s. Archived processes were not restored, so a real run may find more.
         </p>
         <div className="row">
@@ -745,7 +746,9 @@ function PlanView({
       )}
 
       {archiveFirst.length > 0 && <TargetTable title={`Phase 1: archived, then deleted in phase 2 (${archiveFirst.length})`} targets={archiveFirst} />}
-      {deleteOnly.length > 0 && <TargetTable title={`Phase 2: deleted (${deleteOnly.length + archiveFirst.length}; ${deleteOnly.length} already archived)`} targets={deleteOnly} />}
+      {/* R15: titled for what the table lists. The overall count is in the summary line above; a
+          total here read as rows missing from the table. */}
+      {deleteOnly.length > 0 && <TargetTable title={`Phase 2: already archived, deleted (${deleteOnly.length})`} targets={deleteOnly} />}
 
       {sets.length > 0 && (
         <div className="panel warning">

@@ -35,7 +35,7 @@ import { datedFilename, downloadCsv } from '@/lib/ui/download.ts';
 import { browserOwnershipGateway, PmRequestError, type SessionInfo } from '@/lib/ui/gateway.ts';
 import { ResultsSummary } from '../components/ResultsSummary.tsx';
 import { SessionGate } from '../components/SessionGate.tsx';
-import { Notice, valueOf } from '../_ui/kit.tsx';
+import { Notice, Progress, valueOf } from '../_ui/kit.tsx';
 
 interface Loaded {
   filename: string;
@@ -250,7 +250,7 @@ function OwnershipFlow({ session, onSignedOut }: { session: SessionInfo; onSigne
         </>
       )}
 
-      {stage.kind === 'planning' && <p className="pending">{stage.progress}</p>}
+      {stage.kind === 'planning' && <Progress>{stage.progress}</Progress>}
 
       {stage.kind === 'plan' && (
         <PlanView
@@ -269,7 +269,7 @@ function OwnershipFlow({ session, onSignedOut }: { session: SessionInfo; onSigne
       {stage.kind === 'running' && (
         <div className="panel">
           <h2>Updating</h2>
-          <p className="pending">{stage.progress}</p>
+          <Progress>{stage.progress}</Progress>
           <Button buttonType="secondary" onClick={() => abort.current?.abort()}>
             Stop after the current batch
           </Button>
