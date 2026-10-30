@@ -6,6 +6,53 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## F7. Small items from live round R15
+
+Commit `1d39f00` on `claude/f7-r15-ui`.
+
+1. **Holder count.** New `holderCountLine` in `delete/selection.ts`, from
+   `previewHolders`. With no skipped holders it reads "1 holder to edit"; with one it
+   reads "2 holders: 1 to edit, 1 skipped (open draft)". The plan summary uses it in place
+   of `plan.workItems.length`, which counted the draft holders too.
+2. **Phase 2 heading.** "Phase 2: already archived, deleted (5)". The overall count stays
+   in the summary line above ("N process(es) to delete: ...").
+3. **Slow calls.** New `lib/ui/slowCalls.ts` (`SlowCalls`, `slowCalls`, `slowMessage`).
+   `callPm` reports each call's start and end. After 15 seconds without an answer, a
+   second line under the progress line reads "Process Manager is slow to answer (20s so
+   far). Still waiting, and a failed read is retried." The seconds move every 5 seconds,
+   and the line clears as soon as the call answers. New `Progress` in `_ui/kit.tsx`
+   replaces every `<p className="pending">` progress line on Archive, Move, Ownership,
+   Delete (including the archived-view note) and the cleanup panel.
+
+**Where I differed from the brief.** The brief asks for a status "while a retry is
+pending". The retry happens in the proxy (`pmRequest` retries reads on a 5xx or a
+dropped connection), inside the single request the browser makes. The browser never
+sees the 500 or the retry. It only sees a call that hasn't answered. So the status is
+keyed on time waited, not on the retry, and its wording doesn't claim a retry is
+underway. In R15's case (60 seconds, a 500, then a retry that worked), it would have
+shown from second 15 until the answer came back. Showing the retry itself would mean
+moving read retries out of the proxy into `callPm`. That's a bigger change, and it
+shortens how long one serverless request can run. Say if you want it.
+
+**Functions touched.** `delete/selection.ts` (new `holderCountLine`),
+`ui/gateway.ts` (`callPm` now wraps the new `sendToProxy`), `_ui/kit.tsx` (new
+`Progress`), and the five pages and panel above.
+
+**Results-file operations.** None new or renamed.
+
+**Tests.** 574 tests, all pass, none skipped (570 before). One new test for the holder
+count with a skipped holder. Three for the slow status: it appears past the threshold,
+it updates, it clears on answer and stops its timer, it follows the oldest call still in
+flight, and its snapshot stays stable. Typecheck and build are clean.
+`Tests/Run-AllTests.ps1` wasn't run: there's no `pwsh` on this machine, and the
+PowerShell wasn't touched. `$script:ScriptVersion` isn't bumped either, because the
+PowerShell is frozen at v4.11.
+
+**For R16.** Watch for the slow line on a slow tenant call. It can't be forced from
+outside; the closest is a large archived view or a cleanup tree read.
+
+---
+
 ## W6 follow-up. Closing the gaps against the W6 brief
 
 Commit `362ad0a` on `claude/web-w6-delete-ui`. The full W6 brief was more detailed than
