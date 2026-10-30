@@ -93,10 +93,12 @@ test('there is no way to name a URL', () => {
   }
 });
 
-test('the only writes are archive, publish, group delete, move, ownership, and the delete run\'s five', () => {
+test('the only writes are archive, publish, group delete, move, ownership, the delete run\'s five, and the document archive', () => {
   // Adding a write has to be a decision made here, not a side effect of a new case. The
-  // delete run's writes arrived with the unwind (W5 phase 7), not before; the rename with F5.
+  // delete run's writes arrived with the unwind (W5 phase 7), not before; the rename with
+  // F5; the document archive with W8a.
   assert.deepEqual([...WRITE_OPERATIONS].sort(), [
+    'documents.archive',
     'group.create',
     'group.delete',
     'group.rename',
@@ -539,4 +541,63 @@ test('the model read gives the model, or says archived for the 200 with no model
   // Measured in S1, S2 and the W4 live test: an archived process answers 200 with only this.
   const archived = harness([{ success: true, isArchived: true }]);
   assert.deepEqual(await execute(archived.ctx, { op: 'process.model', processUniqueId: PROCESS }), { kind: 'archived' });
+});
+
+// ----------------------------------------------------------------- documents (W8a)
+
+test('the document archive takes 1 to 50 distinct numeric document ids and nothing else', () => {
+  const ids = (n: number) => Array.from({ length: n }, (_, i) => i + 1);
+  assert.ok(parseOperation({ op: 'documents.archive', documentIds: [5] }).ok);
+  assert.ok(parseOperation({ op: 'documents.archive', documentIds: ids(50) }).ok, '50 is the limit');
+  for (const documentIds of [[], ids(51), [1, 1], [0], [-2], [1.5], ['5'], [PROCESS], 5, null]) {
+    assert.equal(parseOperation({ op: 'documents.archive', documentIds }).ok, false, JSON.stringify(documentIds)?.slice(0, 30));
+  }
+  assert.equal(parseOperation({ op: 'documents.archive', documentIds: [5], path: '/x' }).ok, false, 'nothing rides along');
+});
+
+test('the document reads take one list type, a page and an optional group, or one document id', () => {
+  assert.ok(parseOperation({ op: 'documents.list', listType: 'All', page: 1, groupUniqueId: null }).ok);
+  assert.ok(parseOperation({ op: 'documents.list', listType: 'Archived', page: 2, groupUniqueId: OTHER_ID }).ok);
+  for (const bad of [
+    { listType: 'Favourites', page: 1 },
+    { listType: 'All', page: 0 },
+    { listType: 'All', page: 1, groupUniqueId: 'not-a-guid' },
+    { listType: 'All', page: 1, pageSize: 5000 },
+  ]) {
+    assert.equal(parseOperation({ op: 'documents.list', ...bad }).ok, false, JSON.stringify(bad));
+  }
+  assert.ok(parseOperation({ op: 'document.properties', documentId: 12 }).ok);
+  for (const documentId of [0, '12', [12], PROCESS]) {
+    assert.equal(parseOperation({ op: 'document.properties', documentId }).ok, false, String(documentId));
+  }
+  for (const op of ['documents.list', 'document.properties']) {
+    assert.equal(WRITE_OPERATIONS.includes(op as never), false, `${op} is a read`);
+  }
+});
+
+test('the document list asks for 500 a page, with the group when given', async () => {
+  const h = harness([{ items: [{ documentId: 1 }, 'junk'], totalItemCount: 1 }]);
+  const page = await execute(h.ctx, { op: 'documents.list', listType: 'Archived', page: 3, groupUniqueId: OTHER_ID });
+  assert.deepEqual(page, { items: [{ documentId: 1 }], totalItemCount: 1 });
+  const url = new URL(h.calls[0]!.url);
+  assert.equal(url.pathname, '/tenant/bff/document/api/v1/documents');
+  assert.deepEqual(Object.fromEntries(url.searchParams), { Page: '3', PageSize: '500', ListType: 'Archived', DocumentType: 'All', ProcessGroupId: OTHER_ID });
+});
+
+test('the bulk archive posts the ids and returns every errors entry, which a 200 carries', async () => {
+  const h = harness([{ errors: [{ documentId: 7, errorCode: 'NotFound' }, { errorCode: 'Odd' }, { documentId: 8 }] }]);
+  const answer = await execute(h.ctx, { op: 'documents.archive', documentIds: [7, 8, 9] });
+  assert.deepEqual(answer, {
+    errors: [
+      { documentId: 7, errorCode: 'NotFound' },
+      { documentId: null, errorCode: 'Odd' },
+      { documentId: 8, errorCode: 'Unknown' },
+    ],
+  });
+  assert.equal(h.calls[0]!.method, 'POST');
+  assert.match(h.calls[0]!.url, /\/bff\/document\/api\/v1\/documents\/bulk\/archive$/);
+  assert.deepEqual(JSON.parse(h.calls[0]!.body!), { documentIds: [7, 8, 9] });
+  const props = harness([{ attachedProcesses: [] }]);
+  await execute(props.ctx, { op: 'document.properties', documentId: 12 });
+  assert.match(props.calls[0]!.url, /\/documents\/12\/properties$/);
 });
