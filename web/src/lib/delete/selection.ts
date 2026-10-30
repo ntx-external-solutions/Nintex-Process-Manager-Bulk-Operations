@@ -396,6 +396,19 @@ export function previewHolders(plan: DependencyPlan, index: DeleteIndex | null):
 }
 
 /**
+ * The holder count for the plan summary. R15: the summary said "2 process(es) to edit"
+ * over a Holders panel showing 1 to edit and 1 skipped for an open draft, because the
+ * plan's work items include the draft holders the run will not edit unless ticked.
+ */
+export function holderCountLine(holders: Pick<HolderPreview, 'edited' | 'skipped'>): string {
+  const edited = holders.edited.length;
+  const skipped = holders.skipped.length;
+  const noun = (n: number) => (n === 1 ? 'holder' : 'holders');
+  if (skipped === 0) return `${edited} ${noun(edited)} to edit`;
+  return `${edited + skipped} ${noun(edited + skipped)}: ${edited} to edit, ${skipped} skipped (open draft)`;
+}
+
+/**
  * What the run re-reads before its first write (plan/revalidate.ts): every checked group
  * in its parent, and every target picked from the tree in its group. Archived targets
  * are not in the tree, and the engine reads both process lists again for them.

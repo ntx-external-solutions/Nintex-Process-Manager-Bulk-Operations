@@ -65,7 +65,7 @@ import { ResultsSummary } from '../components/ResultsSummary.tsx';
 import { SessionGate } from '../components/SessionGate.tsx';
 import { TreeBrowser, useBrowseTree } from '../components/TreeBrowser.tsx';
 import type { ProcessIndex } from '@/lib/tenant/state.ts';
-import { Notice, valueOf } from '../_ui/kit.tsx';
+import { Notice, Progress, valueOf } from '../_ui/kit.tsx';
 
 type Stage =
   | { kind: 'select' }
@@ -360,7 +360,7 @@ function ArchiveFlow({ session, onSignedOut }: { session: SessionInfo; onSignedO
         </>
       )}
 
-      {stage.kind === 'planning' && <p className="pending">{stage.progress}</p>}
+      {stage.kind === 'planning' && <Progress>{stage.progress}</Progress>}
 
       {stage.kind === 'plan' && (
         <PlanView
@@ -383,7 +383,7 @@ function ArchiveFlow({ session, onSignedOut }: { session: SessionInfo; onSignedO
       {stage.kind === 'running' && (
         <div className="panel">
           <h2>Archiving</h2>
-          <p className="pending">{stage.progress}</p>
+          <Progress>{stage.progress}</Progress>
           <Button buttonType="secondary" onClick={() => abort.current?.abort()}>
             Stop after the current batch
           </Button>

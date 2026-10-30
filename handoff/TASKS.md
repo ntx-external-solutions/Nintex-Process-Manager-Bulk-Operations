@@ -762,7 +762,7 @@ or CSV" tab; both pages share one id input. See REPORT.md.
 
 ## F7. Small items from live round R15
 
-Status: Ready
+Status: Done (1d39f00)
 
 1. **The plan summary miscounts holders.** It says "2 process(es) to edit" when the Holders
    panel shows 1 to be edited and 1 skipped for an open draft. Count only holders that

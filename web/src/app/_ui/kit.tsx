@@ -2,11 +2,14 @@
 
 /**
  * Small compositions of Textura components that every page repeats, so the pages stay
- * about their content. No behavior lives here.
+ * about their content. No behavior lives here, beyond the progress line reading the
+ * slow-call tracker.
  */
 
 import { Alert } from '@exp-textura/react';
-import type { ReactNode } from 'react';
+import { useSyncExternalStore, type ReactNode } from 'react';
+
+import { slowCalls, slowMessage } from '@/lib/ui/slowCalls.ts';
 
 type Tone = 'critical' | 'warning' | 'info' | 'success';
 
@@ -60,5 +63,24 @@ export function SignedInAs({ username, tenant }: { username: string; tenant: str
     <span className="muted">
       Signed in as {username} on <code>{tenant}</code>
     </span>
+  );
+}
+
+/**
+ * The progress line under a running step. When a call to Process Manager has gone
+ * unanswered for a while, a second line says so, and clears when it answers (F7: in R15
+ * the page sat on "Deleting 2 of 2" through a 60-second hang and a retry).
+ */
+export function Progress({ children }: { children: ReactNode }) {
+  const slow = useSyncExternalStore(slowCalls.subscribe, slowCalls.snapshot, () => null);
+  return (
+    <>
+      {children !== '' && <p className="pending">{children}</p>}
+      {slow !== null && (
+        <p className="pending" role="status">
+          {slowMessage(slow)}
+        </p>
+      )}
+    </>
   );
 }

@@ -24,6 +24,7 @@ import type { TreeItem } from '@/lib/pm/types.ts';
 import type { CoveredGroup } from '@/lib/select/resolve.ts';
 import type { ProcessIndex } from '@/lib/tenant/state.ts';
 import { browserCleanupGateway } from '@/lib/ui/gateway.ts';
+import { Progress } from '../_ui/kit.tsx';
 
 type Step =
   | { kind: 'offer' }
@@ -124,7 +125,7 @@ export function CleanupPanel({
         </>
       )}
 
-      {step.kind === 'checking' && <p className="pending">{step.progress}</p>}
+      {step.kind === 'checking' && <Progress>{step.progress}</Progress>}
 
       {step.kind === 'review' && (
         <ReviewDecisions
@@ -138,7 +139,7 @@ export function CleanupPanel({
 
       {step.kind === 'running' && (
         <>
-          <p className="pending">{step.progress}</p>
+          <Progress>{step.progress}</Progress>
           <Button buttonType="secondary" onClick={() => abort.current?.abort()}>
             Stop after this group
           </Button>

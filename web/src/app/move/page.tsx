@@ -29,7 +29,7 @@ import { DestinationPicker, TOP_LEVEL } from '../components/DestinationPicker.ts
 import { ResultsSummary } from '../components/ResultsSummary.tsx';
 import { SessionGate } from '../components/SessionGate.tsx';
 import { TreeBrowser, useBrowseTree } from '../components/TreeBrowser.tsx';
-import { Notice } from '../_ui/kit.tsx';
+import { Notice, Progress } from '../_ui/kit.tsx';
 
 type Stage =
   | { kind: 'select' }
@@ -206,7 +206,7 @@ function MoveFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOut:
         </>
       )}
 
-      {stage.kind === 'planning' && <p className="pending">{stage.progress}</p>}
+      {stage.kind === 'planning' && <Progress>{stage.progress}</Progress>}
 
       {stage.kind === 'plan' && (
         <PlanView
@@ -225,7 +225,7 @@ function MoveFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOut:
       {stage.kind === 'running' && (
         <div className="panel">
           <h2>Moving</h2>
-          <p className="pending">{stage.progress}</p>
+          <Progress>{stage.progress}</Progress>
           <Button buttonType="secondary" onClick={() => abort.current?.abort()}>
             Stop after the current batch
           </Button>
