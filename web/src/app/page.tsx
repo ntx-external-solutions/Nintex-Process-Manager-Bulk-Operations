@@ -70,9 +70,9 @@ const DOCUMENT_OPERATIONS: readonly OperationTile[] = [
   },
   {
     title: 'Restore documents',
-    summary: 'Bring archived documents back to their groups.',
+    summary: 'Bring archived documents back to their groups. A results file from Archive or Delete documents undoes that run’s archiving.',
     icon: <Undo />,
-    href: null,
+    href: '/documents/restore',
   },
   {
     title: 'Repair document references',

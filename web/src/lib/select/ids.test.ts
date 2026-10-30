@@ -31,6 +31,8 @@ test('a results file is read as a target file through its ObjectID column', () =
     duplicates: 0,
     noIdLines: [],
     nameColumn: null,
+    // Only Restore documents filters a results file (W8c); every other page reads every id.
+    resultsLeftOut: 0,
   });
 });
 

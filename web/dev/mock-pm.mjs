@@ -28,6 +28,10 @@
 // which keeps the group from being deleted. Spent holds one archived document and nothing
 // else. The bulk delete refuses an active document (NotArchived) and an attached one
 // (ProcessAttachment) but not one only a draft points at, as measured.
+// For Restore documents (W8c): an archived document whose primary group is gone (its
+// breadcrumb is empty, as a deleted group's is), one the bulk restore refuses inside a
+// 200, and one a Delete run archived and left archived. The restore answers NotArchived
+// for an active document.
 // For ownership, start the app with SCIM_BASE_URL=http://localhost:<port>.
 //
 //   node dev/mock-pm.mjs [port]      (default 4999; sign in to http://localhost:4999/tenant)
@@ -84,6 +88,9 @@ const docs = Object.fromEntries([
   doc(215, 'Locked archive.pdf', OLDF, { archived: true, refuseDelete: 'Locked' }),
   doc(216, 'Borrowed archive.pdf', SHARED, { archived: true, associated: [OLDF] }),
   doc(217, 'Spent sheet.xlsx', SPENT, { archived: true }),
+  doc(218, 'Orphan archive.pdf', id(912), { archived: true }),
+  doc(219, 'Restore refused.pdf', MAN, { archived: true, refuseRestore: 'Locked' }),
+  doc(220, 'Run archived.pdf', SHARED, { archived: true }),
 ].map((d) => [Number(d.uniqueId.slice(-3)), d]));
 const docNumber = (d) => Number(d.uniqueId.slice(-3));
 const within = (g, top) => {
@@ -288,6 +295,7 @@ http.createServer(async (req, res) => {
       const d = docs[n];
       if (!d) errors.push({ documentId: n, errorCode: 'NotFound' });
       else if (!d.archived) errors.push({ documentId: n, errorCode: 'NotArchived' });
+      else if (d.refuseRestore) errors.push({ documentId: n, errorCode: d.refuseRestore });
       else d.archived = false;
     }
     return send(res, 200, { errors });
