@@ -14,6 +14,7 @@ import { Button } from '@exp-textura/react';
 import { useCallback, useMemo, useRef, useState } from 'react';
 
 import { loadDocumentIndex } from '@/lib/documents/list.ts';
+import { inFlightOf, inFlightRows, type DocumentRunRecord } from '@/lib/documents/runRecord.ts';
 import {
   buildDocumentRestorePlan,
   checkGroupsExist,
@@ -24,14 +25,14 @@ import {
   type DocumentRestorePlan,
 } from '@/lib/documents/restore.ts';
 import { resultsToCsv, type ResultRow } from '@/lib/exec/report.ts';
-import { createControls, errorMessage } from '@/lib/exec/runner.ts';
+import { CANCELLED, createControls, errorMessage } from '@/lib/exec/runner.ts';
 import { datedFilename, downloadCsv } from '@/lib/ui/download.ts';
 import { browserDocumentGateway, browserGateway, groupBreadcrumb, PmRequestError, type SessionInfo } from '@/lib/ui/gateway.ts';
 import { Notice, Progress } from '../../_ui/kit.tsx';
 import { ResultsSummary } from '../../components/ResultsSummary.tsx';
 import { SessionGate } from '../../components/SessionGate.tsx';
 import { useBrowseTree } from '../../components/TreeBrowser.tsx';
-import { isSignedOut, LeftOut, readProperties, useDocumentChoice } from '../choose.tsx';
+import { InterruptedRun, isSignedOut, LeftOut, readProperties, useDocumentChoice, useRunRecord } from '../choose.tsx';
 
 type Stage =
   | { kind: 'select' }
@@ -70,6 +71,7 @@ function RestoreDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; 
     setError(errorMessage(cause));
   };
 
+  const runs = useRunRecord('restore', session.tenant);
   const choice = useDocumentChoice({ docs, browse, sources: ['archived', 'ids'], idKind: 'restore', onError: fail });
 
   async function buildPlan() {
@@ -111,8 +113,11 @@ function RestoreDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; 
     setStage({ kind: 'running', progress: 'Restoring the first batch…' });
     abort.current = new AbortController();
     const controls = createControls({ signal: abort.current.signal });
+    // Kept until the run is settled, so a run whose session dies can be finished.
+    const record = runs.start(plan.skipped);
     try {
       const draft = await runDocumentRestore(docs, plan.targets, controls, {
+        onBatch: (e) => record.save({ rows: [...plan.skipped, ...e.rows], inFlight: e.sending ? inFlightOf('Restore', e.sending) : null }),
         errorText: errorMessage,
         statusOf: (e) => (e instanceof PmRequestError ? e.status : null),
         onProgress: (done, total, label) => setStage({ kind: 'running', progress: `Restored ${done} of ${total}. Last: ${label}` }),
@@ -126,6 +131,8 @@ function RestoreDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; 
         // Not handleError: a dead session here must not lose the rows for what was restored.
         warning = `${warning ? `${warning} ` : ''}The final read failed (${errorMessage(cause)}), so these statuses are what the calls reported, not confirmed.`;
       }
+      if (warning === null || warning === CANCELLED) record.clear();
+      else record.save({ rows: [...plan.skipped, ...rows], inFlight: null });
       setStage({ kind: 'done', rows: [...plan.skipped, ...rows], warning });
     } catch (cause) {
       fail(cause);
@@ -135,7 +142,23 @@ function RestoreDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; 
     }
   }
 
+  /** An interrupted run's rows, settled against the lists read now. */
+  async function finishInterrupted(record: DocumentRunRecord) {
+    setError(null);
+    setStage({ kind: 'running', progress: 'Reading the document lists to confirm what the interrupted run did…' });
+    try {
+      const after = await loadDocumentIndex(docs.list);
+      const rows = settleDocumentRestore([...record.rows, ...inFlightRows(record, after)], after);
+      runs.discard();
+      setStage({ kind: 'done', rows, warning: 'These are the results of an interrupted run. Build a new plan for anything it did not reach.' });
+    } catch (cause) {
+      fail(cause);
+      setStage({ kind: 'select' });
+    }
+  }
+
   function startOver() {
+    runs.reload();
     choice.reset();
     setStage({ kind: 'select' });
   }
@@ -152,7 +175,17 @@ function RestoreDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; 
         </Notice>
       )}
 
-      {stage.kind === 'select' && (
+      {stage.kind === 'select' && runs.interrupted !== null && (
+        <InterruptedRun
+          record={runs.interrupted}
+          what="A restore run"
+          finish="Show its results"
+          onFinish={() => void finishInterrupted(runs.interrupted!)}
+          onDiscard={runs.discard}
+        />
+      )}
+
+      {stage.kind === 'select' && runs.interrupted === null && (
         <>
           <div className="panel">
             <h2>1. Choose the documents to restore</h2>

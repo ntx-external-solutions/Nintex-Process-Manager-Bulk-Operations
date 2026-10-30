@@ -17,7 +17,9 @@ import { loadDocumentIndex } from '@/lib/documents/list.ts';
 import {
   describeReference,
   existingDocuments,
+  interruptedRepairRow,
   REPAIR_DESCRIPTION,
+  REPAIR_OPERATION,
   REPAIR_STATUSES,
   repairProcess,
   scanForDeadReferences,
@@ -35,7 +37,8 @@ import { Notice, Progress, valueOf } from '../../_ui/kit.tsx';
 import { Checkbox } from '../../components/Checkbox.tsx';
 import { ResultsSummary } from '../../components/ResultsSummary.tsx';
 import { SessionGate } from '../../components/SessionGate.tsx';
-import { isSignedOut } from '../choose.tsx';
+import type { DocumentRunRecord } from '@/lib/documents/runRecord.ts';
+import { InterruptedRun, isSignedOut, useRunRecord } from '../choose.tsx';
 
 type Stage =
   | { kind: 'start' }
@@ -72,6 +75,7 @@ function RepairFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
   const [description, setDescription] = useState(REPAIR_DESCRIPTION);
   const [confirming, setConfirming] = useState(false);
   const stop = useRef(false);
+  const runs = useRunRecord('repair', session.tenant);
 
   async function scan() {
     setError(null);
@@ -112,12 +116,16 @@ function RepairFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
     const chosen = found.active.filter((p) => ticked.has(p.uniqueId));
     const rows: ResultRow[] = [];
     let warning: string | null = null;
+    // Each process's row as it is made, and the one being repaired, so a run whose session
+    // dies can be finished.
+    const record = runs.start([]);
     for (const [i, p] of chosen.entries()) {
       if (stop.current) {
         warning = CANCELLED;
         break;
       }
       setStage({ kind: 'running', progress: `Repairing ${i + 1} of ${chosen.length}: ${p.name}` });
+      record.save({ rows, inFlight: { operation: REPAIR_OPERATION, items: [{ uniqueId: p.uniqueId, name: p.name, groupId: p.groupId }] } });
       try {
         rows.push(
           await repairProcess(
@@ -132,7 +140,22 @@ function RepairFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
         break;
       }
     }
+    if (warning === null || warning === CANCELLED) record.clear();
+    // The process being repaired when the session died stays in flight, for the read-back.
+    else record.save({ rows });
     setStage({ kind: 'done', rows, warning });
+  }
+
+  /** An interrupted run's rows, and a row for the process it was repairing, from a read-back. */
+  async function finishInterrupted(interrupted: DocumentRunRecord) {
+    setError(null);
+    setStage({ kind: 'running', progress: 'Reading back the process the interrupted run was repairing…' });
+    const done = new Set(interrupted.rows.map((r) => r.objectId.toLowerCase()));
+    const flying = (interrupted.inFlight?.items ?? []).filter((item) => !done.has(item.uniqueId.toLowerCase()));
+    const rows = [...interrupted.rows];
+    for (const item of flying) rows.push(await interruptedRepairRow({ readModel: writes.readModel, list: docs.list }, item, errorMessage));
+    runs.discard();
+    setStage({ kind: 'done', rows, warning: 'These are the results of an interrupted run. Scan again for anything it did not reach.' });
   }
 
   return (
@@ -143,7 +166,17 @@ function RepairFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
         </Notice>
       )}
 
-      {stage.kind === 'start' && (
+      {stage.kind === 'start' && runs.interrupted !== null && (
+        <InterruptedRun
+          record={runs.interrupted}
+          what="A repair run"
+          finish="Show its results"
+          onFinish={() => void finishInterrupted(runs.interrupted!)}
+          onDiscard={runs.discard}
+        />
+      )}
+
+      {stage.kind === 'start' && runs.interrupted === null && (
         <div className="panel">
           <h2>1. Find processes pointing at deleted documents</h2>
           <p>

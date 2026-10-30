@@ -32,6 +32,8 @@ node dev/drive-docs-archive.mjs    # Archive documents by group, list and CSV: h
 node dev/drive-docs-delete.mjs     # Delete documents: archive first, typed DELETE, re-check, put back, cleanup (W8b)
 node dev/drive-docs-restore.mjs    # Restore documents from the archived list and a Delete results file (W8c)
 node dev/drive-docs-repair.mjs     # Repair document references: scan, repair published and draft holders, read back (W8d)
+node dev/drive-docs-delete-resume.mjs   # Delete documents whose session dies at the delete; sign in again and finish it
+node dev/drive-docs-archive-resume.mjs  # Archive documents whose session dies at the archive; sign in again and settle its rows
 ```
 
 Each script prints the screens it passes through and the write calls the mock received.

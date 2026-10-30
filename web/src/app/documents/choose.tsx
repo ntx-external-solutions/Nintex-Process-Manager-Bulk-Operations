@@ -10,12 +10,13 @@
  */
 
 import { Button } from '@exp-textura/react';
-import { useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 
 import type { PropertiesRead } from '@/lib/documents/archive.ts';
 import { toDocumentProperties } from '@/lib/documents/holders.ts';
 import { documentPath, loadDocumentIndex, loadDocumentList, type DocumentEntry } from '@/lib/documents/list.ts';
 import { scanProcessesForDocuments, type ReferenceScan } from '@/lib/documents/references.ts';
+import { loadRecord, localRecordStore, recorder, type DocumentPage, type DocumentRunRecord, type Recorder } from '@/lib/documents/runRecord.ts';
 import {
   CHOSEN_FROM_ARCHIVED,
   CHOSEN_FROM_LIST,
@@ -413,6 +414,76 @@ export function UnreadProcesses({ unread, verb, onReplan }: { unread: ReferenceS
         ))}
       </ul>
       <Button onClick={onReplan}>Build the plan again</Button>
+    </div>
+  );
+}
+
+/**
+ * The page's run record (lib/documents/runRecord.ts): the one an earlier run left, if any,
+ * and a way to start a new one. Read after mount, since the server render has no storage.
+ */
+export function useRunRecord(page: DocumentPage, tenant: string) {
+  const store = useMemo(() => localRecordStore(page), [page]);
+  const [interrupted, setInterrupted] = useState<DocumentRunRecord | null>(null);
+  useEffect(() => setInterrupted(loadRecord(store, tenant, page)), [store, tenant, page]);
+  return {
+    interrupted,
+    start: (rows: ResultRow[], more: Pick<DocumentRunRecord, 'delete'> = {}): Recorder =>
+      recorder(store, { page, tenant, runId: crypto.randomUUID(), startedAt: Date.now(), rows, inFlight: null, ...more }),
+    resume: (record: DocumentRunRecord): Recorder => recorder(store, record),
+    discard: () => {
+      try {
+        store?.clear();
+      } catch {
+        // Nothing to clear.
+      }
+      setInterrupted(null);
+    },
+    /** Read the record again: a run on this screen that ended without finishing has left one. */
+    reload: () => setInterrupted(loadRecord(store, tenant, page)),
+    /** Hide the panel once the operator has chosen to finish the run; the record stays until it is finished. */
+    dismiss: () => setInterrupted(null),
+  };
+}
+
+/** Offered while an earlier run's record is waiting, in place of choosing something new. */
+export function InterruptedRun({
+  record,
+  what,
+  finish,
+  onFinish,
+  onDiscard,
+}: {
+  record: DocumentRunRecord;
+  what: string;
+  finish: string;
+  onFinish: () => void;
+  onDiscard: () => void;
+}) {
+  const [sure, setSure] = useState(false);
+  const flying = record.inFlight?.items.length ?? 0;
+  return (
+    <div className="panel warning">
+      <h2>An earlier run did not finish</h2>
+      <p>
+        {what} started {new Date(record.startedAt).toLocaleString()} stopped before it finished: its session ended or its tab
+        closed. It recorded {record.rows.length} row{record.rows.length === 1 ? '' : 's'}.
+        {flying > 0 &&
+          ` A call about ${flying} document${flying === 1 ? ' was' : 's was'} out when it stopped; the lists read now decide what it did.`}
+      </p>
+      <div className="row">
+        <Button onClick={onFinish}>{finish}</Button>
+        {sure ? (
+          <Button buttonType="secondary" onClick={onDiscard}>
+            Yes, discard it
+          </Button>
+        ) : (
+          <Button buttonType="secondary" onClick={() => setSure(true)}>
+            Discard the record
+          </Button>
+        )}
+      </div>
+      {sure && <p className="small">Discarding changes nothing on the tenant, but the run&rsquo;s results can no longer be downloaded here.</p>}
     </div>
   );
 }

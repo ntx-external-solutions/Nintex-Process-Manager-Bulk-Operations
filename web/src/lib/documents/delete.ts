@@ -33,6 +33,7 @@ import {
 import { attachedNow, holdersMessage } from './holders.ts';
 import type { DocumentIndex } from './list.ts';
 import type { ReferenceScan } from './references.ts';
+import { inFlightRows, type DocumentRunRecord } from './runRecord.ts';
 
 export const STILL_ATTACHED = 'Process Manager refused: still attached';
 export const NOT_ARCHIVED_ANY_MORE = 'No longer archived by the time its batch ran, so it was not deleted';
@@ -213,3 +214,87 @@ export function settleDocumentDelete(rows: readonly ResultRow[], after: Document
 }
 
 export const DOCUMENT_DELETE_STATUSES = ['Success', 'Preview', 'Skipped', 'Unverified', 'Failed'] as const;
+
+// ------------------------------------------------------------------ recovery
+
+export const CONFIRMED_AFTER_INTERRUPTION = 'confirmed by the read after the run was interrupted';
+
+export interface RecoveredDelete {
+  /** Every row the interrupted run made, corrected by the read now. */
+  priorRows: ResultRow[];
+  /** What is left: documents still to delete, and what this run archived and must put back unless deleted. */
+  between: AfterArchive;
+  /** Every target of the run, for the cleanup offer. */
+  allTargets: DocumentTarget[];
+}
+
+/**
+ * Pick up a Delete documents run whose session died or whose tab closed, from its run
+ * record and a fresh read of both lists. Nothing is sent again on the record's word:
+ *  - an active target now archived was archived by this run, and is put back unless it is
+ *    deleted now;
+ *  - a target in neither list was deleted;
+ *  - a target the delete never reached, or whose delete call got no answer, is offered for
+ *    the delete again, behind the same typed confirmation and per-batch re-check;
+ *  - a target the delete reached and left alone (held, refused) is not retried.
+ */
+export function recoverDelete(record: DocumentRunRecord, after: DocumentIndex): RecoveredDelete | null {
+  const plan = record.delete;
+  if (!plan) return null;
+  const rows = [...record.rows, ...inFlightRows(record, after)];
+  const key = (id: string) => id.toLowerCase();
+  const find = (operation: string, id: string) => {
+    for (let i = rows.length - 1; i >= 0; i--) if (rows[i]!.operation === operation && key(rows[i]!.objectId) === key(id)) return i;
+    return -1;
+  };
+  // Never reached, or a call with no answer (a dead session refuses it, but a dropped
+  // connection may not have): both are decided by the read now and offered again.
+  const notAttempted = (r: ResultRow | undefined) =>
+    r !== undefined &&
+    ((r.status === 'Skipped' && r.message.startsWith('Not attempted')) || (r.status === 'Failed' && r.message.startsWith(`The ${r.operation.toLowerCase()} call failed`)));
+  const put = (t: DocumentTarget, operation: string, status: string, message: string) => {
+    const row = resultRow({ objectType: 'Document', objectId: t.uniqueId, name: t.name, operation, status, message, groupId: t.groupId });
+    const at = find(operation, t.uniqueId);
+    if (at >= 0) rows[at] = row;
+    else rows.push(row);
+  };
+  const drop = (operation: string, t: DocumentTarget) => {
+    const at = find(operation, t.uniqueId);
+    if (at >= 0) rows.splice(at, 1);
+  };
+
+  const toDelete: DocumentTarget[] = [];
+  const archivedByRun: DocumentTarget[] = [];
+  const gone = (t: DocumentTarget) => {
+    if (rows[find('Delete', t.uniqueId)]?.status !== 'Success') put(t, 'Delete', 'Success', `Deleted, ${CONFIRMED_AFTER_INTERRUPTION}.`);
+  };
+  const candidate = (t: DocumentTarget) => {
+    const at = find('Delete', t.uniqueId);
+    if (at >= 0 && !notAttempted(rows[at])) return;
+    if (at >= 0) rows.splice(at, 1);
+    toDelete.push({ ...t, isArchived: true });
+  };
+
+  for (const t of plan.alreadyArchived) {
+    const now = after.get(key(t.uniqueId));
+    if (!now) gone(t);
+    else if (now.isArchived) candidate(t);
+    else if (find('Delete', t.uniqueId) < 0) put(t, 'Delete', 'Skipped', NOT_ARCHIVED_ANY_MORE);
+  }
+  for (const t of plan.toArchive) {
+    const now = after.get(key(t.uniqueId));
+    if (!now) {
+      gone(t);
+    } else if (now.isArchived) {
+      // Active when the plan was built, so this run archived it.
+      if (rows[find('Archive', t.uniqueId)]?.status !== 'Success') put(t, 'Archive', 'Success', `Archived, ${CONFIRMED_AFTER_INTERRUPTION}.`);
+      if (notAttempted(rows[find('Restore', t.uniqueId)])) drop('Restore', t);
+      archivedByRun.push(t);
+    } else if (find('Archive', t.uniqueId) < 0) {
+      put(t, 'Archive', 'Skipped', 'Not attempted: the run was interrupted before it was archived');
+    }
+  }
+  for (const t of archivedByRun) candidate(t);
+
+  return { priorRows: rows, between: { archiveRows: [], toDelete, archivedByRun }, allTargets: [...plan.alreadyArchived, ...plan.toArchive] };
+}
