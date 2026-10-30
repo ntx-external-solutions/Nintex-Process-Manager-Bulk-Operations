@@ -64,9 +64,9 @@ const DOCUMENT_OPERATIONS: readonly OperationTile[] = [
   },
   {
     title: 'Delete documents',
-    summary: 'Permanently delete documents nothing is attached to.',
+    summary: 'Permanently delete documents nothing is attached to. Active ones are archived first, and put back if not deleted.',
     icon: <Delete />,
-    href: null,
+    href: '/documents/delete',
   },
   {
     title: 'Restore documents',

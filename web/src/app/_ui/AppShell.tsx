@@ -137,6 +137,9 @@ function Sidebar() {
         <MainNav.Item asChild isCurrent={isSection('/documents/archive')} icon={<Documents />} hoverIcon={<DocumentsSolid />}>
           <Link href="/documents/archive">Archive documents</Link>
         </MainNav.Item>
+        <MainNav.Item asChild isCurrent={isSection('/documents/delete')} icon={<Delete />}>
+          <Link href="/documents/delete">Delete documents</Link>
+        </MainNav.Item>
       </MainNav.Content>
     </MainNav>
   );

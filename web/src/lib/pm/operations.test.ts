@@ -93,12 +93,14 @@ test('there is no way to name a URL', () => {
   }
 });
 
-test('the only writes are archive, publish, group delete, move, ownership, the delete run\'s five, and the document archive', () => {
+test('the only writes are archive, publish, group delete, move, ownership, the delete run\'s five, and the document archive, delete and restore', () => {
   // Adding a write has to be a decision made here, not a side effect of a new case. The
   // delete run's writes arrived with the unwind (W5 phase 7), not before; the rename with
-  // F5; the document archive with W8a.
+  // F5; the document archive with W8a; the document delete and restore with W8b.
   assert.deepEqual([...WRITE_OPERATIONS].sort(), [
     'documents.archive',
+    'documents.delete',
+    'documents.restore',
     'group.create',
     'group.delete',
     'group.rename',
@@ -600,4 +602,42 @@ test('the bulk archive posts the ids and returns every errors entry, which a 200
   const props = harness([{ attachedProcesses: [] }]);
   await execute(props.ctx, { op: 'document.properties', documentId: 12 });
   assert.match(props.calls[0]!.url, /\/documents\/12\/properties$/);
+});
+
+// ----------------------------------------------------------------- documents (W8b)
+
+test('the document delete and restore take 1 to 50 distinct numeric document ids and nothing else', () => {
+  const ids = (n: number) => Array.from({ length: n }, (_, i) => i + 1);
+  for (const op of ['documents.delete', 'documents.restore']) {
+    assert.ok(parseOperation({ op, documentIds: ids(50) }).ok, `${op}: 50 is the limit`);
+    for (const documentIds of [[], ids(51), [3, 3], [0], ['5'], [PROCESS], null]) {
+      assert.equal(parseOperation({ op, documentIds }).ok, false, `${op} ${JSON.stringify(documentIds)?.slice(0, 30)}`);
+    }
+    assert.equal(parseOperation({ op, documentIds: [5], url: '/x' }).ok, false, `${op}: nothing rides along`);
+  }
+});
+
+test('the bulk delete sends DELETE with the ids, the bulk restore a POST, and both return every errors entry', async () => {
+  const del = harness([{ errors: [{ documentId: 4, errorCode: 'ProcessAttachment' }, { documentId: 5, errorCode: 'NotArchived' }] }]);
+  const answer = await execute(del.ctx, { op: 'documents.delete', documentIds: [4, 5, 6] });
+  assert.deepEqual(answer, { errors: [{ documentId: 4, errorCode: 'ProcessAttachment' }, { documentId: 5, errorCode: 'NotArchived' }] });
+  assert.equal(del.calls[0]!.method, 'DELETE');
+  assert.match(del.calls[0]!.url, /\/bff\/document\/api\/v1\/documents\/bulk$/);
+  assert.deepEqual(JSON.parse(del.calls[0]!.body!), { documentIds: [4, 5, 6] });
+
+  const restore = harness([{ errors: [] }]);
+  assert.deepEqual(await execute(restore.ctx, { op: 'documents.restore', documentIds: [4] }), { errors: [] });
+  assert.equal(restore.calls[0]!.method, 'POST');
+  assert.match(restore.calls[0]!.url, /\/documents\/bulk\/restore$/);
+});
+
+test('a group\'s document count for cleanup takes in what both lists return for it, so an archived document only associated with it keeps it', async () => {
+  // The tenant's group filter returns documents only associated with the group, and an
+  // archived one blocks the group's delete (W8 spike). The count reads both lists with
+  // the group's filter and counts every row.
+  const h = harness([{ items: [], totalItemCount: 0 }, { items: [{ documentName: 'Borrowed.pdf', primaryGroupUniqueId: PROCESS }], totalItemCount: 1 }]);
+  const answer = await execute(h.ctx, { op: 'group.documents', groupUniqueId: OTHER_ID });
+  assert.deepEqual(answer, { total: 1, names: ['Borrowed.pdf (archived)'] });
+  assert.deepEqual(h.calls.map((c) => new URL(c.url).searchParams.get('ListType')), ['All', 'Archived']);
+  assert.ok(h.calls.every((c) => new URL(c.url).searchParams.get('ProcessGroupId') === OTHER_ID));
 });
