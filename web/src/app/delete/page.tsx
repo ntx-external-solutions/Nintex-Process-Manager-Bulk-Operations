@@ -26,7 +26,7 @@
  * processes, targets the run held back for example, is offered with each one named.
  */
 
-import { Button, Input, Textarea } from '@exp-textura/react';
+import { Button, Input } from '@exp-textura/react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { targetsInVariationSets, variationMessage, type VariationMatch } from '@/lib/archive/plan.ts';
@@ -55,9 +55,9 @@ import {
   type DeleteTarget,
   type VariationSetReview,
 } from '@/lib/delete/selection.ts';
-import { targetsFromCsv } from '@/lib/delete/targets.ts';
 import type { VariationSet } from '@/lib/pm/processes.ts';
 import { groupArchived, groupsNeedingPaths, loadArchived, loadGroupPaths, type ArchivedView as ArchivedViewData } from '@/lib/select/archived.ts';
+import { EMPTY_ID_INPUT, typedIds as readTypedIds, type IdInput } from '@/lib/select/ids.ts';
 import { loadForSelection, type CoveredGroup } from '@/lib/select/resolve.ts';
 import { revalidatePlacements, type StaleFinding } from '@/lib/plan/revalidate.ts';
 import { hasSelection } from '@/lib/select/selection.ts';
@@ -69,6 +69,7 @@ import { ArchivedView } from '../components/ArchivedView.tsx';
 import { CleanupPanel } from '../components/CleanupPanel.tsx';
 import { ResultsSummary } from '../components/ResultsSummary.tsx';
 import { SessionGate } from '../components/SessionGate.tsx';
+import { ProcessIdInput } from '../components/ProcessIdInput.tsx';
 import { TreeBrowser, useBrowseTree } from '../components/TreeBrowser.tsx';
 import { Notice, valueOf } from '../_ui/kit.tsx';
 
@@ -161,8 +162,7 @@ function DeleteFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
   const [archivedNote, setArchivedNote] = useState<string | null>(null);
   const [orphanCheck, setOrphanCheck] = useState<ArchivedOrphanCheck | null>(null);
   const [archivedPicked, setArchivedPicked] = useState<ReadonlySet<string>>(new Set());
-  const [ids, setIds] = useState('');
-  const [fileNote, setFileNote] = useState<string | null>(null);
+  const [idInput, setIdInput] = useState<IdInput>(EMPTY_ID_INPUT);
   const [thorough, setThorough] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [question, setQuestion] = useState<Question | null>(null);
@@ -204,19 +204,7 @@ function DeleteFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
     }
   }
 
-  async function readFile(file: File | undefined) {
-    setFileNote(null);
-    if (!file) return;
-    const read = targetsFromCsv(await file.text());
-    if (read.idColumnMissing) {
-      setFileNote(`Read ${read.rowCount} row(s) but found no id column. Columns in the file: ${read.headers.join(', ')}.`);
-      return;
-    }
-    setIds(read.ids.join('\n'));
-    setFileNote(`${file.name}: ${read.ids.length} id(s).`);
-  }
-
-  const typedIds = ids.split(/[\s,;]+/).filter((v) => v !== '');
+  const typedIds = readTypedIds(idInput.text);
   const treeChosen = hasSelection(browse.selection);
   const anything = treeChosen || archivedPicked.size > 0 || typedIds.length > 0;
 
@@ -452,7 +440,7 @@ function DeleteFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
     setArchivedNote(null);
     setOrphanCheck(null);
     setArchivedPicked(new Set());
-    setIds('');
+    setIdInput(EMPTY_ID_INPUT);
     setSource('tree');
     setStage({ kind: 'input' });
   }
@@ -559,15 +547,7 @@ function DeleteFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
             </>
           )}
 
-          {source === 'ids' && (
-            <div className="panel">
-              <label htmlFor="ids">Process ids (GUIDs or numeric ids), one per line</label>
-              <Textarea id="ids" rows={8} value={ids} onChange={(e) => setIds(valueOf(e))} />
-              <label htmlFor="file">Or a CSV with a ProcessID or ObjectID column (a results file works)</label>
-              <input id="file" type="file" accept=".csv,text/csv" onChange={(e) => void readFile(e.target.files?.[0])} />
-              {fileNote !== null && <p className="small">{fileNote}</p>}
-            </div>
-          )}
+          {source === 'ids' && <ProcessIdInput value={idInput} onChange={setIdInput} />}
 
           <div className="panel">
             <label className="checkbox">

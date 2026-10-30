@@ -27,6 +27,8 @@ export interface IndexEntry {
   groupName: string;
   /** False only when the listing said so explicitly. */
   groupExists: boolean;
+  /** The listing's number for the process, so an id typed as a number resolves (W7). */
+  numericId?: number | null;
 }
 
 /** Keyed by lowercased process id. */
@@ -65,6 +67,7 @@ export async function loadProcessIndex(
           groupUniqueId: row.groupUniqueId,
           groupName: row.groupName,
           groupExists: row.groupExists,
+          numericId: listingNumber(item),
         });
       }
       options.onProgress?.(index.size);
@@ -73,6 +76,16 @@ export async function loadProcessIndex(
   }
 
   return index;
+}
+
+/** The script reads `id`; the typed listing calls it `processId` (as delete/planner.ts reads it). */
+function listingNumber(item: unknown): number | null {
+  const record = item as Record<string, unknown>;
+  for (const field of ['id', 'processId']) {
+    const n = Number(record[field]);
+    if (record[field] !== null && record[field] !== undefined && record[field] !== '' && Number.isInteger(n)) return n;
+  }
+  return null;
 }
 
 export type StateChange =

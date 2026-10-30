@@ -13,15 +13,32 @@
 const BOM = '﻿';
 
 export function parseCsv(input: string): string[][] {
+  return parseCsvLines(input).map((r) => r.cells);
+}
+
+/** A parsed row and the line of the file it starts on, counting from 1. */
+export interface CsvLine {
+  cells: string[];
+  line: number;
+}
+
+/**
+ * As parseCsv, with each row's starting line, so a row can be pointed at in the file
+ * (W7: rows with no id are listed by line). A quoted cell spanning lines moves the count
+ * on, so the next row's number is still the one an editor shows.
+ */
+export function parseCsvLines(input: string): CsvLine[] {
   let text = input;
   if (text.startsWith(BOM)) text = text.slice(BOM.length);
 
-  const rows: string[][] = [];
+  const rows: CsvLine[] = [];
   let row: string[] = [];
   let field = '';
   let inQuotes = false;
   let fieldWasQuoted = false;
   let i = 0;
+  let line = 1;
+  let rowStart = 1;
 
   const endField = (): void => {
     row.push(field);
@@ -31,7 +48,7 @@ export function parseCsv(input: string): string[][] {
 
   const endRow = (): void => {
     endField();
-    rows.push(row);
+    rows.push({ cells: row, line: rowStart });
     row = [];
   };
 
@@ -50,6 +67,8 @@ export function parseCsv(input: string): string[][] {
         i += 1;
         continue;
       }
+      // A line break inside quotes is data, but still a line in the file. CRLF counts once.
+      if (ch === '\n' || (ch === '\r' && text[i + 1] !== '\n')) line += 1;
       field += ch;
       i += 1;
       continue;
@@ -74,12 +93,14 @@ export function parseCsv(input: string): string[][] {
       // Normalise CRLF and a lone CR to a row break.
       endRow();
       i += text[i + 1] === '\n' ? 2 : 1;
+      rowStart = ++line;
       continue;
     }
 
     if (ch === '\n') {
       endRow();
       i += 1;
+      rowStart = ++line;
       continue;
     }
 

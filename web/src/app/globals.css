@@ -353,14 +353,16 @@ input[type='radio']:disabled {
   cursor: default;
 }
 
-input[type='file'] {
+/* Plain file inputs only. Textura's FileUpload hides its own inputs (one by class, one by
+   the hidden attribute), and display: block showed one again under the dropzone (W7). */
+input[type='file']:not([hidden]):not([class*='exp-textura']) {
   display: block;
   font: inherit;
   font-size: 13px;
   color: var(--color-sub);
 }
 
-input[type='file']::file-selector-button {
+input[type='file']:not([hidden]):not([class*='exp-textura'])::file-selector-button {
   margin-right: 12px;
   padding: 6px 12px;
   font: inherit;
@@ -372,7 +374,7 @@ input[type='file']::file-selector-button {
   cursor: pointer;
 }
 
-input[type='file']::file-selector-button:hover {
+input[type='file']:not([hidden]):not([class*='exp-textura'])::file-selector-button:hover {
   background: var(--color-canvas);
 }
 
