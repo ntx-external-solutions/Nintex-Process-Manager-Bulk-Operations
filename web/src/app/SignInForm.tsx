@@ -8,9 +8,11 @@
  * server actually rejected returns someone to this form.
  */
 
+import { Button, Input } from '@exp-textura/react';
 import { useState } from 'react';
 
 import type { SessionInfo } from '@/lib/ui/gateway.ts';
+import { Field, Notice, valueOf } from './_ui/kit.tsx';
 
 export function SignInForm({ onSignedIn }: { onSignedIn: (session: SessionInfo) => void }) {
   const [site, setSite] = useState('');
@@ -60,49 +62,53 @@ export function SignInForm({ onSignedIn }: { onSignedIn: (session: SessionInfo) 
 
   return (
     <>
-      <form onSubmit={submit} className="panel">
-        <label htmlFor="site">Process Manager address</label>
-        <input
-          id="site"
-          value={site}
-          onChange={(e) => setSite(e.target.value)}
-          placeholder="https://demo.promapp.com/your-tenant"
-          autoComplete="url"
-          disabled={busy}
-          required
-        />
+      <form onSubmit={submit} className="panel form-stack">
+        <Field id="site" label="Process Manager address">
+          <Input
+            id="site"
+            value={site}
+            onChange={(e) => setSite(valueOf(e))}
+            placeholder="https://demo.promapp.com/your-tenant"
+            autoComplete="url"
+            disabled={busy}
+            required
+          />
+        </Field>
 
-        <label htmlFor="username">Username</label>
-        <input
-          id="username"
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
-          autoComplete="username"
-          disabled={busy}
-          required
-        />
+        <Field id="username" label="Username">
+          <Input
+            id="username"
+            value={username}
+            onChange={(e) => setUsername(valueOf(e))}
+            autoComplete="username"
+            disabled={busy}
+            required
+          />
+        </Field>
 
-        <label htmlFor="password">Password</label>
-        <input
-          id="password"
-          type="password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          autoComplete="current-password"
-          disabled={busy}
-          required
-        />
+        <Field id="password" label="Password">
+          <Input
+            id="password"
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(valueOf(e))}
+            autoComplete="current-password"
+            disabled={busy}
+            required
+          />
+        </Field>
 
-        <button type="submit" disabled={busy}>
-          {busy ? 'Signing in…' : 'Sign in'}
-        </button>
+        <div>
+          <Button type="submit" isLoading={busy}>
+            Sign in
+          </Button>
+        </div>
       </form>
 
       {error !== null && (
-        <div className="panel error">
-          <h2>Problem</h2>
-          <p>{error}</p>
-        </div>
+        <Notice tone="critical" title="Could not sign in">
+          {error}
+        </Notice>
       )}
     </>
   );

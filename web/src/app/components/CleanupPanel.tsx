@@ -11,6 +11,7 @@
  * that after a Delete, where they are targets the run held back).
  */
 
+import { Button } from '@exp-textura/react';
 import { useMemo, useRef, useState, type ReactNode } from 'react';
 
 import { gatherFacts } from '@/lib/cleanup/facts.ts';
@@ -117,9 +118,9 @@ export function CleanupPanel({
       {step.kind === 'offer' && (
         <>
           <p>{offer}</p>
-          <button type="button" className="secondary" onClick={() => void check()}>
+          <Button buttonType="secondary" onClick={() => void check()}>
             Check which groups are empty
-          </button>
+          </Button>
         </>
       )}
 
@@ -138,9 +139,9 @@ export function CleanupPanel({
       {step.kind === 'running' && (
         <>
           <p className="pending">{step.progress}</p>
-          <button type="button" className="secondary" onClick={() => abort.current?.abort()}>
+          <Button buttonType="secondary" onClick={() => abort.current?.abort()}>
             Stop after this group
-          </button>
+          </Button>
         </>
       )}
 
@@ -210,12 +211,12 @@ function ReviewDecisions({
               : `I understand ${orphans} archived process${orphans === 1 ? '' : 'es'} can never be restored to these groups`}
           </label>
           <div className="row">
-            <button type="button" disabled={!understood} onClick={onApply}>
+            <Button disabled={!understood} onClick={onApply}>
               Delete {deletes.length} group{deletes.length === 1 ? '' : 's'}
-            </button>
-            <button type="button" className="secondary" onClick={onCancel}>
+            </Button>
+            <Button buttonType="secondary" onClick={onCancel}>
               Not now
-            </button>
+            </Button>
           </div>
         </div>
       )}

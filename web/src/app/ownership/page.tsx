@@ -9,6 +9,7 @@
  * notified (the script notified them once per row).
  */
 
+import { Button, Input } from '@exp-textura/react';
 import { useCallback, useMemo, useRef, useState } from 'react';
 
 import { Journal, sessionJournalStore } from '@/lib/exec/journal.ts';
@@ -34,6 +35,7 @@ import { datedFilename, downloadCsv } from '@/lib/ui/download.ts';
 import { browserOwnershipGateway, PmRequestError, type SessionInfo } from '@/lib/ui/gateway.ts';
 import { ResultsSummary } from '../components/ResultsSummary.tsx';
 import { SessionGate } from '../components/SessionGate.tsx';
+import { Notice, valueOf } from '../_ui/kit.tsx';
 
 interface Loaded {
   filename: string;
@@ -183,17 +185,11 @@ function OwnershipFlow({ session, onSignedOut }: { session: SessionInfo; onSigne
   const canCheck = loaded !== null && (directory !== null || scimKey.trim() !== '');
 
   return (
-    <main>
-      <h1>Bulk Update Ownership</h1>
-      <p className="lede">
-        Signed in as {session.username} on <code>{session.tenant}</code>. <a href="/">Back</a>
-      </p>
-
+    <>
       {error !== null && (
-        <div className="panel error">
-          <h2>Problem</h2>
-          <p>{error}</p>
-        </div>
+        <Notice tone="critical" title="Problem">
+          {error}
+        </Notice>
       )}
 
       {stage.kind === 'input' && (
@@ -222,7 +218,7 @@ function OwnershipFlow({ session, onSignedOut }: { session: SessionInfo; onSigne
             ) : (
               <>
                 <label htmlFor="scim">SCIM API key</label>
-                <input id="scim" type="password" autoComplete="off" value={scimKey} onChange={(e) => setScimKey(e.target.value)} />
+                <Input id="scim" type="password" autoComplete="off" value={scimKey} onChange={(e) => setScimKey(valueOf(e))} />
                 <p className="small">
                   Used once to read the user directory, and not stored anywhere. Find it in Process Manager under Admin.
                 </p>
@@ -247,9 +243,9 @@ function OwnershipFlow({ session, onSignedOut }: { session: SessionInfo; onSigne
           </div>
 
           <div className="row">
-            <button type="button" disabled={!canCheck} onClick={() => void buildPlan()}>
+            <Button disabled={!canCheck} onClick={() => void buildPlan()}>
               Preview the changes
-            </button>
+            </Button>
           </div>
         </>
       )}
@@ -274,9 +270,9 @@ function OwnershipFlow({ session, onSignedOut }: { session: SessionInfo; onSigne
         <div className="panel">
           <h2>Updating</h2>
           <p className="pending">{stage.progress}</p>
-          <button type="button" className="secondary" onClick={() => abort.current?.abort()}>
+          <Button buttonType="secondary" onClick={() => abort.current?.abort()}>
             Stop after the current batch
-          </button>
+          </Button>
         </div>
       )}
 
@@ -288,13 +284,13 @@ function OwnershipFlow({ session, onSignedOut }: { session: SessionInfo; onSigne
           siteUrl={session.siteUrl}
           filenameStem="ownership-results"
           actions={
-            <button type="button" className="secondary" onClick={() => setStage({ kind: 'input' })}>
+            <Button buttonType="secondary" onClick={() => setStage({ kind: 'input' })}>
               Update another file
-            </button>
+            </Button>
           }
         />
       )}
-    </main>
+    </>
   );
 }
 
@@ -324,16 +320,15 @@ function PlanView(props: {
           {published > 0 ? `, ${published} of them republished as a new major version.` : ', none of them published.'}
         </p>
         <div className="row">
-          <button
-            type="button"
-            className="secondary"
+          <Button
+            buttonType="secondary"
             onClick={() => downloadCsv(datedFilename('ownership-preview'), resultsToCsv(ownershipPreviewRows(plan)))}
           >
             Download the preview
-          </button>
-          <button type="button" className="secondary" onClick={props.onBack}>
+          </Button>
+          <Button buttonType="secondary" onClick={props.onBack}>
             Change the file or the choice
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -406,28 +401,28 @@ function PlanView(props: {
       <div className="panel">
         <h2>5. Update</h2>
         <label htmlFor="change">Change description (recorded on every process, and the publish message)</label>
-        <input
+        <Input
           id="change"
           value={props.changeDescription}
-          onChange={(e) => props.setChangeDescription(e.target.value)}
+          onChange={(e) => props.setChangeDescription(valueOf(e))}
           placeholder="Why the owners are changing"
           required
         />
         {props.confirming ? (
           <div className="row">
-            <button type="button" onClick={props.onApply}>
+            <Button onClick={props.onApply}>
               Yes, update {label}
               {published > 0 && ` (${published} republished)`}
-            </button>
-            <button type="button" className="secondary" onClick={() => props.setConfirming(false)}>
+            </Button>
+            <Button buttonType="secondary" onClick={() => props.setConfirming(false)}>
               Cancel
-            </button>
+            </Button>
           </div>
         ) : (
           <div className="row">
-            <button type="button" disabled={!ready} onClick={() => props.setConfirming(true)}>
+            <Button disabled={!ready} onClick={() => props.setConfirming(true)}>
               Update {label}
-            </button>
+            </Button>
           </div>
         )}
         {count > 0 && props.changeDescription.trim() === '' && <p className="small">Enter a change description.</p>}

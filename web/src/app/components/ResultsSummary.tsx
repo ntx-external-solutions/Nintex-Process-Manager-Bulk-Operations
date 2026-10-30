@@ -5,6 +5,7 @@
  * person, each linked to the item in Process Manager.
  */
 
+import { Button } from '@exp-textura/react';
 import type { ReactNode } from 'react';
 
 import { itemLink } from '@/lib/archive/run.ts';
@@ -46,9 +47,9 @@ export function ResultsSummary({
           ))}
         </div>
         <div className="row">
-          <button type="button" onClick={() => downloadCsv(datedFilename(filenameStem), resultsToCsv(rows))}>
+          <Button onClick={() => downloadCsv(datedFilename(filenameStem), resultsToCsv(rows))}>
             Download the results
-          </button>
+          </Button>
           {actions}
         </div>
       </div>

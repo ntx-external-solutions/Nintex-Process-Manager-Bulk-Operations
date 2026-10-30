@@ -15,6 +15,10 @@
     "node": "24.x"
   },
   "dependencies": {
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.1",
+    "@exp-textura/icons": "^1.0.0",
+    "@exp-textura/react": "^1.1.0",
     "next": "^16.3.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"

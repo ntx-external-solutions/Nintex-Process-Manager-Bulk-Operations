@@ -7,6 +7,7 @@
  * cannot be chosen, because nothing can be moved into one.
  */
 
+import { ChevronDown, ChevronRight } from '@exp-textura/icons';
 import { visibleRows } from '@/lib/select/rows.ts';
 import { EMPTY_SELECTION } from '@/lib/select/selection.ts';
 import type { BrowseState } from './TreeBrowser.tsx';
@@ -59,7 +60,7 @@ export function DestinationPicker({
                 aria-label={row.expanded ? `Collapse ${row.node.title}` : `Expand ${row.node.title}`}
                 onClick={() => state.toggleExpanded(row.node)}
               >
-                <span className="marker">{row.expanded ? '▾' : '▸'}</span>
+                {row.expanded ? <ChevronDown /> : <ChevronRight />}
               </button>
             ) : (
               <span className="disclosure-spacer" />

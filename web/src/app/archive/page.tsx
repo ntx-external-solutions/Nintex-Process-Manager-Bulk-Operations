@@ -10,6 +10,7 @@
  * when the preview was built.
  */
 
+import { Button, Input } from '@exp-textura/react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import type { ArchivePlan } from '@/lib/archive/plan.ts';
@@ -44,6 +45,7 @@ import { ResultsSummary } from '../components/ResultsSummary.tsx';
 import { SessionGate } from '../components/SessionGate.tsx';
 import { TreeBrowser, useBrowseTree } from '../components/TreeBrowser.tsx';
 import type { ProcessIndex } from '@/lib/tenant/state.ts';
+import { Notice, valueOf } from '../_ui/kit.tsx';
 
 type Stage =
   | { kind: 'select' }
@@ -214,12 +216,7 @@ function ArchiveFlow({ session, onSignedOut }: { session: SessionInfo; onSignedO
   }
 
   return (
-    <main>
-      <h1>Bulk Archive</h1>
-      <p className="lede">
-        Signed in as {session.username} on <code>{session.tenant}</code>. <a href="/">Back</a>
-      </p>
-
+    <>
       {interrupted.length > 0 && (
         <div className="panel warning">
           <h2>An earlier run in this tab was interrupted</h2>
@@ -228,9 +225,8 @@ function ArchiveFlow({ session, onSignedOut }: { session: SessionInfo; onSignedO
             recorded, so they may or may not have taken effect. Build the plan again: anything already
             archived is listed as skipped.
           </p>
-          <button
-            type="button"
-            className="secondary"
+          <Button
+            buttonType="secondary"
             onClick={() => {
               const store = sessionJournalStore();
               if (store) loadJournal(store, session.tenant)?.discard();
@@ -238,15 +234,14 @@ function ArchiveFlow({ session, onSignedOut }: { session: SessionInfo; onSignedO
             }}
           >
             Dismiss
-          </button>
+          </Button>
         </div>
       )}
 
       {error !== null && (
-        <div className="panel error">
-          <h2>Problem</h2>
-          <p>{error}</p>
-        </div>
+        <Notice tone="critical" title="Problem">
+          {error}
+        </Notice>
       )}
 
       {stage.kind === 'select' && (
@@ -260,9 +255,9 @@ function ArchiveFlow({ session, onSignedOut }: { session: SessionInfo; onSignedO
           </div>
           <TreeBrowser state={browse} />
           <div className="row">
-            <button type="button" disabled={!hasSelection(browse.selection)} onClick={() => void buildPlan()}>
+            <Button disabled={!hasSelection(browse.selection)} onClick={() => void buildPlan()}>
               Preview what would be archived
-            </button>
+            </Button>
           </div>
         </>
       )}
@@ -291,9 +286,9 @@ function ArchiveFlow({ session, onSignedOut }: { session: SessionInfo; onSignedO
         <div className="panel">
           <h2>Archiving</h2>
           <p className="pending">{stage.progress}</p>
-          <button type="button" className="secondary" onClick={() => abort.current?.abort()}>
+          <Button buttonType="secondary" onClick={() => abort.current?.abort()}>
             Stop after the current batch
-          </button>
+          </Button>
         </div>
       )}
 
@@ -329,7 +324,7 @@ function ArchiveFlow({ session, onSignedOut }: { session: SessionInfo; onSignedO
           )}
         </>
       )}
-    </main>
+    </>
   );
 }
 
@@ -365,12 +360,12 @@ function PlanView(props: {
           {plan.skipped.length > 0 && `${plan.skipped.length} left out (listed below).`}
         </p>
         <div className="row">
-          <button type="button" className="secondary" onClick={() => downloadCsv(datedFilename('archive-preview'), resultsToCsv(previewRows(plan)))}>
+          <Button buttonType="secondary" onClick={() => downloadCsv(datedFilename('archive-preview'), resultsToCsv(previewRows(plan)))}>
             Download the preview
-          </button>
-          <button type="button" className="secondary" onClick={props.onBack}>
+          </Button>
+          <Button buttonType="secondary" onClick={props.onBack}>
             Change the selection
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -382,9 +377,9 @@ function PlanView(props: {
               <li key={f.uniqueId}>{f.message}</li>
             ))}
           </ul>
-          <button type="button" onClick={props.onReplan}>
+          <Button onClick={props.onReplan}>
             Build the plan again
-          </button>
+          </Button>
         </div>
       )}
 
@@ -472,10 +467,10 @@ function PlanView(props: {
       <div className="panel">
         <h2>3. Archive</h2>
         <label htmlFor="change">Change description (recorded on every process)</label>
-        <input
+        <Input
           id="change"
           value={props.changeDescription}
-          onChange={(e) => props.setChangeDescription(e.target.value)}
+          onChange={(e) => props.setChangeDescription(valueOf(e))}
           placeholder="Why these processes are being archived"
           required
         />
@@ -490,18 +485,18 @@ function PlanView(props: {
         </label>
         {props.confirming ? (
           <div className="row">
-            <button type="button" onClick={props.onApply}>
+            <Button onClick={props.onApply}>
               Yes, archive {plan.targets.length} process{plan.targets.length === 1 ? '' : 'es'} now
-            </button>
-            <button type="button" className="secondary" onClick={() => props.setConfirming(false)}>
+            </Button>
+            <Button buttonType="secondary" onClick={() => props.setConfirming(false)}>
               Cancel
-            </button>
+            </Button>
           </div>
         ) : (
           <div className="row">
-            <button type="button" disabled={!ready} onClick={() => props.setConfirming(true)}>
+            <Button disabled={!ready} onClick={() => props.setConfirming(true)}>
               Archive {plan.targets.length} process{plan.targets.length === 1 ? '' : 'es'}
-            </button>
+            </Button>
           </div>
         )}
         {!ready && plan.targets.length > 0 && (
@@ -537,17 +532,16 @@ function ResultsView({
       actions={
         <>
           {blocked && (
-            <button
-              type="button"
-              className="secondary"
+            <Button
+              buttonType="secondary"
               onClick={() => downloadCsv(datedFilename('archive-manual-review'), toCsv(manualReviewCsvRows(rows, siteUrl)))}
             >
               Download the manual review list
-            </button>
+            </Button>
           )}
-          <button type="button" className="secondary" onClick={onStartOver}>
+          <Button buttonType="secondary" onClick={onStartOver}>
             Archive something else
-          </button>
+          </Button>
         </>
       }
     />

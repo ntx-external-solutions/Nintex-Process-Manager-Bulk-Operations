@@ -26,6 +26,7 @@
  * processes, targets the run held back for example, is offered with each one named.
  */
 
+import { Button, Input, Textarea } from '@exp-textura/react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { targetsInVariationSets, variationMessage, type VariationMatch } from '@/lib/archive/plan.ts';
@@ -69,6 +70,7 @@ import { CleanupPanel } from '../components/CleanupPanel.tsx';
 import { ResultsSummary } from '../components/ResultsSummary.tsx';
 import { SessionGate } from '../components/SessionGate.tsx';
 import { TreeBrowser, useBrowseTree } from '../components/TreeBrowser.tsx';
+import { Notice, valueOf } from '../_ui/kit.tsx';
 
 const RESULT_STATUSES = ['Success', 'Skipped', 'Failed', 'Accepted', 'Warning', 'Blocked', 'Orphaned'] as const;
 
@@ -465,12 +467,7 @@ function DeleteFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
   const busy = stage.kind === 'running' || stage.kind === 'planning';
 
   return (
-    <main>
-      <h1>Bulk Delete</h1>
-      <p className="lede">
-        Signed in as {session.username} on <code>{session.tenant}</code>. <a href="/">Back</a>
-      </p>
-
+    <>
       {unfinished !== null && !busy && (
         <div className="panel warning">
           <h2>An earlier run did not finish</h2>
@@ -479,21 +476,20 @@ function DeleteFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
             group in place. Finishing returns each one to its own group, archived, and removes the holding group if it is empty.
           </p>
           <div className="row">
-            <button type="button" onClick={() => void finish(unfinished)}>
+            <Button onClick={() => void finish(unfinished)}>
               Finish it
-            </button>
-            <button type="button" className="secondary" onClick={() => downloadText(datedFilename('delete-plan', 'json'), serializePlan(unfinished), 'application/json')}>
+            </Button>
+            <Button buttonType="secondary" onClick={() => downloadText(datedFilename('delete-plan', 'json'), serializePlan(unfinished), 'application/json')}>
               Download its plan
-            </button>
+            </Button>
           </div>
         </div>
       )}
 
       {error !== null && (
-        <div className="panel error">
-          <h2>Problem</h2>
-          <p>{error}</p>
-        </div>
+        <Notice tone="critical" title="Problem">
+          {error}
+        </Notice>
       )}
 
       {question !== null && (
@@ -522,9 +518,9 @@ function DeleteFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
                   ['ids', `By id or CSV${typedIds.length > 0 ? ` (${typedIds.length})` : ''}`],
                 ] as const
               ).map(([key, label]) => (
-                <button key={key} type="button" role="tab" aria-selected={source === key} className={source === key ? '' : 'secondary'} onClick={() => (key === 'archived' ? void openArchived() : setSource(key))}>
+                <Button key={key} role="tab" aria-selected={source === key} buttonType={source === key ? 'primary' : 'secondary'} onClick={() => (key === 'archived' ? void openArchived() : setSource(key))}>
                   {label}
-                </button>
+                </Button>
               ))}
             </div>
           </div>
@@ -566,7 +562,7 @@ function DeleteFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
           {source === 'ids' && (
             <div className="panel">
               <label htmlFor="ids">Process ids (GUIDs or numeric ids), one per line</label>
-              <textarea id="ids" rows={8} value={ids} onChange={(e) => setIds(e.target.value)} />
+              <Textarea id="ids" rows={8} value={ids} onChange={(e) => setIds(valueOf(e))} />
               <label htmlFor="file">Or a CSV with a ProcessID or ObjectID column (a results file works)</label>
               <input id="file" type="file" accept=".csv,text/csv" onChange={(e) => void readFile(e.target.files?.[0])} />
               {fileNote !== null && <p className="small">{fileNote}</p>}
@@ -582,9 +578,9 @@ function DeleteFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
               </span>
             </label>
             <div className="row">
-              <button type="button" disabled={!anything} onClick={() => void dryRun(new Set())}>
+              <Button disabled={!anything} onClick={() => void dryRun(new Set())}>
                 Build the plan (dry run)
-              </button>
+              </Button>
             </div>
             <label htmlFor="plan-file">Or finish an interrupted run from a downloaded plan</label>
             <input id="plan-file" type="file" accept=".json,application/json" onChange={(e) => void uploadPlan(e.target.files?.[0])} />
@@ -625,17 +621,16 @@ function DeleteFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
               actions={
                 <>
                   {stage.plan !== null && (
-                    <button
-                      type="button"
-                      className="secondary"
+                    <Button
+                      buttonType="secondary"
                       onClick={() => downloadText(datedFilename('delete-plan', 'json'), serializePlan(stage.plan!), 'application/json')}
                     >
                       Download the plan
-                    </button>
+                    </Button>
                   )}
-                  <button type="button" className="secondary" onClick={startOver}>
+                  <Button buttonType="secondary" onClick={startOver}>
                     Delete something else
-                  </button>
+                  </Button>
                 </>
               }
             />
@@ -645,12 +640,12 @@ function DeleteFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
             <pre className="plan-text">{[...deleteResultsSummary(stage.rows).lines, '', ...stage.log].join('\n')}</pre>
             {stage.rows.length === 0 && (
               <div className="row">
-                <button type="button" className="secondary" onClick={() => downloadCsv(datedFilename('delete-results'), resultsToCsv(stage.rows))}>
+                <Button buttonType="secondary" onClick={() => downloadCsv(datedFilename('delete-results'), resultsToCsv(stage.rows))}>
                   Download the results
-                </button>
-                <button type="button" className="secondary" onClick={startOver}>
+                </Button>
+                <Button buttonType="secondary" onClick={startOver}>
                   Start again
-                </button>
+                </Button>
               </div>
             )}
           </div>
@@ -684,7 +679,7 @@ function DeleteFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOu
           )}
         </>
       )}
-    </main>
+    </>
   );
 }
 
@@ -726,12 +721,12 @@ function PlanView({
           {preview.seconds}s. Archived processes were not restored, so a real run may find more.
         </p>
         <div className="row">
-          <button type="button" className="secondary" onClick={() => downloadText(datedFilename('delete-plan', 'json'), serializePlan(plan), 'application/json')}>
+          <Button buttonType="secondary" onClick={() => downloadText(datedFilename('delete-plan', 'json'), serializePlan(plan), 'application/json')}>
             Download the plan
-          </button>
-          <button type="button" className="secondary" onClick={onBack}>
+          </Button>
+          <Button buttonType="secondary" onClick={onBack}>
             Change the selection
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -743,9 +738,9 @@ function PlanView({
               <li key={f.uniqueId}>{f.message}</li>
             ))}
           </ul>
-          <button type="button" onClick={() => onReplan(preview.include)}>
+          <Button onClick={() => onReplan(preview.include)}>
             Build the plan again
-          </button>
+          </Button>
         </div>
       )}
 
@@ -948,7 +943,7 @@ function RunPanel({ targetCount, disabled, reason, onRun }: { targetCount: numbe
       </p>
       {reason !== null && <p className="small">{reason}</p>}
       <label htmlFor="change">Change description, sent with every save, publish and archive</label>
-      <input id="change" type="text" value={changeDescription} onChange={(e) => setChangeDescription(e.target.value)} />
+      <Input id="change" value={changeDescription} onChange={(e) => setChangeDescription(valueOf(e))} />
       <label className="checkbox">
         <input type="checkbox" checked={approvalsEnabled} onChange={(e) => setApprovalsEnabled(e.target.checked)} />
         <span>
@@ -964,15 +959,14 @@ function RunPanel({ targetCount, disabled, reason, onRun }: { targetCount: numbe
         </span>
       </label>
       <label htmlFor="typed">Type DELETE to start</label>
-      <input id="typed" type="text" value={typed} onChange={(e) => setTyped(e.target.value)} />
+      <Input id="typed" value={typed} onChange={(e) => setTyped(valueOf(e))} />
       <div className="row">
-        <button
-          type="button"
+        <Button
           disabled={disabled || typed !== 'DELETE'}
           onClick={() => onRun({ approvalsEnabled, allowUnheldTargets, changeDescription })}
         >
           Run the delete ({targetCount} target{targetCount === 1 ? '' : 's'})
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -1010,9 +1004,9 @@ function QuestionPanel({ question, onAnswer }: { question: Question; onAnswer: (
           ))}
         </ul>
         <div className="row">
-          <button type="button" onClick={() => onAnswer(ticked)}>
+          <Button onClick={() => onAnswer(ticked)}>
             Carry on{ticked.length > 0 ? `, publishing ${ticked.length} draft(s)` : ', keeping their targets'}
-          </button>
+          </Button>
         </div>
       </div>
     );
@@ -1051,12 +1045,12 @@ function QuestionPanel({ question, onAnswer }: { question: Question; onAnswer: (
           </p>
         ))}
         <div className="row">
-          <button type="button" onClick={() => onAnswer(true)}>
+          <Button onClick={() => onAnswer(true)}>
             Accept and carry on (they are still put back at the end)
-          </button>
-          <button type="button" className="secondary" onClick={() => onAnswer(false)}>
+          </Button>
+          <Button buttonType="secondary" onClick={() => onAnswer(false)}>
             Stop and put things back
-          </button>
+          </Button>
         </div>
       </div>
     );
@@ -1066,12 +1060,12 @@ function QuestionPanel({ question, onAnswer }: { question: Question; onAnswer: (
       <h2>{question.title}</h2>
       <pre className="plan-text">{question.lines.join('\n')}</pre>
       <div className="row">
-        <button type="button" onClick={() => onAnswer(true)}>
+        <Button onClick={() => onAnswer(true)}>
           {question.yes}
-        </button>
-        <button type="button" className="secondary" onClick={() => onAnswer(false)}>
+        </Button>
+        <Button buttonType="secondary" onClick={() => onAnswer(false)}>
           {question.no}
-        </button>
+        </Button>
       </div>
     </div>
   );
