@@ -8,11 +8,10 @@ earlier task; don't start them.
 The R11 tasks for the PowerShell (old T1 and T2) are superseded. They're folded into W5.
 The PowerShell is frozen at v4.11: don't change it.
 
-## Next handover (19 Oct, later): W6
+## Next handover (30 Oct): F7
 
-F5 and F6 are merged and R14, the live re-run of the R13 cases, passed on 19 Oct (review
-under F6). W6 is Ready, with three small additions from R14 listed in it. One PR, then
-stop for review. Don't run anything against the tenant yourself.
+W6 passed live in R15 on 30 Oct (review under W6). F7 is three small UI items from that
+round. One PR, then stop for review. Don't run anything against the tenant yourself.
 
 ---
 
@@ -754,9 +753,52 @@ because archiving publishes the draft. The archived model never shows one, so th
 refuse-and-offer-a-tick branch for archived holders never fires. Leave it as a guard,
 but say so in its comment and test name.
 
+## F7. Small items from live round R15
+
+Status: Ready
+
+1. **The plan summary miscounts holders.** It says "2 process(es) to edit" when the Holders
+   panel shows 1 to be edited and 1 skipped for an open draft. Count only holders that
+   will be edited, or say "2 holders: 1 to edit, 1 skipped (open draft)".
+2. **The phase 2 heading reads as if rows are missing.** "Phase 2: deleted (9; 5 already
+   archived)" sits over a table of the 5 already archived. Title the table for what it
+   lists (for example "Phase 2: already archived, deleted (5)") and keep the overall count
+   in the summary line.
+3. **Say when a tenant call is being retried.** In R15 one tree read during cleanup hung
+   for about 60 seconds, then the tenant answered 500 ("Your request could not be
+   completed at this time"), and the retry succeeded. The page sat on "Deleting 2 of 2"
+   the whole time. Show a short "Process Manager is slow to answer, retrying" status
+   while a retry is pending, on every page that uses the shared progress line.
+
+**Done when:** offline tests cover the holder count with a skipped holder and the retry
+status appearing and clearing.
+
+---
+
 ## W6. Bulk Delete UI, and folder cleanup
 
-Status: Done (d10ec1b, 8338ee6, 6fb8676, 362ad0a)
+Status: Done (d10ec1b, 8338ee6, 6fb8676, 362ad0a). Live test R15 passed (30 Oct)
+
+### Cowork's review of W6 (R15, 30 Oct)
+
+Approved. Your decisions stand: cleanup candidates are checked groups a deleted target was
+in; a partial variation set is left out by default; the collateral gate is always on
+screen. R15 answered your live-test list:
+
+- **Delete by group:** the archived processes the listing places in a checked group were
+  exactly the ones expected, two levels below groups never expanded. A partly checked
+  parent still took in its own archived process; the unchecked subgroup's stayed out.
+- **The archived view:** the model check moved 26 of 191 `groupExists: false` rows. Cowork
+  read all 191 models and resolved each group by breadcrumb: the same 26 are live, the
+  other 165 are real orphans. The listing's flag is wrong on 14% of those rows, every
+  time, so the check is load-bearing.
+- **Cleanup after a delete:** documents check, fresh read and `DeleteGroup` all ran. Two
+  groups deleted deepest first, two kept with the kept-subgroup reason.
+- **Version reads on a refused active target:** not exercised. Nothing was refused.
+- **The collateral table and the variation panels:** not exercised. No collateral, and no
+  test variation set.
+- One transient 500 on a tree read (about 60 seconds, then retried successfully). Handled
+  correctly; the UI gap is F7 item 3.
 
 Both entry points (tree and archived view), delete-by-group target resolution, the
 collateral confirmation on screen, and the optional "delete now-empty groups" step,
