@@ -6,6 +6,136 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## W8d. Repair document references
+
+Commit `de9eab7` on `claude/w8d-repair-document-references`. Built on
+`claude/w8c-restore-documents` (PR #83), which is built on W8b (#82); merge those first.
+
+**The page.** `/documents/repair`, "Repair document references", last in the side nav's
+Documents section; its home tile is live. Nothing on it archives, deletes or restores.
+
+**The scan** comes first and only reads:
+1. Both document lists, giving every document id and GUID that exists.
+2. Both process lists, then:
+   - every active process's current model, through `scanProcessesForDocuments`, the same
+     walk and reads as the W8a and W8b plans;
+   - archived processes through the mobile batch read, 20 at a time.
+3. Breadcrumbs for the groups of the processes found.
+
+A reference is **dead** when neither its `DocumentId` nor its `DocumentUniqueId` matches
+a document in either list. So a reference to an archived document is not dead and isn't
+listed, as the spike showed such a process publishes normally.
+
+The page then shows:
+- **Each active process with a dead reference:** a box to repair it, its group path, and
+  its state ("published, version 2.0", "open draft 1.1 over version 1.0" or "draft 0.2,
+  never published"). Under it, each dead item as "Image 'Deleted diagram' in activity 1
+  (document 230)".
+- **An open draft** also gets an unticked "Publish the draft with the repair" box. Ticking
+  any shows the Delete page's warning about putting someone's unfinished changes live.
+- **Archived processes with dead references:** a separate collapsed list with no boxes,
+  and a note that repairing one means restore, edit, publish and re-archive, which this
+  page doesn't do.
+- **Processes that couldn't be read,** active or archived, so the operator knows the scan
+  is incomplete. Unlike W8a, they don't block anything: an unread process can't be
+  repaired anyway.
+
+**Repair,** one ticked process at a time (`repairProcess`):
+1. Re-read the model and both document lists straight before saving.
+2. Remove only items whose document is still missing. Each comes out of its array by the
+   key path the walk recorded, and nothing else is touched (`removeReferences`, on a
+   copy). A scanned reference whose document is back is left alone and named in the row.
+   With nothing left dead, nothing is saved (Skipped).
+3. Save through the Delete engine's `saveProcessModel`, which uses W4's `chooseWritePath`
+   and sends the change description as the publish message:
+   - **Published:** saved and published.
+   - **Open draft, unticked:** saved into the draft, not published: "Saved into the open
+     draft; publish it in Process Manager when the draft's owner is ready".
+   - **Open draft, ticked:** saved and published, with the draft's other changes.
+   - **Never published:** saved only.
+   - **Awaiting approval:** Skipped, since the page never overrides a pending approval.
+4. Read it back. If any dead reference is left, the row is `Failed`. If the read-back
+   fails, `Unverified`.
+
+**Results.** One row per ticked process: `ObjectType` `Process`, operation
+`RepairDocumentReference`. Each says how many items were removed (each named), the
+version saved, and whether it was published, e.g. "Removed 1 dead reference (Image
+'Deleted diagram' in activity 1 (document 230)). Saved and published as version 3.0."
+The change description defaults to "Removed references to deleted documents" and can be
+edited on the page.
+
+**Functions touched.**
+- New `documents/repair.ts`:
+  - finding: `existingDocuments`, `isDead`, `deadReferencesIn`, `scanForDeadReferences`;
+  - wording: `describeReference`, `stateText`;
+  - repairing: `removeReferences`, `repairProcess`.
+- `documents/references.ts`:
+  - `DocumentReference` gains `activity`: the activity's `Number` field if the model has
+    one, otherwise its position from 1. Not measured; see R16.
+  - `ReferencingProcess` gains `version` and `revisionStateId`.
+- `delete/executor.ts`: `SaveModelOptions.saveIntoOpenDraft`, which passes
+  `openDraft: 'save-only'` to `chooseWritePath`. It's off by default, and Bulk Delete
+  never sets it, so the process pages behave as before.
+- The page, `AppShell`, the home page.
+
+**Tests.** 634 tests, all pass, none skipped (627 before). Typecheck and build clean.
+- `documents/repair.test.ts`, 7 tests:
+  - a dead reference found in a published process and in a draft;
+  - a reference to an archived document not counted;
+  - the activity number, and the state wording;
+  - the scan: an archived process reported but not offered, archived reads in batches of
+    20, unread processes;
+  - the removal touching nothing else;
+  - a published process saved and published, and read back clean;
+  - the draft default (saved, not published) and the tick (published);
+  - a document that reappears between the scan and the save (left alone, and nothing
+    saved when nothing is left);
+  - awaiting approval skipped;
+  - a read-back that still has a dead reference is Failed.
+- Fixtures in `archive.test.ts` and `delete.test.ts` gain the two new scan fields.
+- **New driver `dev/drive-docs-repair.mjs`, 20 checks, all pass against the mock.**
+  - The scan writes nothing.
+  - It lists three active processes (published, open draft, and one with a document that
+    comes back), reports the archived one with no box, and doesn't list a reference to an
+    archived document.
+  - The repair saves three processes and publishes two, never the open draft.
+  - The saved model loses only the dead item, keeps the process link and the reappeared
+    form, and carries the default description.
+  - A second scan finds nothing active left.
+- **The mock** gains dead references in Outright, Needs approval, Elsewhere and Archived
+  input, and a document that is missing from the first two list reads and present after.
+  Every driver was re-run on a fresh mock. The process drivers' output is the same as
+  before this change, apart from timestamps and saved model bodies.
+
+**Deferred, or for you to decide.**
+- **Unread processes don't block the repair.** They're listed with their error.
+- **The activity number** is a guess at the field name, with position as the fallback.
+- **Both document lists are re-read per process,** as the brief says: two list calls per
+  repaired process, fine for the handful expected.
+- **A full run isn't journalled.** Each process is one save and read-back, and its row
+  says what happened. A run that dies keeps the rows it has, and "Scan again" finds
+  whatever is left.
+
+**For R16.**
+- **The one broken process on the demo tenant** (a variation whose open draft points at a
+  deleted image):
+  - the scan should list it as an open draft;
+  - repair it unticked: it should be saved into the draft, not published, and a re-scan
+    should no longer list it;
+  - publishing it in Process Manager should then work.
+- **The activity number** in each dead item's description. Compare it with the process
+  map.
+- **A published ZZ process** pointing at a ZZ document deleted for the test (attach it
+  only in a draft, delete it with Delete documents, then publish the draft in Process
+  Manager and watch it fail). Repair it: it should be published, and archiving it should
+  then work.
+- **A reference to an archived ZZ document** should not be listed.
+- **An archived ZZ process** with a dead reference should be listed under archived, with
+  no box.
+- **Timing** of the scan: about 186 active model reads plus the archived batches.
+
+---
+
 ## W8c. Restore documents
 
 Commit `f21ba94` on `claude/w8c-restore-documents`. PR #82 (W8b) wasn't merged when I
