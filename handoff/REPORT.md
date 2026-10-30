@@ -6,6 +6,113 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## W6 follow-up. Closing the gaps against the W6 brief
+
+Commit `362ad0a` on `claude/web-w6-delete-ui`. The full W6 brief was more detailed than
+the TASKS entry the first three commits were built from. It differed in two places and
+added four things. This commit brings the branch in line with the brief. The engine is
+unchanged.
+
+**Reversed from the first commits, as the brief says:**
+- **Cleanup after a delete is W2b as it is.** `planCleanup` loses the `archivedProcesses:
+  'keep'` option, and `CleanupPanel` loses the prop. A group still holding archived
+  processes (targets held back, for example) is offered, and the warning names each
+  process it would orphan. A document still keeps a group, with W2b's reason text.
+- **A variation set is deleted whole or not at all.** `applyVariationSets` leaves out
+  every selected member of a set that is only partly selected, with a `Select`
+  `Skipped` row naming the missing siblings. The plan shows each set with every member
+  named. Ticking a set rebuilds the plan with the missing members added as targets
+  (source "Its variation set ticked in whole"). The old "I have reviewed the variation
+  warnings" tick now gates only name-match masters and unread sets.
+
+**Added:**
+- **The archived view confirms each `groupExists: false` row** (`confirmArchivedOrphans`
+  in `groups.ts`). It reads archived models in batches of 20, then runs the F6
+  `confirmOrphan` check. A row whose model names a group the tree has moves to that
+  group, under its real breadcrumb path, with a `GroupCheck` `Warning` row
+  (`groupDisagreementRow`). The page lists these corrections. If the process becomes a
+  target, the row goes in the results file. A row whose group couldn't be looked up
+  stays in the orphan bucket and is counted on the page. `resolveDeleteSelection` takes
+  the corrections, so a checked group also takes in a corrected process.
+- **Revalidation before the run** (`deletePlacements`, then `revalidatePlacements`): each
+  checked group in its parent and each tree target in its group, as Archive and Move
+  do. Stale findings show on the plan with "Build the plan again".
+- **Holders in the preview** (`previewHolders`): holders to be edited (with site counts),
+  holders to be skipped for an open draft (unticked, as the run's own question starts),
+  and the targets they hold back, each with its holder named.
+- **The collateral gate is always on screen.** The "Accept collateral changes in advance"
+  checkbox is gone, and the page always passes `acceptCollateral: false`. Every
+  collateral checkpoint, and the variation pre-flight, now asks on screen with the table
+  that names each process.
+- **Never the holding group in cleanup:** `groupsTheRunDeletedFrom` takes the plan's
+  holding group id and drops it from the offer.
+- The phase tables are titled "Phase 1: archived, then deleted in phase 2" and "Phase 2:
+  deleted".
+
+**Functions touched.**
+- `delete/selection.ts`:
+  - new: `applyVariationSets`, `previewHolders`, `deletePlacements`, `corrected`;
+  - changed: `resolveDeleteSelection` (`corrections`), `groupsTheRunDeletedFrom` (holding
+    group);
+  - new source kind `variation`.
+- `delete/groups.ts`: new `confirmArchivedOrphans`.
+- `cleanup/plan.ts`: `CleanupPlanOptions` removed.
+- `app/components/CleanupPanel.tsx`: `archivedProcesses` prop removed.
+- `app/delete/page.tsx`.
+
+**Results-file operations.**
+- No new operation names.
+- `Select` `Skipped` rows now also cover variations left out.
+- `GroupCheck` `Warning` rows now come from the archived view too.
+- With the 'keep' option gone, cleanup after a delete can write `GroupDeleted` `Orphaned`
+  rows (W2b's).
+
+**Tests.** 570 tests, all pass, none skipped (562 before). Typecheck and build are clean.
+`pwsh` is not installed on this machine, so `Tests/Run-AllTests.ps1` was not run. The
+PowerShell is untouched.
+- `selection.test.ts`, +9:
+  - a group checked in a partly expanded tree takes in the unopened levels, active and
+    archived;
+  - shortcuts and document groups can't be ticked and never become targets;
+  - the model check corrects a false `groupExists: false` (its bucket, path, row, and
+    being taken in by group) and leaves a real orphan alone;
+  - a partial set is left out by default;
+  - a ticked set comes in whole, and a whole set needs no tick;
+  - the holder preview;
+  - revalidation placements;
+  - no holding group in cleanup.
+- `cleanup.test.ts`: the 'keep' test is replaced by a nested one. It checks that an
+  emptied group is deleted, a group with a document is kept, a group with a held-back
+  archived process is offered with it named, and the parent is kept for its kept
+  subgroup.
+- The `Archive`-then-`Delete` rows and the refused-delete wording are covered by the
+  existing `deletion.test.ts` and `orchestrator.test.ts` tests from `d10ec1b`.
+
+**Offline drive.** All ten drivers pass against the mock: the six delete drivers, plus
+archive, move, ownership and expired. `drive-delete-group`:
+- shows the two phase tables and the Holders panel;
+- writes `Archive`, then `Delete`, for the active target;
+- deletes Finance / Retired through cleanup, with a `DeleteGroup` row.
+
+The new variation and orphan panels don't appear in a drive, because the mock has no
+variation sets and no `groupExists: false` rows. They are covered by unit tests.
+
+**For Cowork's live test, on top of the list under W6:**
+1. The archived view on the demo tenant: how many `groupExists: false` rows the model
+   check moves, and that each one's group really is in the tree.
+2. A partly selected variation set: left out with its row; ticked, it is deleted whole.
+   Watch the master's state after the delete, since that is the R3 risk.
+
+**Where I'd question the brief.** The variation default is right while the post-delete
+collateral checkpoint is unproven live. Once a live round has seen it fire, warning
+instead of excluding would be friendlier. I've kept the brief's default.
+
+**Superseded decisions from the W6 section below:** "after a delete, a group holding an
+archived process is kept" and "the variation review is required before the run" no
+longer hold. The other three stand.
+
+---
+
 ## W6. Bulk Delete UI, and folder cleanup
 
 Commits on `claude/web-w6-delete-ui`, cut from Cowork's R14 handoff commit (`4b40304`),
