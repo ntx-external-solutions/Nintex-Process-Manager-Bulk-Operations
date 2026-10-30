@@ -72,7 +72,16 @@ Maintained by the Cowork session. Claude Code reads this but does not edit it.
   corrected, each verified by breadcrumb). Three small UI items in F7. All content
   removed; tenant back to 13 top-level groups, 186 active, 463 archived, every
   pre-existing id present.
-- Next: F7 is Ready. Variations are still untested live (see below).
+- F7 (R15 UI items) and W7 (Archive by id or CSV, shared with Delete) done and merged
+  (30 Oct, PRs #78 and #79).
+- Documents spike (30 Oct): archive, restore and delete measured on `ZZ` content; results
+  in `API_ARCHITECTURE.md`. Headlines: the API archives a document attached to a process
+  (the UI refuses), refuses to delete one (`ProcessAttachment`), but misses draft-only
+  references, and deleting a document a draft points at breaks that process. One process on
+  the demo tenant is already broken that way. JB decided: attached documents (processes or
+  training units) are never archived or deleted; documents get their own area, with restore
+  and a repair tool for dead references added to W8.
+- Next: W8 (documents) is Ready. Variations are still untested live (see below).
 - Token duration (60000 minutes) deferred by JB; not a task.
 - Process and group names were removed from Cowork's handoff text (18 Oct) per CLAUDE.md.
 - Spikes S1 to S3 and the variation test are in `API_ARCHITECTURE.md`. One lasting change

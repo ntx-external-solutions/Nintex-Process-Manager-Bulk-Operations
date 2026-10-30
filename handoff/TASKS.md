@@ -8,10 +8,13 @@ earlier task; don't start them.
 The R11 tasks for the PowerShell (old T1 and T2) are superseded. They're folded into W5.
 The PowerShell is frozen at v4.11: don't change it.
 
-## Next handover (30 Oct): F7
+## Next handover (30 Oct, later): W8
 
-W6 passed live in R15 on 30 Oct (review under W6). F7 is three small UI items from that
-round. One PR, then stop for review. Don't run anything against the tenant yourself.
+F7 and W7 are merged. W8 adds documents as their own area: archive, delete and restore
+documents, and a tool that repairs processes pointing at deleted documents. Read the
+documents spike in `API_ARCHITECTURE.md` ("Documents spike, 30 Oct 2026") first. Four PRs,
+in order: W8a archive, W8b delete, W8c restore, W8d repair. Stop for review after each.
+Don't run anything against the tenant yourself.
 
 ---
 
@@ -752,6 +755,211 @@ every row.
 because archiving publishes the draft. The archived model never shows one, so the
 refuse-and-offer-a-tick branch for archived holders never fires. Leave it as a guard,
 but say so in its comment and test name.
+
+## W8. Documents: archive, delete, restore, and repair broken references
+
+Status: Ready
+
+Everything so far acts on processes. Operators also need to archive and delete
+documents. The spike (`API_ARCHITECTURE.md`, "Documents spike, 30 Oct 2026") measured the
+endpoints and what the tenant does and doesn't guard.
+
+### Decisions (JB, 30 Oct)
+
+1. **A document that is attached to anything is never archived or deleted by this app,**
+   even though the API would archive it. Attached means any of:
+   - listed in `attachedProcesses` from `GET .../documents/{id}/properties`, active or
+     archived holder;
+   - listed in `attachedTrainings` (training units are treated like processes);
+   - referenced in the current model of an active process, including an unpublished draft.
+     The tenant doesn't report draft-only references, and deleting a document a draft
+     points at leaves that process unable to publish or archive ("Could not find Form:
+     <name>"). So this one has to be found by reading the processes (below).
+
+   There is no holder editing for documents: no reference removal, no Hold. An attached
+   document is `Skipped`, and its row names what holds it.
+2. **Separate areas.** A Documents section in the side nav with four pages: "Archive
+   documents", "Delete documents", "Restore documents" and "Repair document references",
+   next to the process pages. They share components with the process pages
+   where that's natural, but the process pages don't change.
+3. **Training units count as attachments** (decision 1).
+
+Cowork's defaults for what JB didn't decide, which you can question in the report:
+- **A checked group means documents whose primary group is in the checked subtree.** The
+  list endpoint's `ProcessGroupId` filter is recursive and also returns documents only
+  *associated* with a group. Show those in their own list, unticked, labelled with their
+  primary group. Ticking one acts on the document everywhere, not just in this group.
+- **A pending document is skipped** (`isPending: true`, 13 on the demo tenant; approvals are
+  off there so we can't see what it means). Skip it with "Pending in Process Manager".
+
+### W8a. Archive documents (`/documents/archive`)
+
+**Choosing.** Three ways in that add up, each document once, as on the process pages:
+- **From the tree:** groups only (the tree browser with processes hidden, or a group-only
+  mode of it). A checked group resolves as above.
+- **From the document list:** active documents, read once with
+  `ListType=All&PageSize=500` (paginate), searchable by name, with group path, type and
+  location (Cloud, External link, Network) shown.
+- **By id or CSV:** the shared `ProcessIdInput` parser, resolving a GUID against
+  `documentUniqueId` and a number against `documentId`. `DocumentID`/`DocumentId` are
+  already accepted columns; a results file from these pages must work as input. On these
+  pages a number is a document id, never a process id; say so beside the box.
+
+**Planning (dry run).**
+1. Read `properties` for every selected document (one GET each, with progress, a few in
+   parallel). Archived already: `Skipped`, "Already archived". Pending: `Skipped`.
+2. Read the current model of every active process, once per run, and collect every
+   `DocumentId`/`DocumentUniqueId` anywhere under `ProcessProcedures` (walk all of it, as
+   the reference finders do; attachments sit in
+   `Activity[].ChildProcessProcedures.<Type>[]`, but don't hard-code the path). Reuse the
+   existing active-model reads and their batching. This is mandatory, not an option:
+   about 186 reads on the demo tenant. Show progress.
+3. Build the plan: documents to archive; documents skipped, each with its reason and holders
+   by name ("Attached to 2 processes: A (archived), B", "Used by training unit C",
+   "In the unpublished draft of D").
+
+**Running.** In batches of up to 50, and for each batch:
+- Re-read `properties` for each document straight before the call, and drop any that has
+  picked up an attachment since the plan (`Skipped`, with the new holder). Don't re-run
+  the full process scan per batch; once per run is the cost we accept. Say on the plan
+  page that a draft reference added mid-run isn't caught.
+- `POST .../documents/bulk/archive` with the batch's `documentId`s. **The answer is 200 even
+  when items fail.** Read every `errors` entry (`NotFound` and anything else), and give that
+  document a `Failed` row with the code.
+- Finish with a fresh list read, and take each document's final state from it, as the
+  process pages do.
+
+**Results file.** Same columns as the process pages. `ObjectType` `Document`, `ObjectID` the
+`documentUniqueId`, `GroupId` the primary group's numeric id. Operations: `Archive`
+(`Success`, `Skipped`, `Failed`). Put the numeric `documentId` in the message only if you
+need it for anything; a results file fed back in resolves by GUID.
+
+No folder cleanup on this page: an archived document still blocks deleting its groups
+(409, spike), so archiving documents never empties a group.
+
+### W8b. Delete documents (`/documents/delete`)
+
+Same choosing as W8a, plus:
+- **From the archived list:** archived documents (`ListType=Archived`), bucketed by primary
+  group path.
+- Active documents can be chosen; they're archived first, then deleted (the tenant refuses
+  to delete an active document, `NotArchived`). Show the two phases in the plan, as the
+  process Delete page does.
+
+**Planning:** the same three steps as W8a. An attached document is never archived or
+deleted.
+
+**Running:**
+1. Archive the active targets, exactly as W8a runs (re-check, then archive in batches, then
+   read `errors`). A target that fails to archive isn't deleted.
+2. Final confirmation on screen naming every document to be permanently deleted and every
+   one skipped with its reason. Typed `DELETE`, as on the process Delete page.
+3. Delete in batches of up to 50: re-read `properties` for the batch, drop anything now
+   attached, then `DELETE .../documents/bulk`. Read every `errors` entry.
+   `ProcessAttachment` is `Skipped` ("Process Manager refused: still attached"), not
+   `Failed`. That should only happen if something changed mid-run.
+4. A document this run archived and then didn't delete (skipped, refused or failed) is
+   put back with `POST .../documents/bulk/restore` and gets a `Restore` row. The run
+   leaves no document archived that it found active, as the process engine does.
+5. Fresh read at the end; final state from it.
+
+**Results file:** as W8a, plus `Archive`, `Delete` and `Restore` operations.
+
+**Folder cleanup afterwards:** offer the shared `CleanupPanel` for checked groups only (as
+W6/W7 decided), deepest first, after a completed run. Its documents check already reads both
+lists. A document only associated with a group still blocks that group (409, spike), so it
+must count in the check.
+
+### Both pages
+
+- **The allowlist** gains: document list (both list types), `properties`, `bulk/archive`,
+  `bulk/restore`, `DELETE bulk`. Each write takes at most 50 numeric ids, never a free path.
+  There's no create or upload; the app never makes documents. W8d uses the process reads
+  and writes that are already allowlisted.
+- **Bearer token:** the spike was measured with the browser session. The proxy sends a
+  bearer token. Don't add an anti-forgery token speculatively; R16 checks it live, and if
+  an endpoint refuses the bearer token that comes back as a fix.
+- **Wording:** "documents" and "processes" are kept apart everywhere, so a results file or
+  page never leaves the operator guessing which one a row is about.
+
+### W8c. Restore documents (`/documents/restore`)
+
+Archived documents back to active. Process Manager has the call already
+(`POST .../documents/bulk/restore`) and it was measured in the spike: the document returns
+to its primary group with its associations.
+
+- **Choosing:** from the archived list (bucketed by primary group path, as on W8b) and by id
+  or CSV. A W8b results file fed back in must work, so an operator can undo a delete run's
+  archive step if it stopped early.
+- **Planning:** read `properties` for each. Not archived: `Skipped`, "Not archived". Primary
+  group missing from the tree: `Skipped`, "Its group no longer exists" (shouldn't happen,
+  since an archived document blocks its group's deletion, but don't send a restore into
+  nowhere).
+- **Running:** batches of up to 50, read every `errors` entry, fresh read at the end.
+  `Restore` rows.
+- Attachments don't matter here; restoring is always safe.
+
+### W8d. Repair document references (`/documents/repair`)
+
+Finds processes that point at a document that no longer exists, and removes those dead
+references so the process can be published and archived again. The spike reproduced the
+breakage (publish 500 and archive 400, "Could not find Form: <name>") and showed the repair
+(remove the item, save, publish). One active process on the demo tenant is broken this way
+today.
+
+**Scan (read only, the page's first step):**
+- Read both document lists (active and archived) to get every document id that exists.
+- Read the current model of every active process (the same walker and reads as W8a's
+  attachment scan; share the code). Every item whose `DocumentId` and `DocumentUniqueId`
+  match no existing document is a dead reference.
+- Also read archived processes in batches of 20 (the mobile batch read) and report their dead
+  references, **read only**. Repairing an archived process means restore, edit, publish and
+  re-archive, and that's out of scope here. Say so beside them.
+- Show one row per process: group path, version and state (published, or open draft over
+  version N), and each dead item (its text, type, activity number, and the missing id).
+  Processes with references to archived documents are not broken and are not listed.
+
+**Repair (per ticked process):**
+- Re-read the model and both document lists straight before saving, and only remove items
+  whose document is still missing. Remove the item from its array; touch nothing else.
+- **No open draft** (the dead reference is in the published version): save and publish, using
+  W4's `chooseWritePath`, with the run's change description as the publish message.
+- **Open draft:** someone's unfinished work. Default: save the removal into the draft and
+  don't publish, and say "Saved into the open draft; publish it in Process Manager when the
+  draft's owner is ready". A tick per process, unticked, publishes the draft with the repair,
+  with the same warning the Delete page uses for draft holders.
+- Read the process back afterwards and confirm no dead reference is left.
+- Results: `ObjectType` `Process`, operation `RepairDocumentReference`, one row per process,
+  saying how many items were removed, the version saved, and whether it was published.
+
+Nothing on this page archives, deletes or restores anything.
+
+### Done when
+
+Offline tests cover:
+- resolution: primary-in-subtree vs associated-only, GUID vs numeric, already archived,
+  pending, not found;
+- every attachment source skipping a document (active holder, archived holder, training
+  unit, draft-only reference found by the scan);
+- the mid-run re-check dropping a document that became attached;
+- `errors` entries in a 200 (`NotFound`, `NotArchived`, `ProcessAttachment`) as rows;
+- delete putting back a document it archived but didn't delete;
+- cleanup counting an associated-only archived document;
+- restore: not archived, missing group, `errors` entries;
+- repair: a dead reference found in a published process and in a draft, a reference to an
+  archived document not counted as dead, a document that reappears between scan and save
+  (left alone), the draft default (saved, not published) and the tick (published), and an
+  archived process reported but not offered.
+
+The mock tenant learns documents with these behaviours. Add drivers `drive-docs-archive`,
+`drive-docs-delete`, `drive-docs-restore` and `drive-docs-repair`.
+
+### Report back
+
+The usual `REPORT.md` section per PR, and an R16 test list for Cowork. R16 will also check
+the bearer token on each document endpoint.
+
+---
 
 ## W7. Pick processes by id or CSV in Bulk Archive, shared with Bulk Delete
 

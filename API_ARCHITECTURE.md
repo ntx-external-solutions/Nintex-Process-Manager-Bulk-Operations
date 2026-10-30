@@ -1217,7 +1217,12 @@ tenant. Pattern 1 gets the same candidate set in one call per target.
 
 ---
 
-## Document APIs (DEFERRED)
+## Document APIs
+
+> Measured in full in "Documents spike, 30 Oct 2026" at the end of this file. The
+> sections below are the script-era notes and are still correct.
+
+### Script-era notes
 
 > **Scope note.** Document operations are out of scope for the current refactor. The
 > endpoints below are retained as reference for when document support is layered back
@@ -1579,4 +1584,81 @@ mismatches are the dependency API over-claiming:
   sends.
 - **`RestoreProcess` on an active process** answers 500 "Process cannot be restored as it
   is not archived". That's the run's relocation probe, and the run handles it as expected.
+
+## Documents spike, 30 Oct 2026
+
+Measured on the demo tenant from a signed-in browser session (cookie plus the page's
+`__RequestVerificationToken`), on test content created for the spike and removed after.
+Not yet measured with the bearer token the app's proxy sends.
+
+### The tenant's documents
+
+- 208 documents: 195 uploaded (`documentLocationType: "Cloud"`), 12 external links
+  (`"External"`), 1 archived. Network-file links are a third type; none on this tenant.
+- 129 of the 207 active documents are attached to at least one process (159 attachments).
+  Many holders are archived processes. 67 are associated with more than one group. 3 are
+  used by a training unit.
+- Document approvals are off (`/bff/document/api/v1/configuration`,
+  `enableDocumentApprovals: false`), yet 13 documents have `isPending: true`. Not explained.
+- 158 of 186 active processes have an open draft.
+
+### Endpoints
+
+| What | Call | Answer |
+|---|---|---|
+| List | `GET /bff/document/api/v1/documents?Page&PageSize&ListType=All\|Archived&DocumentType=All[&ProcessGroupId=<uuid>]` | `{items, totalItemCount}`. PageSize 500 returned all 207 in one page. `All` excludes archived. Other `ListType` values seen: `Favourites`, `0` to `3`. |
+| One document | `GET .../documents/{id}/properties` | `primaryProcessGroupId`, `associatedGroups` (`{key: name, value: numeric id}`), `implicitlyAssociatedGroups`, `attachedProcesses` (`processName`, `processUniqueId`), `attachedTrainings`, `isArchived`, `documentLocationType`, `documentPath` |
+| Archive one | `POST .../documents/{id}/archive`, no body | 204; 404 for an unknown id |
+| Archive many | `POST .../documents/bulk/archive` `{"documentIds":[...]}` | 200 `{"errors":[...]}` |
+| Restore many | `POST .../documents/bulk/restore` `{"documentIds":[...]}` | 200 `{"errors":[]}`. Back to its primary group with its associations. |
+| Delete many | `DELETE .../documents/bulk` `{"documentIds":[...]}` | 200 `{"errors":[{"documentId","errorCode"}]}` |
+| Create a link | `POST .../documents/link`, form `DocumentName, DocumentType, GroupId, NetworkPath, Url, FileLocationType, ReferenceNumber` | the new document |
+| Upload | `POST .../documents/upload`, multipart with `File`, `DocumentType`, `GroupId` | the new document |
+| Save properties | `POST .../documents/{id}/properties`, form incl. `PrimaryProcessGroupId`, `GroupList={"selected":[ids]}` | 204 |
+
+**The bulk calls answer 200 when items fail.** Each failure is an entry in `errors`.
+Codes seen: `NotArchived` (delete of an active document), `NotFound`, `ProcessAttachment`.
+
+### How processes hold documents
+
+An item in `Activity[].ChildProcessProcedures.<Type>[]` with `DocumentId` (numeric) and
+`DocumentUniqueId`. Types seen with their `ProcessProcedureType`: `Information` 5, `Form` 3,
+`Image` 11, `Policy` 15, `Video` 17 (also `Guide`, `Training`). `DocumentLocationTypeId` was
+0 or 4 on real items. Removing the item and publishing removes the attachment.
+
+### What the tenant guards
+
+| Case | Archive the document | Delete the document |
+|---|---|---|
+| Attached to a published process | **Allowed (204)**, though the UI refuses ("This document cannot be archived while it is still attached to processes") | Refused, `ProcessAttachment` |
+| Attachment removed in a draft only | n/a | Refused, `ProcessAttachment` |
+| Removal published | n/a | Deleted |
+| Attached to an archived process | Allowed | Refused, `ProcessAttachment` |
+| Holder deleted | n/a | Deleted |
+| **Attached only in an unpublished draft** | Allowed | **Deleted.** `attachedProcesses` doesn't list draft-only references |
+
+**A deleted document in a draft breaks the process.** Afterwards, publishing the holder
+answered 500 "Publish Failed: Publishing Failed: Could not find Form: <name>" and archiving
+it answered 400 "Archive Failed: Could not find Form: <name>". Removing the dangling item,
+saving and publishing repaired it. One active process on the demo tenant is already in this
+state (a variation with an open draft pointing at a deleted image). This is the "linked
+document that had already been deleted" failure in the archive notes above.
+
+An archived document doesn't break its holder: a process pointing at an archived document
+saved and published normally.
+
+### Groups
+
+- **`ProcessGroupId` is recursive.** It returns the subgroups' documents too; the root
+  returns everything. The product's own document page lists them the same way.
+- **It includes associated groups.** A document with primary group A, associated with B, is
+  listed under B.
+- **An archived document blocks deleting every group it's associated with,** primary or
+  not: `DeleteGroup` answers 409 `AssociatedContents`, naming it "(archived)".
+
+### Not measured
+
+- Whether a training unit's use of a document blocks its delete.
+- Any of the document endpoints with a bearer token.
+- What `isPending` means with approvals off.
 
