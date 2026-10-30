@@ -758,7 +758,7 @@ but say so in its comment and test name.
 
 ## W8. Documents: archive, delete, restore, and repair broken references
 
-Status: W8a Done (619309a); W8b Done (68864e9); W8c and W8d Ready
+Status: W8a Done (619309a); W8b Done (68864e9); W8c Done (f21ba94); W8d Ready
 
 Everything so far acts on processes. Operators also need to archive and delete
 documents. The spike (`API_ARCHITECTURE.md`, "Documents spike, 30 Oct 2026") measured the

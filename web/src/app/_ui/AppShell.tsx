@@ -7,7 +7,7 @@
  */
 
 import { ActionHeader, Breadcrumbs, Header, MainNav, PageLayout } from '@exp-textura/react';
-import { Archive, ArchiveBoxSolid, Delete, Documents, DocumentsSolid, FolderOpen, Home, HomeSolid, Users } from '@exp-textura/icons';
+import { Archive, ArchiveBoxSolid, Delete, Documents, DocumentsSolid, FolderOpen, Home, HomeSolid, Undo, Users } from '@exp-textura/icons';
 import { NintexLogo, NintexLogoSquare } from '@exp-textura/icons/brand';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
@@ -139,6 +139,9 @@ function Sidebar() {
         </MainNav.Item>
         <MainNav.Item asChild isCurrent={isSection('/documents/delete')} icon={<Delete />}>
           <Link href="/documents/delete">Delete documents</Link>
+        </MainNav.Item>
+        <MainNav.Item asChild isCurrent={isSection('/documents/restore')} icon={<Undo />}>
+          <Link href="/documents/restore">Restore documents</Link>
         </MainNav.Item>
       </MainNav.Content>
     </MainNav>

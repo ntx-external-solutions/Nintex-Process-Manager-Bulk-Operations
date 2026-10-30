@@ -70,25 +70,64 @@ export interface CsvTargets {
   noIdLines: number[];
   /** A name column, when the file has one and no id column, so the note can say why it is not used. */
   nameColumn: string | null;
+  /** Documents a results file names that `onlyArchivedByRun` left out. */
+  resultsLeftOut: number;
+}
+
+/** Who the box is for: processes, documents, or documents to restore (W8c). */
+export type IdKind = 'process' | 'document' | 'restore';
+
+const header = (headers: readonly string[], name: string) => headers.find((h) => h.toLowerCase() === name.toLowerCase());
+
+/**
+ * From a results file of Archive or Delete documents, the documents its run archived and
+ * left archived: an `Archive` `Success` row, and no `Delete` or `Restore` `Success` row
+ * (W8c). Fed to Restore documents, that undoes the run's archiving and nothing else: a
+ * Delete run's file also names documents that were archived before it, which a restore of
+ * every id would bring back. Null when the file is not a results file.
+ */
+function archivedByRun(headers: readonly string[], rows: ReadonlyArray<Record<string, string>>): Set<string> | null {
+  const operation = header(headers, 'Operation');
+  const status = header(headers, 'Status');
+  if (operation === undefined || status === undefined) return null;
+  const archived = new Set<string>();
+  const undone = new Set<string>();
+  for (const row of rows) {
+    const id = idFromCsvRow(row)?.toLowerCase();
+    if (id === undefined || (row[status] ?? '').trim() !== 'Success') continue;
+    const op = (row[operation] ?? '').trim();
+    if (op === 'Archive') archived.add(id);
+    else if (op === 'Delete' || op === 'Restore') undone.add(id);
+  }
+  return new Set([...archived].filter((id) => !undone.has(id)));
 }
 
 /** A target file read the way the script reads one. Port of the CSV branch of `Invoke-BulkDeleteProcesses`. */
-export function targetsFromCsv(text: string): CsvTargets {
-  const [header, ...body] = parseCsvLines(text);
-  const headers = (header?.cells ?? []).map((h) => h.trim());
+export function targetsFromCsv(text: string, options: { onlyArchivedByRun?: boolean } = {}): CsvTargets {
+  const [first, ...body] = parseCsvLines(text);
+  const headers = (first?.cells ?? []).map((h) => h.trim());
   const rows = body.filter((r) => !isBlankRow(r.cells));
-  const ids: string[] = [];
-  const seen = new Set<string>();
-  const noIdLines: number[] = [];
-  let duplicates = 0;
-  for (const { cells, line } of rows) {
+  const records = rows.map(({ cells, line }) => {
     const row: Record<string, string> = {};
     headers.forEach((h, i) => {
       if (!(h in row)) row[h] = cells[i] ?? '';
     });
+    return { row, line };
+  });
+  const keep = options.onlyArchivedByRun ? archivedByRun(headers, records.map((r) => r.row)) : null;
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  const leftOut = new Set<string>();
+  const noIdLines: number[] = [];
+  let duplicates = 0;
+  for (const { row, line } of records) {
     const id = idFromCsvRow(row);
     if (id === null) {
       noIdLines.push(line);
+      continue;
+    }
+    if (keep !== null && !keep.has(id.toLowerCase())) {
+      leftOut.add(id.toLowerCase());
       continue;
     }
     if (seen.has(id.toLowerCase())) {
@@ -107,6 +146,7 @@ export function targetsFromCsv(text: string): CsvTargets {
     duplicates,
     noIdLines: idColumnMissing ? [] : noIdLines,
     nameColumn: idColumnMissing ? (headers.find((h) => NAME_COLUMNS.some((n) => n.toLowerCase() === h.toLowerCase())) ?? null) : null,
+    resultsLeftOut: leftOut.size,
   };
 }
 
@@ -115,24 +155,32 @@ function isIdHeader(header: string): boolean {
 }
 
 /** What the page says after reading a file. Uploading replaces the box, and the note says so. */
-export function csvReadNote(fileName: string, read: CsvTargets, kind: 'process' | 'document' = 'process'): string {
+export function csvReadNote(fileName: string, read: CsvTargets, kind: IdKind = 'process'): string {
   if (read.rowCount === 0) return `${fileName}: no rows to read. Nothing was put in the box.`;
+  const leftOut =
+    read.resultsLeftOut > 0
+      ? `${read.resultsLeftOut} document(s) left out: from a results file, only documents its run archived and did not delete or put back are taken`
+      : null;
+  if (read.ids.length === 0 && leftOut !== null) {
+    return `${fileName}: a results file in which no document was archived by its run and left archived. Nothing was put in the box.`;
+  }
   if (read.ids.length === 0 && !read.idColumnMissing) {
     return `${fileName}: read ${read.rowCount} row(s), and none had an id (${linesText(read.noIdLines)}). Nothing was put in the box.`;
   }
   if (read.idColumnMissing) {
     const why = read.nameColumn
-      ? `It has a name column (${read.nameColumn}), but ${kind === 'document' ? 'documents' : 'processes'} are picked by id only: names are not unique.`
+      ? `It has a name column (${read.nameColumn}), but ${kind === 'process' ? 'processes' : 'documents'} are picked by id only: names are not unique.`
       : `Columns in the file: ${read.headers.join(', ')}.`;
     return (
       `${fileName}: read ${read.rowCount} row(s) but found no id column. ${why} ` +
-      `A results file from this app has the ids in ObjectID, or download the template and fill in ${kind === 'document' ? 'DocumentID' : 'ProcessID'}. ` +
+      `A results file from this app has the ids in ObjectID, or download the template and fill in ${kind === 'process' ? 'ProcessID' : 'DocumentID'}. ` +
       `Nothing was put in the box.`
     );
   }
   const parts = [`${read.rowCount} row(s) read`, `${read.ids.length} id(s) found`];
   if (read.duplicates > 0) parts.push(`${read.duplicates} duplicate(s) dropped`);
   if (read.noIdLines.length > 0) parts.push(`${read.noIdLines.length} row(s) with no id (${linesText(read.noIdLines)})`);
+  if (leftOut !== null) parts.push(leftOut);
   return `${fileName}: ${parts.join(', ')}. This replaced what was in the box.`;
 }
 
@@ -194,8 +242,8 @@ export interface IdInput {
 export const EMPTY_ID_INPUT: IdInput = { text: '', file: null, note: null };
 
 /** The box after reading a file. A file with no usable ids leaves the box as it was and says why. */
-export function afterFileRead(current: IdInput, fileName: string, text: string, kind: 'process' | 'document' = 'process'): IdInput {
-  const read = targetsFromCsv(text);
+export function afterFileRead(current: IdInput, fileName: string, text: string, kind: IdKind = 'process'): IdInput {
+  const read = targetsFromCsv(text, { onlyArchivedByRun: kind === 'restore' });
   const note = csvReadNote(fileName, read, kind);
   if (read.ids.length === 0) return { ...current, note };
   return { text: read.ids.join('\n'), file: { name: fileName, ids: new Set(read.ids.map((id) => id.toLowerCase())) }, note };

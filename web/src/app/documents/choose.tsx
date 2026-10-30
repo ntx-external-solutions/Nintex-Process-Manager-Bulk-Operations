@@ -74,6 +74,8 @@ export function useDocumentChoice(options: {
   treeLists?: readonly DocumentListType[];
   /** Shown by the tree tab, above the tree. */
   treeNote?: ReactNode;
+  /** `restore` takes from a results file only what its run left archived (W8c). */
+  idKind?: 'document' | 'restore';
   onError: (cause: unknown) => void;
 }) {
   const { docs, browse, sources } = options;
@@ -260,7 +262,7 @@ export function useDocumentChoice(options: {
         />
       )}
 
-      {source === 'ids' && <ProcessIdInput kind="document" value={idInput} onChange={setIdInput} />}
+      {source === 'ids' && <ProcessIdInput kind={options.idKind ?? 'document'} value={idInput} onChange={setIdInput} />}
     </>
   );
 
@@ -324,20 +326,15 @@ function TreeDocumentsPanel({
   );
 }
 
-/**
- * Each chosen document's properties, a few at a time, and, when any of them could be
- * acted on, the process index and the scan of every active process's model for
- * references, drafts included (W8 decision 1).
- */
-export async function readWhatHolds(
+/** Each chosen document's properties, a few at a time. A read that fails is kept as its error. */
+export async function readProperties(
   docs: Docs,
   chosen: readonly ChosenDocument[],
   progress: (text: string) => void,
-  scanFor: (c: ChosenDocument) => boolean,
-): Promise<{ properties: Map<string, PropertiesRead>; index: ProcessIndex; scan: ReferenceScan }> {
+): Promise<Map<string, PropertiesRead>> {
   const properties = new Map<string, PropertiesRead>();
   for (let i = 0; i < chosen.length; i += 4) {
-    progress(`Reading what holds each document… ${i} of ${chosen.length}`);
+    progress(`Reading each document… ${i} of ${chosen.length}`);
     await Promise.all(
       chosen.slice(i, i + 4).map(async (c) => {
         try {
@@ -349,6 +346,21 @@ export async function readWhatHolds(
       }),
     );
   }
+  return properties;
+}
+
+/**
+ * Each chosen document's properties and, when any of them could be acted on, the process
+ * index and the scan of every active process's model for references, drafts included
+ * (W8 decision 1).
+ */
+export async function readWhatHolds(
+  docs: Docs,
+  chosen: readonly ChosenDocument[],
+  progress: (text: string) => void,
+  scanFor: (c: ChosenDocument) => boolean,
+): Promise<{ properties: Map<string, PropertiesRead>; index: ProcessIndex; scan: ReferenceScan }> {
+  const properties = await readProperties(docs, chosen, (text) => progress(text.replace('Reading each document', 'Reading what holds each document')));
 
   progress('Reading the process lists…');
   const index = await loadProcessIndex(browserGateway().processesList, {

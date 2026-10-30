@@ -3,7 +3,8 @@
 /**
  * Picking processes by id: typed or pasted, or read from a CSV (W7). Bulk Delete and
  * Bulk Archive both use it, and the document pages (W8) with `kind="document"`, where a
- * number is a document id. The parsing is in lib/select/ids.ts.
+ * number is a document id, or `kind="restore"`, which takes from a results file only what
+ * its run left archived. The parsing is in lib/select/ids.ts.
  *
  * Ids only. A file with names and no ids is explained, never matched by name: names are
  * not unique, and both operations are destructive.
@@ -11,7 +12,7 @@
 
 import { FileUpload, Textarea, TextLink } from '@exp-textura/react';
 
-import { afterFileRead, DOCUMENT_ID_TEMPLATE_CSV, ID_TEMPLATE_CSV, type IdInput } from '@/lib/select/ids.ts';
+import { afterFileRead, DOCUMENT_ID_TEMPLATE_CSV, ID_TEMPLATE_CSV, type IdInput, type IdKind } from '@/lib/select/ids.ts';
 import { Field, valueOf } from '../_ui/kit.tsx';
 
 const href = (csv: string) => `data:text/csv;charset=utf-8,${encodeURIComponent(csv)}`;
@@ -33,6 +34,14 @@ const WORDING = {
     templateName: 'document-ids-template.csv',
     column: 'DocumentID',
   },
+  restore: {
+    label: 'Document ids (GUIDs or numeric ids), one per line',
+    hint: 'On this page a number is a document id, never a process id. Ids only: a document is never matched by its name, because names are not unique.',
+    file: 'Or a CSV with a DocumentID or ObjectID column. From a results file of Archive or Delete documents, only the documents that run archived and did not delete or put back are taken. Reading one replaces what is in the box.',
+    template: href(DOCUMENT_ID_TEMPLATE_CSV),
+    templateName: 'document-ids-template.csv',
+    column: 'DocumentID',
+  },
 } as const;
 
 export function ProcessIdInput({
@@ -42,7 +51,7 @@ export function ProcessIdInput({
 }: {
   value: IdInput;
   onChange: (next: IdInput) => void;
-  kind?: 'process' | 'document';
+  kind?: IdKind;
 }) {
   const words = WORDING[kind];
   async function read(file: File | undefined) {

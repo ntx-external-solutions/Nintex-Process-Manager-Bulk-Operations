@@ -6,6 +6,103 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## W8c. Restore documents
+
+Commit `f21ba94` on `claude/w8c-restore-documents`. PR #82 (W8b) wasn't merged when I
+started, so this branch is built on `claude/w8b-delete-documents`; merge #82 first.
+
+**The page.** `/documents/restore`, "Restore documents", third in the side nav's Documents
+section; its home tile is live.
+
+**Choosing.** Two tabs, through the shared `useDocumentChoice`:
+- **From the archived list:** bucketed by primary group path (W8b's component).
+- **By id or CSV:** a number is a document id. **A results file is filtered.** From a
+  file with Operation and Status columns, only documents its run archived and left archived
+  are taken: an `Archive` `Success` row, and no `Delete` or `Restore` `Success` row. The
+  note says how many were left out and why. Without the filter, a Delete documents file
+  would also restore the documents that were archived before that run (a refused delete,
+  say), which isn't what "undo" means. A plain id list, or a file with no Operation and
+  Status columns, is read in full. The other pages read every id, as before (an option on
+  `targetsFromCsv`, off by default).
+
+**Planning.**
+1. Both document lists, then `properties` for every chosen document.
+2. One breadcrumb call per distinct primary group of the archived ones. An empty chain
+   means the group is gone; spike S1 saw a deleted group's breadcrumb come back empty.
+3. Left out, in order:
+   - "Not archived";
+   - "Could not read it (...)";
+   - "Neither the list nor the document says what its group is";
+   - "Its group no longer exists";
+   - "Could not check that its group still exists (...)".
+
+   Attachments aren't read or shown: restoring is always safe. No process scan, so the
+   plan is quick.
+
+**Running.** `runDocumentRestore` is `runDocumentBatches` with W8b's `restoreWrite`:
+batches of up to 50, no re-check, `POST .../documents/bulk/restore`. Every `errors` entry
+is a `Failed` row with its code. A fresh read of both lists settles each row: active means
+restored, still archived means Failed, in neither list is Unverified.
+
+**Results file.** `Restore` rows (`Success`, `Skipped`, `Failed`, `Unverified`; `Preview`
+in the preview file), plus `Resolve` `Skipped` for an id that matches nothing.
+
+**Functions touched.**
+- New `documents/restore.ts`: `checkGroupsExist`, `buildDocumentRestorePlan`,
+  `restorePreviewRows`, `runDocumentRestore`, `settleDocumentRestore`.
+- `select/ids.ts`: `targetsFromCsv` takes `onlyArchivedByRun`; `CsvTargets` gains
+  `resultsLeftOut`; new `IdKind` (`process`, `document`, `restore`), taken by
+  `csvReadNote` and `afterFileRead`.
+- `ProcessIdInput`: `kind="restore"` wording.
+- `app/documents/choose.tsx`: `readProperties` split out of `readWhatHolds`; an `idKind`
+  option.
+- The page, `AppShell`, the home page.
+
+**Tests.** 627 tests, all pass, none skipped (623 before). Typecheck and build clean.
+- `documents/restore.test.ts`, 4 tests:
+  - the plan: an attached document is restored, while not archived, a missing group, a
+    group that couldn't be checked, no group and an unreadable document are left out;
+  - the group check: an empty breadcrumb, a failed one, a dead session;
+  - the run in batches of 50 with no re-reads, `NotArchived` and `NotFound` inside a 200,
+    and the final settle;
+  - a Delete documents results file giving only what its run left archived, the note,
+    and the other pages still reading every id.
+- `select/ids.test.ts`: one expectation gains `resultsLeftOut: 0`.
+- **New driver `dev/drive-docs-restore.mjs`, 16 checks, all pass against the mock.**
+  - It ticks three archived documents and uploads a Delete documents results file from a
+    run that stopped after its archive phase.
+  - It checks that the file gives two ids and leaves out two.
+  - In the plan: a missing group and an active document are left out.
+  - In the run: `Locked` inside a 200 is Failed, two are restored, and one bulk call
+    goes out with no property re-reads.
+- **The mock** gains an archived document whose group is gone, one the restore refuses,
+  and one a delete run left archived. The restore now refuses an active document
+  (`NotArchived`). Every driver was re-run on a fresh mock and passes.
+
+**Deferred, or for you to decide.**
+- **The results-file filter** applies only on this page. Say if you'd rather it restored
+  every id in the file and left the operator to edit it.
+- **A deleted group whose breadcrumb still resolves** (spike S1 says that happens
+  sometimes) passes the check. The restore is then sent, and whatever the tenant answers
+  is read from `errors`. A full tree walk would be certain, but it's about 114 calls; I
+  chose the breadcrumb.
+- **A pending archived document** is restored like any other. The brief lists no pending
+  rule for restore.
+
+**For R16.**
+- **Bearer token** on `POST .../documents/bulk/restore`. W8b's put-back uses it too.
+- **A round trip on ZZ content:** archive a document with Archive documents, then feed
+  that results file into this page. Only the documents that run archived should be
+  offered. They should come back to their primary group with their associations.
+- **A Delete documents run declined at the confirmation** leaves nothing to restore. Feed
+  in its file: the note should say no document was left archived.
+- **An `errors` entry:** restore an id restored since the plan was built (expect
+  `NotArchived` as a Failed row inside a 200).
+- **The group check:** with no ZZ group gone, every row should pass it. One breadcrumb
+  call per distinct group shows in the timing.
+
+---
+
 ## W8b. Delete documents
 
 Commit `68864e9` on `claude/w8b-delete-documents`, branched from `claude/main` after #81.
