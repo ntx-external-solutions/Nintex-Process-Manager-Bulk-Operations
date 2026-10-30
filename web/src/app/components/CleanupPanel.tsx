@@ -6,14 +6,15 @@
  *
  * Offered only once the run has finished and been re-read. It is its own step with its
  * own confirmation, because it cannot be undone: a deleted group's archived processes can
- * never be restored to it (spike S1). After a Delete, a group still holding an archived
- * process is kept rather than offered (W6), so nothing the run chose to keep is stranded.
+ * never be restored to it (spike S1). A group still holding archived processes is
+ * offered after either run, with a warning naming each one it would orphan (W2b; W6 keeps
+ * that after a Delete, where they are targets the run held back).
  */
 
 import { useMemo, useRef, useState, type ReactNode } from 'react';
 
 import { gatherFacts } from '@/lib/cleanup/facts.ts';
-import { describeGroupPath, planCleanup, type CleanupDecision, type CleanupPlanOptions } from '@/lib/cleanup/plan.ts';
+import { describeGroupPath, planCleanup, type CleanupDecision } from '@/lib/cleanup/plan.ts';
 import { runCleanup, settleCleanup } from '@/lib/cleanup/run.ts';
 import { Journal, sessionJournalStore } from '@/lib/exec/journal.ts';
 import type { ResultRow } from '@/lib/exec/report.ts';
@@ -38,7 +39,6 @@ export function CleanupPanel({
   onError,
   heading,
   offer,
-  archivedProcesses,
 }: {
   tenant: string;
   groups: readonly CoveredGroup[];
@@ -49,7 +49,6 @@ export function CleanupPanel({
   heading: string;
   /** What the step checks, shown before anything is read. */
   offer: ReactNode;
-  archivedProcesses?: CleanupPlanOptions['archivedProcesses'];
 }) {
   const gateway = useMemo(() => browserCleanupGateway(), []);
   const [step, setStep] = useState<Step>({ kind: 'offer' });
@@ -68,7 +67,7 @@ export function CleanupPanel({
         isFatal: defaultIsFatal,
         onProgress: (done, total) => setStep({ kind: 'checking', progress: `Reading each group… ${done} of ${total}` }),
       });
-      setStep({ kind: 'review', decisions: planCleanup(groups, facts, { archivedProcesses }) });
+      setStep({ kind: 'review', decisions: planCleanup(groups, facts) });
     } catch (cause) {
       onError(cause);
       setError(errorMessage(cause));

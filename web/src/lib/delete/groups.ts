@@ -11,9 +11,9 @@
 
 import { resultRow, type ResultRow } from '../exec/report.ts';
 import { defaultIsFatal } from '../exec/runner.ts';
-import type { DeleteGateway } from './gateway.ts';
+import { ARCHIVED_BATCH_SIZE, type DeleteGateway } from './gateway.ts';
 import { nodeInt, nodeString, nodeValue, type DeleteIndexEntry, type ProcessModel } from './model.ts';
-import { readGroupExists } from '../select/archived.ts';
+import { readGroupExists, type ArchivedProcess } from '../select/archived.ts';
 import type { IndexEntry, ProcessIndex } from '../tenant/state.ts';
 
 /** The part of a tree group the descendant walk reads. */
@@ -214,4 +214,75 @@ export function groupDisagreementRow(
       : `The process listing says its group ${listedGroupId ?? 'unknown'} no longer exists, but its model names group ${named}, and the tree could not be checked. Restored into that group, which the tenant accepted, so it is not an orphan.`,
     groupId: group.id,
   });
+}
+
+// ------------------------------------------------------------ the archived view's orphans (W6)
+
+/** A `groupExists: false` row the model check overturned: the group its model names, found in the tree. */
+export interface ArchivedGroupCorrection {
+  uniqueId: string;
+  name: string;
+  listedGroupId: number | null;
+  group: ModelGroup;
+}
+
+export interface ArchivedOrphanCheck {
+  /** The rows, with each overturned one moved to the group its model names. */
+  processes: ArchivedProcess[];
+  corrections: ArchivedGroupCorrection[];
+  /** One `GroupCheck` `Warning` row per correction, for the results file. */
+  rows: ResultRow[];
+  /** Rows left in the orphaned bucket because the tree could not be checked. */
+  unchecked: number;
+}
+
+/**
+ * The archived view's "group no longer exists" bucket, confirmed one row at a time with
+ * the F6 check before anything is labelled orphaned. R13 measured a row that said
+ * `groupExists: false` while its model named a group that was in the tree. Such a row is
+ * moved to that group, under its real path, and logged; a row whose model names no group,
+ * or a group the tree does not have, stays an orphan. A row whose group could not be
+ * looked up stays where the listing put it, and is counted, since that is not proof
+ * either way.
+ */
+export async function confirmArchivedOrphans(
+  gateway: Pick<DeleteGateway, 'readArchivedModels' | 'groupFound'>,
+  processes: readonly ArchivedProcess[],
+  isFatal: (error: unknown) => string | null = defaultIsFatal,
+): Promise<ArchivedOrphanCheck> {
+  const listedGone = processes.filter((p) => !p.groupExists);
+  const models = new Map<string, ProcessModel>();
+  const ids = listedGone.map((p) => p.uniqueId);
+  for (let i = 0; i < ids.length; i += ARCHIVED_BATCH_SIZE) {
+    try {
+      for (const model of await gateway.readArchivedModels(ids.slice(i, i + ARCHIVED_BATCH_SIZE))) {
+        const id = nodeString(model, 'UniqueId');
+        if (id) models.set(id.toLowerCase(), model);
+      }
+    } catch (error) {
+      if (isFatal(error)) throw error;
+      // Unread: the listing's word stands, as in the run (bulkDelete.ts).
+    }
+  }
+
+  const moved = new Map<string, ModelGroup>();
+  const corrections: ArchivedGroupCorrection[] = [];
+  let unchecked = 0;
+  for (const process of listedGone) {
+    const check = await confirmOrphan(gateway, models.get(process.uniqueId.toLowerCase()), isFatal);
+    if (check.kind === 'unknown') unchecked++;
+    if (check.kind !== 'present') continue;
+    moved.set(process.uniqueId.toLowerCase(), check.group);
+    corrections.push({ uniqueId: process.uniqueId, name: process.name, listedGroupId: process.groupId, group: check.group });
+  }
+
+  return {
+    processes: processes.map((p) => {
+      const group = moved.get(p.uniqueId.toLowerCase());
+      return group ? { ...p, groupExists: true, groupId: group.id, groupUniqueId: group.uniqueId, groupName: group.name || p.groupName } : p;
+    }),
+    corrections,
+    rows: corrections.map((c) => groupDisagreementRow(c, c.listedGroupId, c.group, true)),
+    unchecked,
+  };
 }

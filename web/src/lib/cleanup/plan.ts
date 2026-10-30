@@ -54,20 +54,9 @@ export function deepestFirst<T extends { group: CoveredGroup } | CoveredGroup>(i
   return [...items].sort((a, b) => depth(b) - depth(a));
 }
 
-export interface CleanupPlanOptions {
-  /**
-   * What an archived process left in a group means. After Archive it is what the run
-   * made, so the group is offered and the warning names each process it orphans. After
-   * a Delete it is one the run kept (still referenced, or not selected), so the group is
-   * kept: deleting it would strand a process the operator just chose not to delete (W6).
-   */
-  archivedProcesses?: 'orphan' | 'keep' | undefined;
-}
-
 export function planCleanup(
   candidates: readonly CoveredGroup[],
   facts: ReadonlyMap<string, GroupFacts>,
-  options: CleanupPlanOptions = {},
 ): CleanupDecision[] {
   const decided = new Map<string, CleanupDecision>();
 
@@ -122,15 +111,6 @@ export function planCleanup(
         `It holds ${plural(known.documents.total, 'document')}` +
           (names.length > 0 ? `: ${listNames(names)}` : '') +
           '. Documents, archived or not, stop a group from being deleted.',
-      );
-      continue;
-    }
-
-    if (options.archivedProcesses === 'keep' && known.archived.length > 0) {
-      const names = known.archived.map((p) => ({ title: p.name }));
-      keep(
-        `It still holds ${plural(known.archived.length, 'archived process', 'archived processes')} the delete did not remove: ${listNames(names)}. ` +
-          'Deleting the group would leave them with no group to be restored to.',
       );
       continue;
     }
