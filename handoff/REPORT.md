@@ -6,6 +6,163 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## W8b. Delete documents
+
+Commit `68864e9` on `claude/w8b-delete-documents`, branched from `claude/main` after #81.
+
+**The page.** `/documents/delete`, "Delete documents", second in the side nav's Documents
+section; its home tile is live. The process pages don't change, except one type: see
+"Functions touched".
+
+**Choosing.** Four tabs that add up, each document once:
+- **From the tree:** as W8a, but a checked group reads both lists, so archived documents
+  whose primary group is in the subtree are included. The panel says "hold 5 documents
+  as their primary group (2 archived)". An associated-only document is listed apart,
+  unticked, with "(archived)" when it is.
+- **From the document list:** the active list, as W8a.
+- **From the archived list:** new. Archived documents bucketed by primary group path, with
+  a box per bucket, as the process Delete page's archived view (`ArchivedDocumentList`).
+- **By id or CSV:** as W8a. A number is a document id.
+
+The choosing code moved out of the W8a page into `app/documents/choose.tsx`
+(`useDocumentChoice`, `readWhatHolds`, `LeftOut`, `UnreadProcesses`), so the three
+document pages share it. The Archive page's wording didn't change, and its driver still
+passes.
+
+**Planning.** The same three steps as W8a, with the same checks in the same order
+(`checkChosenDocuments`, shared). The one difference: an archived document is a target,
+not "Already archived". **It's still checked for holders and scanned for**, because
+deleting an archived document that a draft points at breaks that process, the same as an
+active one. The plan shows two tables, "Phase 1: archived, then deleted (n)" and "Phase 2:
+already archived, deleted (n)", and the left-out list. Unread process models block the
+run, as in W8a.
+
+**Running.**
+1. **Start.** "Archive n documents, then confirm the delete", then "Yes, archive n
+   documents". With nothing active, it goes straight to the confirmation.
+2. **Phase 1** is W8a's run: re-check each batch, bulk archive, a row for every `errors`
+   entry. Then one read of both lists settles the archive rows. A target that didn't
+   archive isn't deleted.
+3. **Confirmation.** It names every document to be permanently deleted, in a table, and
+   lists every one left out (the plan's, plus any that didn't archive). The delete button
+   stays disabled until DELETE is typed. "Don't delete; put back the n documents this run
+   archived" is the way out.
+4. **Phase 2.** Batches of up to 50. Each batch re-reads `properties` first and drops a
+   document that's attached, pending, or no longer archived (someone restored it). Then
+   `DELETE .../documents/bulk`. In the answer, `ProcessAttachment` is `Skipped` "Process
+   Manager refused: still attached"; any other code (`NotArchived`, `NotFound`, ...) is
+   `Failed` with the code.
+5. **Put back.** Every document this run archived and didn't delete is restored with
+   `bulk/restore`. That covers skipped, refused, failed and not attempted, and also when
+   the operator declines at the confirmation or presses Stop. Each one gets a `Restore`
+   row, e.g. "Put back: this run archived it, and it was not deleted." The put-back has
+   its own controls, so a Stop still puts things back. A document that was archived
+   before the run is never restored.
+6. **Final read** of both lists. `settleDocumentDelete` settles the Delete and Restore
+   rows. A delete that "failed" but is in neither list becomes Success, and so does a
+   `NotFound`. A restore whose delete took effect after all becomes Skipped.
+7. **A dead session** can't put back. The done screen then names every document this run
+   archived that is still archived, and says to restore them on the Restore documents page
+   using this results file (W8c).
+
+**Results file.** Columns as before. Rows in this order: the plan's Skipped rows, phase 1's
+`Archive` rows, `Delete` rows, `Restore` rows, then any `DeleteGroup` rows from the
+cleanup. Every document row has `ObjectType` `Document`.
+
+**Folder cleanup.** The shared `CleanupPanel`, offered after a completed run (no stop, and
+a final read that worked) for checked groups that held a deleted document as its primary
+group, or that are above such a group. I reused `groupsTheRunDeletedFrom` from W6, so the
+rule is the same as the process Delete page's. Its document check already counts an
+archived document that's only associated with the group (W8a's note). The driver shows it
+keeping Old forms, naming 'Borrowed archive.pdf (archived)'.
+
+**Allowlist.** `documents.delete` (DELETE `.../documents/bulk`) and `documents.restore`
+(POST `.../documents/bulk/restore`). Each takes 1 to 50 distinct numeric ids and nothing
+else, the same validation as the archive. Both join `WRITE_OPERATIONS`. The restore is
+here rather than in W8c because the delete's put-back needs it. No anti-forgery token.
+
+**Functions touched.**
+- `pm/documents.ts`: new `bulkDeleteDocuments`, `bulkRestoreDocuments`.
+- `documents/archive.ts`: the run is now `runDocumentBatches`, which takes a `BatchWrite`
+  (operation, wording, call, optional re-check, codes that mean Skipped).
+  `runDocumentArchive` is a thin call to it, with the same behaviour and wording.
+  `checkChosenDocuments` is the shared plan check; `buildDocumentArchivePlan` calls it.
+  `DocumentTarget` gains `groupUniqueId` and `isArchived`. `rowsFromAnswer` takes the
+  write's wording and skip codes.
+- New `documents/delete.ts`: `buildDocumentDeletePlan`, `deletePreviewRows`,
+  `runArchivePhase`, `afterArchivePhase`, `runDeletePhase`, `restoreWrite`, `putBack`,
+  `leftArchived`, `settleDocumentDelete`.
+- `documents/select.ts`: `CHOSEN_FROM_ARCHIVED`.
+- `delete/selection.ts`: `groupsTheRunDeletedFrom`'s parameter type is widened to any
+  targets with a `uniqueId` and `groupUniqueId`. The process Delete page passes what it
+  passed before; its behaviour is unchanged.
+- `pm/operations.ts`, `ui/gateway.ts` (`delete`, `restore`).
+- Components: new `ArchivedDocumentList`, `app/documents/choose.tsx` and the delete page;
+  the W8a page now uses the shared hook; `AppShell` and the home page.
+
+**Tests.** 623 tests, all pass, none skipped (614 before). Typecheck and build clean.
+- `documents/delete.test.ts`, 6 tests:
+  - the plan's two phases, with an archived document held by an archived process, an
+    archived document only in a draft, a training unit and a pending document all left
+    out;
+  - a full run against a small fake tenant: a document attached between the phases,
+    `ProcessAttachment` and `Locked` inside a 200, a failed archive never deleted, the
+    put-back restoring only what this run archived, and the final settle;
+  - declining the confirmation puts back everything the run archived, and nothing else;
+  - the delete re-check dropping a document someone restored, plus `NotArchived` and
+    `NotFound` as rows;
+  - settling Delete and Restore rows;
+  - a dead session naming what is left archived.
+- `pm/operations.test.ts`: the write list now includes the two operations, plus 3 tests:
+  bounds for both, the requests sent (DELETE with a body; POST), and the cleanup count
+  reading both lists with the group filter.
+- `documents/archive.test.ts`: fixtures updated; its 18 tests pass unchanged.
+- **New driver `dev/drive-docs-delete.mjs`, 32 checks, all pass against the mock.** It
+  checks Old forms and Spent, leaves the archived associated-only document unticked,
+  ticks an archived document from the archived list, and uploads a CSV of two held
+  documents. Then it plans, archives, confirms and deletes, and checks:
+  - the confirmation waits for DELETE, and nothing is deleted before it;
+  - the late holder is dropped by the delete's re-check and put back;
+  - `ProcessAttachment` is Skipped and put back;
+  - `Locked` is Failed and left archived;
+  - three documents are deleted, in one bulk call that leaves out the late holder;
+  - the cleanup deletes Spent and keeps Old forms.
+- **The mock** gains top-level Old forms and Spent groups, six documents, `bulk/restore`
+  and `DELETE bulk`. The delete refuses an active document (`NotArchived`) and an attached
+  one (`ProcessAttachment`), but not one only a draft points at, as measured. Every other
+  driver was re-run on a fresh mock, ownership included, and matches its expected results.
+
+**Deferred, or for you to decide.**
+- **Two confirmations.** The plan's "Archive n documents" asks once, before phase 1. The
+  typed DELETE comes after phase 1, as the brief orders it.
+- **When the session dies mid-run.** Nothing can be put back. The done screen names what
+  this run archived and points at Restore documents. There's no journal, as in W8a.
+- **No GroupId for a document whose properties read failed.** Such a document is
+  skipped, so its row has no GroupId.
+- **A training unit's hold on a delete wasn't measured** (spike, "Not measured"). The
+  plan skips those documents anyway, so the tenant's answer isn't tested here.
+
+**For R16.**
+- **Bearer token** on `DELETE .../documents/bulk` (a DELETE with a JSON body) and
+  `POST .../documents/bulk/restore`.
+- **A full run on ZZ content:** one active and one archived free document. Both should be
+  deleted and gone from both lists, the active one with an Archive row first.
+- **The confirmation:** decline it after phase 1. The active documents should come back
+  active, each with a Restore row.
+- **`ProcessAttachment`:** attach a ZZ document to a process after phase 1, before
+  confirming. The re-check should skip it ("Attached since the plan was built") and put
+  it back. To see the tenant's own refusal, attach it after the re-check, which is hard
+  to time; the driver covers that case offline.
+- **Draft-only:** an archived ZZ document referenced only in a ZZ process's open draft.
+  The plan should leave it out, naming the draft.
+- **Cleanup:** a ZZ group whose only content is an archived document whose primary group
+  is elsewhere. Delete documents from that group: the cleanup should keep it and name the
+  document. Then a ZZ group emptied by the run should be offered and deleted.
+- **Stop during phase 2** with 51+ documents. The rest should be "Not attempted", and the
+  active ones put back.
+
+---
+
 ## W8a. Archive documents
 
 Commit `619309a` on `claude/w8a-archive-documents`. PR #80 (the W8 handover) was still
