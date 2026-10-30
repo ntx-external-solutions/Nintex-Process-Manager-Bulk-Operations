@@ -1,7 +1,10 @@
+import '@exp-textura/react/fonts.css';
+
 import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
 
 import './globals.css';
+import { Providers } from './providers.tsx';
 
 export const metadata: Metadata = {
   title: 'Bulk Operations',
@@ -13,7 +16,9 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        <Providers>{children}</Providers>
+      </body>
     </html>
   );
 }

@@ -9,12 +9,14 @@
  * `useBrowseTree` hook owns loading.
  */
 
+import { ChevronDown, ChevronRight } from '@exp-textura/icons';
 import { useCallback, useEffect, useState } from 'react';
 
 import type { PlanGateway } from '@/lib/plan/load.ts';
 import { addBrowseLevel, emptyBrowseTree, type BrowseNode, type BrowseTree } from '@/lib/select/browse.ts';
 import { visibleRows } from '@/lib/select/rows.ts';
 import { EMPTY_SELECTION, toggle, type Selection } from '@/lib/select/selection.ts';
+import { Notice } from '../_ui/kit.tsx';
 import { Checkbox } from './Checkbox.tsx';
 
 export interface BrowseState {
@@ -126,10 +128,9 @@ export function TreeBrowser({ state, disabled }: { state: BrowseState; disabled?
   return (
     <div className="tree">
       {state.error !== null && (
-        <div className="panel error">
-          <h2>Could not read the tree</h2>
-          <p>{state.error}</p>
-        </div>
+        <Notice tone="critical" title="Could not read the tree">
+          {state.error}
+        </Notice>
       )}
       <ul role="tree">
         {rows.map((row) => (
@@ -148,7 +149,7 @@ export function TreeBrowser({ state, disabled }: { state: BrowseState; disabled?
                 aria-label={row.expanded ? `Collapse ${row.node.title}` : `Expand ${row.node.title}`}
                 onClick={() => state.toggleExpanded(row.node)}
               >
-                <span className="marker">{row.expanded ? '▾' : '▸'}</span>
+                {row.expanded ? <ChevronDown /> : <ChevronRight />}
               </button>
             ) : (
               <span className="disclosure-spacer" />

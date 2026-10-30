@@ -1,21 +1,33 @@
-:root {
-  --bg: #ffffff;
-  --fg: #1a1a1a;
-  --muted: #5c6470;
-  --border: #e2e5e9;
-  --accent: #1c6bba;
-  --panel: #f7f8fa;
-}
+/*
+ * Textura (via ThemeProvider) owns components, fonts and its --ntx-* tokens. This file
+ * holds the page-level layout around them and the palette Tango and ntx-proc-demo use
+ * for prose, so the tools read as one product. Light only.
+ *
+ * Panels, tables and native checkboxes stay plain markup dressed as Textura's Card,
+ * Table and Checkbox: the offline drive scripts in dev/ find them by these class names
+ * and by native input selectors, and the tree needs a real indeterminate checkbox.
+ */
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #14171a;
-    --fg: #e8eaed;
-    --muted: #99a1ac;
-    --border: #2a2f36;
-    --accent: #6aa9e9;
-    --panel: #1b1f24;
-  }
+:root {
+  --color-ink: #1a2233;
+  --color-sub: #64748b;
+  --color-sub-2: #98a4b4;
+  --color-line: var(--ntx-color-border-default, #e6e9ee);
+  --color-line-2: #edf0f3;
+  --color-canvas: #f6f7f9;
+  --color-card: #ffffff;
+  --color-link: #2f6bf6;
+  --color-blue: #3b5bf5;
+  --color-green: #1f9e6e;
+  --color-green-bg: var(--ntx-color-background-utility-success-weak, #e7f6ef);
+  --color-red: #c2453d;
+  --color-red-bg: var(--ntx-color-background-utility-critical-weak, #fdecea);
+  --color-red-line: var(--ntx-color-border-utility-critical-weak, #f3c5c1);
+  --color-amber: #b7791f;
+  --color-amber-bg: var(--ntx-color-background-utility-warning-weak, #fbefd3);
+  --color-amber-line: var(--ntx-color-border-utility-warning, #e9c46a);
+  --color-selected: var(--ntx-color-background-action-selected, #eef2ff);
+  color-scheme: light;
 }
 
 * {
@@ -24,268 +36,201 @@
 
 html,
 body {
+  height: 100%;
   margin: 0;
   padding: 0;
-  background: var(--bg);
-  color: var(--fg);
-  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-  line-height: 1.55;
 }
 
-main {
-  max-width: 46rem;
-  margin: 0 auto;
-  padding: 3rem 1.5rem 5rem;
+body {
+  color: var(--color-ink);
+  background: var(--color-card);
+  font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
 }
 
-h1 {
-  font-size: 1.6rem;
-  margin: 0 0 0.35rem;
+*:focus-visible {
+  outline: 2px solid var(--color-blue);
+  outline-offset: 2px;
 }
 
-.lede {
-  color: var(--muted);
-  margin: 0 0 2rem;
+a {
+  color: var(--color-link);
+  text-decoration: none;
 }
 
+a:hover {
+  text-decoration: underline;
+}
+
+/* ---------------------------------------------------------------- page */
+
+/* The body content of every page: a column of panels with even spacing. */
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding-bottom: 48px;
+  min-width: 0;
+}
+
+.page.narrow {
+  max-width: 560px;
+}
+
+.page > p {
+  margin: 0;
+}
+
+.notice {
+  width: 100%;
+}
+
+h2.section {
+  margin: 16px 0 0;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+/* A panel is Textura's Card, Flat treatment. */
 .panel {
-  background: var(--panel);
-  border: 1px solid var(--border);
+  min-width: 0;
+  padding: 16px 20px;
+  background: var(--color-card);
+  border: 1px solid var(--color-line);
   border-radius: 8px;
-  padding: 1rem 1.25rem;
-  margin-bottom: 1rem;
 }
 
 .panel h2 {
-  font-size: 1rem;
-  margin: 0 0 0.5rem;
+  margin: 0 0 8px;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--color-ink);
+}
+
+.panel h3 {
+  margin: 16px 0 8px;
+  font-size: 14px;
+  font-weight: 700;
 }
 
 .panel p {
+  margin: 0 0 12px;
+  color: var(--color-ink);
+}
+
+.panel p:last-child {
+  margin-bottom: 0;
+}
+
+/* Panels that ask for care, in Textura's subtle Alert colors. */
+.panel.warning {
+  background: var(--color-amber-bg);
+  border-color: var(--color-amber-line);
+}
+
+.panel.error {
+  background: var(--color-red-bg);
+  border-color: var(--color-red-line);
+}
+
+.panel.error h2 {
+  color: var(--color-red);
+}
+
+/* A warning panel nested in another reads as a callout, not a second card. */
+.panel .panel {
+  margin-top: 12px;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 12px;
+}
+
+.panel > .row:first-child {
+  margin-top: 0;
+}
+
+.pending {
   margin: 0;
-  color: var(--muted);
-  font-size: 0.925rem;
+  color: var(--color-sub);
+}
+
+/* details.panel: the summary is the title row. */
+details.panel > summary {
+  font-weight: 600;
+  cursor: pointer;
+}
+
+details.panel[open] > summary {
+  margin-bottom: 12px;
+}
+
+/* ---------------------------------------------------------------- text */
+
+.muted {
+  color: var(--color-sub);
+}
+
+.small {
+  font-size: 12.5px;
+  color: var(--color-sub);
+}
+
+.error-text {
+  color: var(--color-red);
+}
+
+code {
+  font-family: var(--ntx-typography-font-family-roboto-mono, 'Roboto Mono'), ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.875em;
+  color: var(--color-ink);
+  background: var(--color-canvas);
+  border: 1px solid var(--color-line);
+  border-radius: 4px;
+  padding: 1px 5px;
+  overflow-wrap: anywhere;
 }
 
 ul.checklist {
   margin: 0;
-  padding-left: 1.1rem;
-  color: var(--muted);
-  font-size: 0.925rem;
+  padding-left: 18px;
 }
 
 ul.checklist li {
-  margin: 0.2rem 0;
+  margin: 4px 0;
 }
 
-code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.875em;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 0.05rem 0.3rem;
-}
-
-footer {
-  margin-top: 2.5rem;
-  color: var(--muted);
-  font-size: 0.85rem;
-}
-
-label {
-  display: block;
-  font-size: 0.875rem;
-  font-weight: 600;
-  margin: 0.85rem 0 0.25rem;
-}
-
-label:first-child {
-  margin-top: 0;
-}
-
-input {
-  width: 100%;
-  padding: 0.5rem 0.65rem;
-  font: inherit;
-  font-size: 0.95rem;
-  color: var(--fg);
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-}
-
-/*
- * The rule above is for text inputs. R12 found it stretching the destination picker's
- * radios to the full row width, which pushed every group name to the right edge.
- */
-input[type='checkbox'],
-input[type='radio'] {
-  width: auto;
-  flex: none;
+ol.steps {
   margin: 0;
-  padding: 0;
-  accent-color: var(--accent);
+  padding-left: 20px;
 }
 
-textarea {
-  width: 100%;
-  padding: 0.5rem 0.65rem;
-  font: inherit;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 0.85rem;
-  color: var(--fg);
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
+ol.steps li {
+  margin: 4px 0;
 }
 
 /* The delete plan as the script prints it: indentation carries the structure. */
 pre.plan-text {
   margin: 0;
+  padding: 12px 14px;
   overflow-x: auto;
   white-space: pre-wrap;
   word-break: break-word;
-  font-size: 0.8rem;
-  line-height: 1.45;
-}
-
-input:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-
-button {
-  margin-top: 1.1rem;
-  padding: 0.5rem 1rem;
-  font: inherit;
-  font-size: 0.95rem;
-  font-weight: 600;
-  color: #fff;
-  background: var(--accent);
-  border: 1px solid transparent;
-  border-radius: 6px;
-  cursor: pointer;
-}
-
-button:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-
-button.secondary {
-  color: var(--fg);
-  background: transparent;
-  border-color: var(--border);
-}
-
-.row {
-  display: flex;
-  gap: 0.6rem;
-  flex-wrap: wrap;
-}
-
-.panel.error {
-  border-color: #c2453d;
-}
-
-.panel.error h2 {
-  color: #c2453d;
-}
-
-a {
-  color: var(--accent);
-}
-
-/* ---------------------------------------------------------------- plan */
-
-/* The preview needs more room than a form does. */
-main:has(.counts) {
-  max-width: 68rem;
-}
-
-.panel.warning {
-  border-color: #b4761c;
-}
-
-.panel.warning h2 {
-  color: #b4761c;
-}
-
-h2.section {
-  font-size: 1.15rem;
-  margin: 2.25rem 0 0.75rem;
-}
-
-.counts {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.6rem;
-  margin-bottom: 1rem;
-}
-
-.count {
-  flex: 1 1 8rem;
-  background: var(--panel);
-  border: 1px solid var(--border);
+  font-family: var(--ntx-typography-font-family-roboto-mono, 'Roboto Mono'), ui-monospace, monospace;
+  font-size: 12.5px;
+  line-height: 1.55;
+  background: var(--color-canvas);
+  border: 1px solid var(--color-line);
   border-radius: 8px;
-  padding: 0.7rem 0.9rem;
-}
-
-.count .value {
-  display: block;
-  font-size: 1.5rem;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-}
-
-.count .label {
-  display: block;
-  font-size: 0.8rem;
-  color: var(--muted);
-}
-
-.count.loud .value {
-  color: var(--accent);
-}
-
-table {
-  width: 100%;
-  border-collapse: collapse;
-  margin-top: 0.75rem;
-  font-size: 0.9rem;
-}
-
-th {
-  text-align: left;
-  font-size: 0.78rem;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--muted);
-  border-bottom: 1px solid var(--border);
-  padding: 0.35rem 0.6rem 0.35rem 0;
-}
-
-td {
-  vertical-align: top;
-  border-bottom: 1px solid var(--border);
-  padding: 0.5rem 0.6rem 0.5rem 0;
-}
-
-td.muted {
-  color: var(--muted);
-}
-
-td.nowrap {
-  white-space: nowrap;
-}
-
-.small {
-  font-size: 0.82rem;
 }
 
 .diff {
-  font-size: 0.875rem;
+  font-size: 13px;
 }
 
 .diff .added {
@@ -293,44 +238,38 @@ td.nowrap {
 }
 
 .diff .removed {
-  color: #c2453d;
+  color: var(--color-red);
 }
 
 .diff .kept,
 .truncated,
 .filename {
-  color: var(--muted);
-  font-size: 0.85rem;
+  color: var(--color-sub);
+  font-size: 13px;
 }
 
-@media (prefers-color-scheme: dark) {
-  .diff .added {
-    color: #5cc98a;
-  }
-
-  .diff .removed {
-    color: #e8837c;
-  }
-}
-
+/* A short label beside a name, drawn as Textura's small Badge. */
 .tag {
-  margin-left: 0.4rem;
-  padding: 0.02rem 0.35rem;
-  font-size: 0.72rem;
-  font-weight: 600;
-  color: var(--muted);
-  border: 1px solid var(--border);
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 8px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 20px;
+  color: var(--color-ink);
+  background: var(--color-canvas);
+  border: 1px solid var(--color-line);
   border-radius: 999px;
+  white-space: nowrap;
 }
 
 ul.issues {
-  margin: 0.5rem 0 0;
-  padding-left: 1.1rem;
-  font-size: 0.9rem;
+  margin: 8px 0 0;
+  padding-left: 18px;
 }
 
 ul.issues li {
-  margin: 0.25rem 0;
+  margin: 4px 0;
 }
 
 ul.issues .line {
@@ -340,214 +279,275 @@ ul.issues .line {
   font-variant-numeric: tabular-nums;
 }
 
-input[type='file'] {
-  padding: 0.4rem;
-  font-size: 0.9rem;
+/* An action that reads as prose, for things offered inside a sentence. */
+button.link {
+  padding: 0;
+  font: inherit;
+  color: var(--color-link);
+  background: none;
+  border: none;
+  cursor: pointer;
 }
 
-label.checkbox {
+button.link:hover {
+  text-decoration: underline;
+}
+
+button.link:disabled {
+  color: var(--color-sub);
+  cursor: default;
+}
+
+/* --------------------------------------------------------------- forms */
+
+.form-stack {
   display: flex;
-  gap: 0.5rem;
-  align-items: flex-start;
-  margin-top: 1rem;
-  font-weight: 400;
-  font-size: 0.9rem;
+  flex-direction: column;
+  gap: 16px;
 }
 
-label.checkbox input {
-  width: auto;
-  margin-top: 0.25rem;
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.field-label,
+label[for] {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-ink);
+}
+
+/* A label above a control inside a panel, matching Field's spacing. */
+label[for] {
+  display: block;
+  margin: 16px 0 6px;
+}
+
+.panel > label[for]:first-child,
+.field label[for] {
+  margin: 0;
+}
+
+.field-hint {
+  margin-top: -2px;
+  font-size: 12.5px;
+  color: var(--color-sub);
+}
+
+/* Native checkboxes and radios, in Textura's action color. */
+input[type='checkbox'],
+input[type='radio'] {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--ntx-color-background-action-enabled, var(--color-blue));
+  cursor: pointer;
+}
+
+input[type='checkbox']:disabled,
+input[type='radio']:disabled {
+  cursor: default;
+}
+
+input[type='file'] {
+  display: block;
+  font: inherit;
+  font-size: 13px;
+  color: var(--color-sub);
+}
+
+input[type='file']::file-selector-button {
+  margin-right: 12px;
+  padding: 6px 12px;
+  font: inherit;
+  font-weight: 600;
+  color: var(--color-ink);
+  background: var(--color-card);
+  border: 1px solid var(--color-line);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+input[type='file']::file-selector-button:hover {
+  background: var(--color-canvas);
+}
+
+label.checkbox,
+label.inline {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-top: 12px;
+  font-weight: 400;
+  cursor: pointer;
+}
+
+label.checkbox input,
+label.inline input {
+  margin-top: 2px;
+}
+
+label.checkbox:first-child {
+  margin-top: 0;
 }
 
 /* A set of mutually exclusive answers, each with its consequence spelled out. */
 .choices {
   display: grid;
-  gap: 0.25rem;
-  margin-top: 0.5rem;
+  gap: 4px;
+  margin-top: 8px;
 }
 
-.choices .detail {
+.detail {
   display: block;
-  margin-top: 0.15rem;
-  color: var(--muted);
-  font-size: 0.875rem;
+  margin-top: 2px;
+  font-size: 12.5px;
+  color: var(--color-sub);
 }
 
-.pending {
-  margin-top: 1rem;
-  color: var(--muted);
-  font-size: 0.875rem;
+/* ---------------------------------------------------------------- tables */
+
+/* Native tables dressed as Textura's Table, for rows that hold their own controls. */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
 }
 
-/* ------------------------------------------------------ structure tree */
-
-ul.tree {
-  margin: 0.5rem 0 0;
-  padding-left: 0;
-  list-style: none;
-  font-size: 0.925rem;
+.panel table {
+  margin-top: 8px;
 }
 
-ul.tree ul.tree {
-  margin-top: 0.15rem;
-  /* The guide line is what makes depth readable at a glance. */
-  margin-left: 0.45rem;
-  padding-left: 0.9rem;
-  border-left: 1px solid var(--border);
-}
-
-ul.tree li {
-  margin: 0.15rem 0;
-}
-
-ul.tree li.new > .name {
-  font-weight: 600;
-  color: #1f7a43;
-}
-
-@media (prefers-color-scheme: dark) {
-  ul.tree li.new > .name {
-    color: #5cc98a;
-  }
-}
-
-ul.tree .tag.new {
-  color: #1f7a43;
-  border-color: currentColor;
-}
-
-@media (prefers-color-scheme: dark) {
-  ul.tree .tag.new {
-    color: #5cc98a;
-  }
-}
-
-/* A move is the change most worth spotting in the tree — it takes a whole subtree,
-   and its permissions, somewhere else. Amber rather than green: not a new thing. */
-ul.tree li.moved > .name {
-  font-weight: 600;
-  color: #a15c00;
-}
-
-ul.tree .tag.moved {
-  color: #a15c00;
-  border-color: currentColor;
-}
-
-ul.tree li.renamed > .name {
-  font-weight: 600;
-}
-
-@media (prefers-color-scheme: dark) {
-  ul.tree li.moved > .name,
-  ul.tree .tag.moved {
-    color: #e0a458;
-  }
-}
-
-ul.tree li.hidden-children {
-  color: var(--muted);
-  font-size: 0.82rem;
-  font-style: italic;
-}
-
-/* Disclosure rows in the group browser. */
-button.disclosure,
-span.disclosure {
-  display: inline-flex;
-  gap: 0.35rem;
-  align-items: baseline;
-  margin: 0;
-  padding: 0.05rem 0.2rem;
-  font: inherit;
-  font-size: 0.925rem;
-  font-weight: 400;
-  color: var(--fg);
-  background: none;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  cursor: pointer;
+th {
   text-align: left;
-}
-
-span.disclosure.leaf {
-  cursor: default;
-}
-
-button.disclosure:hover {
-  background: var(--bg);
-  border-color: var(--border);
-}
-
-.disclosure .marker {
-  display: inline-block;
-  width: 0.9em;
-  color: var(--muted);
-  font-size: 0.8em;
-}
-
-.crumb {
-  margin: 0 0 0.75rem;
-  font-size: 0.875rem;
-}
-
-/* An action that reads as prose, for things offered inside a sentence. */
-button.link {
-  padding: 0;
-  font: inherit;
-  color: var(--accent);
-  background: none;
-  border: none;
-  text-decoration: underline;
-  cursor: pointer;
-}
-
-button.link:disabled {
-  color: var(--muted);
-  cursor: default;
-}
-
-a.button {
-  display: inline-block;
-  margin-top: 1.1rem;
-  padding: 0.5rem 1rem;
-  font-size: 0.95rem;
+  font-size: 13px;
   font-weight: 600;
-  color: #fff;
-  background: var(--accent);
-  border: 1px solid transparent;
-  border-radius: 6px;
-  text-decoration: none;
+  color: var(--color-sub);
+  background: var(--color-canvas);
+  border-bottom: 1px solid var(--color-line);
+  padding: 8px 12px;
+  white-space: nowrap;
+}
+
+td {
+  vertical-align: top;
+  border-bottom: 1px solid var(--color-line-2);
+  padding: 10px 12px;
+}
+
+tbody tr:last-child td {
+  border-bottom: none;
+}
+
+tbody tr:hover td {
+  background: #fafbfc;
+}
+
+td.muted {
+  color: var(--color-sub);
+}
+
+td.nowrap {
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------- counts */
+
+.counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.count {
+  flex: 1 1 8rem;
+  padding: 12px 16px;
+  background: var(--color-canvas);
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+}
+
+.count .value {
+  display: block;
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+
+.count .label {
+  display: block;
+  font-size: 12.5px;
+  color: var(--color-sub);
+}
+
+.count.loud {
+  background: var(--color-amber-bg);
+  border-color: var(--color-amber-line);
+}
+
+.count.loud .value {
+  color: var(--color-amber);
 }
 
 /* ---------------------------------------------------------- operation tiles */
 
 .tiles {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
-  gap: 0.75rem;
-  margin-bottom: 1rem;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 16px;
 }
 
 .tile {
-  display: block;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 1rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 20px;
   color: inherit;
   text-decoration: none;
+  background: var(--color-card);
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+a.tile:hover {
+  text-decoration: none;
+  border-color: var(--color-blue);
+  box-shadow: 0 2px 8px rgba(26, 34, 51, 0.08);
+}
+
+.tile-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  margin-bottom: 8px;
+  color: var(--color-blue);
+  background: var(--color-selected);
+  border-radius: 8px;
+}
+
+.tile-icon svg {
+  width: 20px;
+  height: 20px;
 }
 
 .tile h2 {
-  font-size: 1rem;
-  margin: 0 0 0.35rem;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
 }
 
 .tile p {
   margin: 0;
-  color: var(--muted);
-  font-size: 0.9rem;
+  color: var(--color-sub);
 }
 
 .tile[aria-disabled='true'] {
@@ -556,13 +556,24 @@ a.button {
 }
 
 .tile .status {
-  display: inline-block;
-  margin-top: 0.6rem;
-  font-size: 0.8rem;
-  color: var(--muted);
+  margin-top: 8px;
+  font-size: 12.5px;
+  color: var(--color-sub);
 }
 
 /* ------------------------------------------------------------- tree browser */
+
+/* A tree on its own in the page sits in a card, like the panels around it. */
+.page > .tree {
+  padding: 8px 12px;
+  background: var(--color-card);
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+}
+
+.page > .row {
+  margin-top: 0;
+}
 
 .tree ul,
 .archived ul {
@@ -574,24 +585,43 @@ a.button {
 .tree-row {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
-  min-height: 1.9rem;
-  font-size: 0.925rem;
+  gap: 8px;
+  min-height: 32px;
+  padding-right: 6px;
+  border-radius: 6px;
+}
+
+.tree-row:hover {
+  background: var(--color-canvas);
+}
+
+.tree-row .disclosure,
+.tree-row .disclosure-spacer {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  margin: 0;
+  padding: 0;
+  color: var(--color-sub);
+  background: none;
+  border: none;
+  border-radius: 4px;
 }
 
 .tree-row .disclosure {
-  margin: 0;
-  background: none;
-  border: none;
-  color: var(--muted);
-  padding: 0;
-  width: 1.1rem;
   cursor: pointer;
 }
 
-.tree-row .disclosure-spacer {
-  display: inline-block;
-  width: 1.1rem;
+.tree-row .disclosure:hover {
+  background: var(--color-line);
+}
+
+.tree-row .disclosure svg {
+  width: 14px;
+  height: 14px;
 }
 
 .tree-row.kind-group .title {
@@ -600,66 +630,45 @@ a.button {
 
 .tree-row.kind-documentGroup .title,
 .tree-row.kind-other .title {
-  color: var(--muted);
+  color: var(--color-sub);
+}
+
+/* ------------------------------------------------------------- archived view */
+
+.archived {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.archived > p {
+  margin: 0;
 }
 
 .bucket summary {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 8px;
   cursor: pointer;
 }
 
+.bucket summary .title {
+  font-weight: 600;
+}
+
 .bucket ul {
-  margin-top: 0.5rem;
+  margin-top: 8px;
 }
 
 .bucket li {
-  font-size: 0.925rem;
-  padding: 0.15rem 0;
+  padding: 3px 0;
 }
 
 .bucket li label {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  gap: 8px;
   margin: 0;
   font-weight: 400;
-}
-
-/* ----------------------------------------------------------------- plan view */
-
-table.plan {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.9rem;
-}
-
-table.plan th,
-table.plan td {
-  text-align: left;
-  vertical-align: top;
-  padding: 0.35rem 0.5rem 0.35rem 0;
-  border-bottom: 1px solid var(--border);
-}
-
-table.plan th {
-  color: var(--muted);
-  font-weight: 600;
-}
-
-label.inline {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.5rem;
-  font-weight: 400;
-  margin-top: 0.85rem;
-}
-
-label.inline input[type='checkbox'] {
-  margin-top: 0.3rem;
-}
-
-.error-text {
-  color: #c0392b;
+  cursor: pointer;
 }

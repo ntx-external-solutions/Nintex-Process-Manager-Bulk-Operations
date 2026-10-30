@@ -9,6 +9,7 @@
  * and the confirmation counts the republishes.
  */
 
+import { Button } from '@exp-textura/react';
 import { useCallback, useMemo, useRef, useState } from 'react';
 
 import { Journal, sessionJournalStore } from '@/lib/exec/journal.ts';
@@ -28,6 +29,7 @@ import { DestinationPicker, TOP_LEVEL } from '../components/DestinationPicker.ts
 import { ResultsSummary } from '../components/ResultsSummary.tsx';
 import { SessionGate } from '../components/SessionGate.tsx';
 import { TreeBrowser, useBrowseTree } from '../components/TreeBrowser.tsx';
+import { Notice } from '../_ui/kit.tsx';
 
 type Stage =
   | { kind: 'select' }
@@ -173,17 +175,11 @@ function MoveFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOut:
   }
 
   return (
-    <main>
-      <h1>Bulk Move</h1>
-      <p className="lede">
-        Signed in as {session.username} on <code>{session.tenant}</code>. <a href="/">Back</a>
-      </p>
-
+    <>
       {error !== null && (
-        <div className="panel error">
-          <h2>Problem</h2>
-          <p>{error}</p>
-        </div>
+        <Notice tone="critical" title="Problem">
+          {error}
+        </Notice>
       )}
 
       {stage.kind === 'select' && (
@@ -203,9 +199,9 @@ function MoveFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOut:
           <DestinationPicker state={destinations} chosen={destinationKey} onChoose={setDestinationKey} allowTopLevel />
 
           <div className="row">
-            <button type="button" disabled={!hasSelection(browse.selection) || !destination} onClick={() => void buildPlan()}>
+            <Button disabled={!hasSelection(browse.selection) || !destination} onClick={() => void buildPlan()}>
               Preview the move
-            </button>
+            </Button>
           </div>
         </>
       )}
@@ -230,9 +226,9 @@ function MoveFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOut:
         <div className="panel">
           <h2>Moving</h2>
           <p className="pending">{stage.progress}</p>
-          <button type="button" className="secondary" onClick={() => abort.current?.abort()}>
+          <Button buttonType="secondary" onClick={() => abort.current?.abort()}>
             Stop after the current batch
-          </button>
+          </Button>
         </div>
       )}
 
@@ -244,13 +240,13 @@ function MoveFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOut:
           siteUrl={session.siteUrl}
           filenameStem="move-results"
           actions={
-            <button type="button" className="secondary" onClick={() => setStage({ kind: 'select' })}>
+            <Button buttonType="secondary" onClick={() => setStage({ kind: 'select' })}>
               Move something else
-            </button>
+            </Button>
           }
         />
       )}
-    </main>
+    </>
   );
 }
 
@@ -338,12 +334,12 @@ function PlanView(props: {
           {republished > 0 && ` ${republished} would be republished as a new major version.`}
         </p>
         <div className="row">
-          <button type="button" className="secondary" onClick={() => downloadCsv(datedFilename('move-preview'), resultsToCsv(movePreviewRows(plan, chosen)))}>
+          <Button buttonType="secondary" onClick={() => downloadCsv(datedFilename('move-preview'), resultsToCsv(movePreviewRows(plan, chosen)))}>
             Download the preview
-          </button>
-          <button type="button" className="secondary" onClick={props.onBack}>
+          </Button>
+          <Button buttonType="secondary" onClick={props.onBack}>
             Change the selection
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -355,9 +351,9 @@ function PlanView(props: {
               <li key={f.uniqueId}>{f.message}</li>
             ))}
           </ul>
-          <button type="button" onClick={props.onReplan}>
+          <Button onClick={props.onReplan}>
             Build the plan again
-          </button>
+          </Button>
         </div>
       )}
 
@@ -406,18 +402,18 @@ function PlanView(props: {
         <h2>4. Move</h2>
         {props.confirming ? (
           <div className="row">
-            <button type="button" onClick={props.onApply}>
+            <Button onClick={props.onApply}>
               Yes, move {items.length} item{items.length === 1 ? '' : 's'}
               {republished > 0 && ` (${republished} republished)`}
-            </button>
-            <button type="button" className="secondary" onClick={() => props.setConfirming(false)}>
+            </Button>
+            <Button buttonType="secondary" onClick={() => props.setConfirming(false)}>
               Cancel
-            </button>
+            </Button>
           </div>
         ) : (
-          <button type="button" disabled={items.length === 0 || props.stale.length > 0} onClick={() => props.setConfirming(true)}>
+          <Button disabled={items.length === 0 || props.stale.length > 0} onClick={() => props.setConfirming(true)}>
             Move {items.length} item{items.length === 1 ? '' : 's'}
-          </button>
+          </Button>
         )}
       </div>
     </>

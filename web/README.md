@@ -72,3 +72,9 @@ Create a Vercel project from this repository with **Root Directory** set to `web
 root directory is a project setting in Vercel, not something `vercel.json` can set, so
 `web/vercel.json` only names the framework. Set `AUTH_SECRET` in the project's
 environment variables. Deploy to a Nintex team on Pro: Hobby is for non-commercial use.
+
+The UI is Textura, the Nintex design system (`@exp-textura/react`, `@exp-textura/icons`),
+in the same shell as Tango and ntx-proc-demo. Its packages come from the Nintex Azure
+Artifacts feed, so the Vercel project needs the same `NPM_RC` environment variable those
+projects have (a PAT that expires). Without it the install fails with a 401 or 404. Local
+installs use the feed set in `~/.npmrc`. Any file that imports Textura needs `'use client'`.
