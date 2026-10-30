@@ -79,7 +79,8 @@ Maintained by the Cowork session. Claude Code reads this but does not edit it.
   (the UI refuses), refuses to delete one (`ProcessAttachment`), but misses draft-only
   references, and deleting a document a draft points at breaks that process. One process on
   the demo tenant is already broken that way. JB decided: attached documents (processes or
-  training units) are never archived or deleted; documents get their own pages.
+  training units) are never archived or deleted; documents get their own area, with restore
+  and a repair tool for dead references added to W8.
 - Next: W8 (documents) is Ready. Variations are still untested live (see below).
 - Token duration (60000 minutes) deferred by JB; not a task.
 - Process and group names were removed from Cowork's handoff text (18 Oct) per CLAUDE.md.
