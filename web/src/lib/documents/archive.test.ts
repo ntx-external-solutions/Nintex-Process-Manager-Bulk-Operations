@@ -17,6 +17,7 @@ import {
   runDocumentArchive,
   settleDocumentArchive,
   type DocumentArchiveGateway,
+  type DocumentTarget,
   type PropertiesRead,
 } from './archive.ts';
 import { holdersMessage, toDocumentProperties } from './holders.ts';
@@ -244,7 +245,7 @@ function fakeGateway(propsById: Record<number, Record<string, unknown>>, answers
   return { gateway, sent };
 }
 
-const target = (n: number) => ({ documentId: n, uniqueId: d(n), name: `Doc ${n}`, path: [], groupId: 7, chosen: CHOSEN_FROM_TREE, location: 'Cloud', type: 'PDF' });
+const target = (n: number, more: Partial<DocumentTarget> = {}): DocumentTarget => ({ documentId: n, uniqueId: d(n), name: `Doc ${n}`, path: [], groupId: 7, groupUniqueId: g(7), isArchived: false, chosen: CHOSEN_FROM_TREE, location: 'Cloud', type: 'PDF', ...more });
 const FREE_RAW = { attachedProcesses: [], attachedTrainings: [], isArchived: false };
 
 test('batches of 50, each re-checked first: a document attached since the plan is dropped with its new holder', async () => {

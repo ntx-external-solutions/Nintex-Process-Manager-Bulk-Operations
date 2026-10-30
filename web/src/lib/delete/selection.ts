@@ -193,10 +193,11 @@ export function selectionIds(selection: DeleteSelection): string[] {
  * The groups a finished run may offer to delete: checked in the tree, and either the
  * group a deleted target was in or a checked group above one. Whether each is now empty
  * is for the cleanup's own reads to decide (lib/cleanup); this only keeps a group the run
- * deleted nothing from, or one nobody checked, from being offered at all (W6).
+ * deleted nothing from, or one nobody checked, from being offered at all (W6). Delete
+ * documents (W8b) passes its documents as the targets, with their primary group.
  */
 export function groupsTheRunDeletedFrom(
-  selection: Pick<DeleteSelection, 'groups' | 'targets'>,
+  selection: { groups: readonly CoveredGroup[]; targets: ReadonlyArray<{ uniqueId: string; groupUniqueId: string | null }> },
   deletedUniqueIds: Iterable<string>,
   holdingGroupUniqueId: string | null = null,
 ): CoveredGroup[] {

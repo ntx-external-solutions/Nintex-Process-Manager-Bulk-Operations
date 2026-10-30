@@ -21,6 +21,13 @@
 // the bulk archive refuses inside a 200, and one in Shared that is also associated with
 // Manuals. The list filter by group is recursive and takes in associated documents, as the
 // spike measured; the bulk archive does not check attachments, as the tenant does not.
+// For Delete documents (W8b): Old forms and Spent at the top level. Old forms holds a free
+// document, one that picks up an attachment between the archive and the delete, one the
+// tenant keeps (ProcessAttachment inside a 200, though its properties list nothing), an
+// archived one whose delete is refused, and an archived document only associated with it,
+// which keeps the group from being deleted. Spent holds one archived document and nothing
+// else. The bulk delete refuses an active document (NotArchived) and an attached one
+// (ProcessAttachment) but not one only a draft points at, as measured.
 // For ownership, start the app with SCIM_BASE_URL=http://localhost:<port>.
 //
 //   node dev/mock-pm.mjs [port]      (default 4999; sign in to http://localhost:4999/tenant)
@@ -38,7 +45,7 @@ const port = Number(process.argv[2] ?? 4999);
 const id = (n) => `${String(n).padStart(8, '0')}-0000-4000-8000-${String(n).padStart(12, '0')}`;
 
 const ROOT = id(900), FIN = id(901), SUB = id(902), OTHER = id(903), RET = id(904), FORMS = id(905), POLICIES = id(906);
-const LIB = id(907), MAN = id(908), SHARED = id(909);
+const LIB = id(907), MAN = id(908), SHARED = id(909), OLDF = id(910), SPENT = id(911);
 const groups = {
   [FIN]: { parent: '', title: 'Finance' },
   [SUB]: { parent: FIN, title: 'Payables' },
@@ -49,6 +56,8 @@ const groups = {
   [LIB]: { parent: '', title: 'Library' },
   [MAN]: { parent: LIB, title: 'Manuals' },
   [SHARED]: { parent: '', title: 'Shared' },
+  [OLDF]: { parent: '', title: 'Old forms' },
+  [SPENT]: { parent: '', title: 'Spent' },
 };
 // Documents by numeric id. ListType=All does not return archived ones (spike S1).
 // attached: process ids its properties list; trainings: training unit names.
@@ -68,6 +77,13 @@ const docs = Object.fromEntries([
   doc(209, 'Shared template.docx', SHARED, { associated: [MAN] }),
   doc(210, 'Supplier link', SHARED, { location: 'External' }),
   doc(211, 'Archived manual.pdf', MAN, { archived: true }),
+  doc(212, 'Obsolete form.docx', OLDF),
+  // Free at the plan and at the archive's re-check; attached to Elsewhere by the delete's.
+  doc(213, 'Late holder.pdf', OLDF, { attachOnRead: 3, attachTo: id(5) }),
+  doc(214, 'Tenant keeps.pdf', OLDF, { refuseDelete: 'ProcessAttachment' }),
+  doc(215, 'Locked archive.pdf', OLDF, { archived: true, refuseDelete: 'Locked' }),
+  doc(216, 'Borrowed archive.pdf', SHARED, { archived: true, associated: [OLDF] }),
+  doc(217, 'Spent sheet.xlsx', SPENT, { archived: true }),
 ].map((d) => [Number(d.uniqueId.slice(-3)), d]));
 const docNumber = (d) => Number(d.uniqueId.slice(-3));
 const within = (g, top) => {
@@ -263,6 +279,29 @@ http.createServer(async (req, res) => {
       if (!d) errors.push({ documentId: n, errorCode: 'NotFound' });
       else if (d.refuseArchive) errors.push({ documentId: n, errorCode: d.refuseArchive });
       else d.archived = true;
+    }
+    return send(res, 200, { errors });
+  }
+  if (p === '/bff/document/api/v1/documents/bulk/restore') {
+    const errors = [];
+    for (const n of JSON.parse(body).documentIds) {
+      const d = docs[n];
+      if (!d) errors.push({ documentId: n, errorCode: 'NotFound' });
+      else if (!d.archived) errors.push({ documentId: n, errorCode: 'NotArchived' });
+      else d.archived = false;
+    }
+    return send(res, 200, { errors });
+  }
+  if (p === '/bff/document/api/v1/documents/bulk' && req.method === 'DELETE') {
+    // The tenant guards listed attachments, active or archived holder, but not a draft's (spike).
+    const errors = [];
+    for (const n of JSON.parse(body).documentIds) {
+      const d = docs[n];
+      if (!d) errors.push({ documentId: n, errorCode: 'NotFound' });
+      else if (!d.archived) errors.push({ documentId: n, errorCode: 'NotArchived' });
+      else if (d.refuseDelete) errors.push({ documentId: n, errorCode: d.refuseDelete });
+      else if (d.attached.length > 0) errors.push({ documentId: n, errorCode: 'ProcessAttachment' });
+      else delete docs[n];
     }
     return send(res, 200, { errors });
   }

@@ -47,6 +47,8 @@ import {
 } from './processes.ts';
 import {
   bulkArchiveDocuments,
+  bulkDeleteDocuments,
+  bulkRestoreDocuments,
   DOCUMENT_BATCH_SIZE,
   getDocumentProperties,
   listDocuments,
@@ -162,7 +164,11 @@ export type Operation =
   /** What holds one document: processes, training units, groups. */
   | { op: 'document.properties'; documentId: number }
   /** Archive up to 50 documents. 200 even when some fail; the answer's `errors` says which. */
-  | { op: 'documents.archive'; documentIds: number[] };
+  | { op: 'documents.archive'; documentIds: number[] }
+  /** Restore up to 50 archived documents. 200 even when some fail. */
+  | { op: 'documents.restore'; documentIds: number[] }
+  /** Permanently delete up to 50 archived documents. 200 even when some fail. */
+  | { op: 'documents.delete'; documentIds: number[] };
 
 export type OperationName = Operation['op'];
 
@@ -195,6 +201,8 @@ export const OPERATION_NAMES: readonly OperationName[] = [
   'documents.list',
   'document.properties',
   'documents.archive',
+  'documents.restore',
+  'documents.delete',
 ];
 
 /**
@@ -217,6 +225,10 @@ export const WRITE_OPERATIONS: readonly OperationName[] = [
   'group.rename',
   // W8a: documents, archived only when nothing holds them (the caller's check, W8).
   'documents.archive',
+  // W8b: the delete, and the restore that puts back what a delete run archived and did not
+  // delete. W8c's Restore documents page uses the same restore.
+  'documents.restore',
+  'documents.delete',
 ];
 
 /**
@@ -354,6 +366,12 @@ export async function execute(ctx: PmContext, operation: Operation): Promise<unk
 
     case 'documents.archive':
       return bulkArchiveDocuments(ctx, operation.documentIds);
+
+    case 'documents.restore':
+      return bulkRestoreDocuments(ctx, operation.documentIds);
+
+    case 'documents.delete':
+      return bulkDeleteDocuments(ctx, operation.documentIds);
   }
 }
 
@@ -708,7 +726,9 @@ export function parseOperation(input: unknown): ParseResult {
       return { ok: true, operation: { op, documentId } };
     }
 
-    case 'documents.archive': {
+    case 'documents.archive':
+    case 'documents.restore':
+    case 'documents.delete': {
       const extra = Object.keys(body).filter((key) => key !== 'op' && key !== 'documentIds');
       const ids = body['documentIds'];
       if (

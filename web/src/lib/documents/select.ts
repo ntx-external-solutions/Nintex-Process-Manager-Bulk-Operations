@@ -9,6 +9,7 @@ import type { DocumentEntry, DocumentIndex } from './list.ts';
 
 export const CHOSEN_FROM_TREE = 'From the tree';
 export const CHOSEN_FROM_LIST = 'From the document list';
+export const CHOSEN_FROM_ARCHIVED = 'From the archived list';
 export const CHOSEN_BY_ID = 'By id';
 
 /** A results row's Name for a document nothing could name. The process pages' wording names the process lists. */

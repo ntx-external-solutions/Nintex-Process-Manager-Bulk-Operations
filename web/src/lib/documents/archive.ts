@@ -32,6 +32,10 @@ export interface DocumentTarget {
   path: string[];
   /** The primary group's numeric id, blank in the results when unknown. */
   groupId: number | null;
+  /** The primary group's GUID, for the delete page's cleanup offer. */
+  groupUniqueId: string | null;
+  /** Archived when the plan was built: Delete documents takes these straight to its delete phase. */
+  isArchived: boolean;
   chosen: string;
   location: string;
   type: string;
@@ -51,53 +55,56 @@ export type PropertiesRead = DocumentProperties | { error: string };
 const isError = (read: PropertiesRead | undefined): read is { error: string } =>
   read !== undefined && 'error' in read;
 
-function skippedRow(c: ChosenDocument, message: string, groupId: number | null = null): ResultRow {
-  return resultRow({
-    objectType: 'Document',
-    objectId: c.entry.uniqueId,
-    name: c.entry.name,
-    operation: 'Archive',
-    status: 'Skipped',
-    message,
-    groupId,
-  });
-}
+export type DocumentOperation = 'Archive' | 'Delete' | 'Restore';
 
-/**
- * The plan. `properties` holds a read for every chosen document. An archived or pending
- * one is left out whether or not its read succeeded.
- */
-export function buildDocumentArchivePlan(input: {
+export interface PlanInput {
   chosen: readonly ChosenDocument[];
   resolveSkipped?: readonly ResultRow[];
   paths: ReadonlyMap<string, string[]>;
   properties: ReadonlyMap<string, PropertiesRead>;
   scan: ReferenceScan;
   index: ProcessIndex;
-}): DocumentArchivePlan {
+}
+
+/**
+ * The checks every archive and delete plan makes, in order: archived (left out by an
+ * archive, kept by a delete), pending, unreadable, then anything holding it. An archived
+ * document is checked for holders too: deleting one a process or a draft points at breaks
+ * that process (spike).
+ */
+export function checkChosenDocuments(
+  input: PlanInput,
+  operation: 'Archive' | 'Delete',
+): { targets: DocumentTarget[]; skipped: ResultRow[] } {
   const targets: DocumentTarget[] = [];
   const skipped: ResultRow[] = [...(input.resolveSkipped ?? [])];
+  const verb = operation === 'Archive' ? 'archived' : 'deleted';
+  const skip = (c: ChosenDocument, message: string, groupId: number | null = null) =>
+    skipped.push(
+      resultRow({ objectType: 'Document', objectId: c.entry.uniqueId, name: c.entry.name, operation, status: 'Skipped', message, groupId }),
+    );
 
   for (const c of input.chosen) {
     const read = input.properties.get(c.entry.uniqueId.toLowerCase());
     const props = read && !isError(read) ? read : null;
     const groupId = props?.primaryGroupId ?? null;
-    if (props?.isArchived ?? c.entry.isArchived) {
-      skipped.push(skippedRow(c, ALREADY_ARCHIVED, groupId));
+    const isArchived = props?.isArchived ?? c.entry.isArchived;
+    if (isArchived && operation === 'Archive') {
+      skip(c, ALREADY_ARCHIVED, groupId);
       continue;
     }
     if (props?.isPending ?? c.entry.isPending) {
-      skipped.push(skippedRow(c, PENDING, groupId));
+      skip(c, PENDING, groupId);
       continue;
     }
     if (!props) {
       const why = isError(read) ? read.error : 'it was not read';
-      skipped.push(skippedRow(c, `Could not read what holds it (${why}), so it is not archived. Build the plan again to retry.`));
+      skip(c, `Could not read what holds it (${why}), so it is not ${verb}. Build the plan again to retry.`);
       continue;
     }
     const held = holdersMessage(props, processesReferencing(input.scan, c.entry), input.index);
     if (held !== null) {
-      skipped.push(skippedRow(c, held, groupId));
+      skip(c, held, groupId);
       continue;
     }
     targets.push({
@@ -106,12 +113,22 @@ export function buildDocumentArchivePlan(input: {
       name: c.entry.name,
       path: documentPath(c.entry, input.paths),
       groupId,
+      groupUniqueId: c.entry.primaryGroupUniqueId,
+      isArchived,
       chosen: c.chosen,
       location: c.entry.location,
       type: c.entry.type,
     });
   }
+  return { targets, skipped };
+}
 
+/**
+ * The plan. `properties` holds a read for every chosen document. An archived or pending
+ * one is left out whether or not its read succeeded.
+ */
+export function buildDocumentArchivePlan(input: PlanInput): DocumentArchivePlan {
+  const { targets, skipped } = checkChosenDocuments(input, 'Archive');
   return { targets, skipped, unreadProcesses: [...input.scan.unread], processesRead: input.scan.read };
 }
 
@@ -142,23 +159,72 @@ export interface DocumentRunOptions {
   onProgress?: (done: number, total: number, label: string) => void;
 }
 
+/** One bulk write, as the batch runner needs it. */
+export interface BatchWrite {
+  operation: DocumentOperation;
+  /** "archive", "delete", "restore". */
+  verb: string;
+  /** "archived", "deleted", "restored". */
+  past: string;
+  /** "archiving", "deleting", "restoring". */
+  verbing: string;
+  /** A Success row's message, before any note about the batch. */
+  done: string;
+  call(documentIds: number[]): Promise<DocumentBulkAnswer>;
+  /**
+   * The re-check straight before the write: a reason to leave the document out, or null.
+   * Without one, the batch is sent as planned (the restore: attachments don't matter).
+   */
+  recheck?: (properties: DocumentProperties) => string | null;
+  /** Error codes that mean "left alone", Skipped with this message rather than Failed. */
+  skipCodes?: Readonly<Record<string, string>>;
+}
+
+/** The archive's re-check: anything archived, pending or held since the plan is dropped. */
+function archiveRecheck(index: ProcessIndex) {
+  return (props: DocumentProperties): string | null => {
+    if (props.isArchived === true) return `${ALREADY_ARCHIVED} by the time its batch ran`;
+    if (props.isPending === true) return PENDING;
+    const held = attachedNow(props) ? holdersMessage(props, [], index) : null;
+    return held === null ? null : `Attached since the plan was built. ${held}`;
+  };
+}
+
+export function archiveWrite(gateway: DocumentArchiveGateway, index: ProcessIndex): BatchWrite {
+  return { operation: 'Archive', verb: 'archive', past: 'archived', verbing: 'archiving', done: 'Archived.', call: (ids) => gateway.archive(ids), recheck: archiveRecheck(index) };
+}
+
 /**
  * Archive the plan's targets in batches of up to 50. Returns a row per target, to be
  * settled by `settleDocumentArchive` against a fresh read: a Success here is what the
  * call said, not yet what the tenant did.
  */
-export async function runDocumentArchive(
+export function runDocumentArchive(
   gateway: DocumentArchiveGateway,
   targets: readonly DocumentTarget[],
   controls: Controls,
   options: DocumentRunOptions,
+): Promise<ResultRow[]> {
+  return runDocumentBatches(gateway, targets, controls, archiveWrite(gateway, options.index), options);
+}
+
+/**
+ * Any bulk write in batches of up to 50, each batch re-checked first when the write has
+ * a re-check. A row per target; the caller settles them against a fresh read.
+ */
+export async function runDocumentBatches(
+  gateway: { properties(documentId: number): Promise<unknown> },
+  targets: readonly DocumentTarget[],
+  controls: Controls,
+  write: BatchWrite,
+  options: Omit<DocumentRunOptions, 'index'>,
 ): Promise<ResultRow[]> {
   const size = Math.max(1, Math.min(options.batchSize ?? DOCUMENT_BATCH_SIZE, DOCUMENT_BATCH_SIZE));
   const concurrency = Math.max(1, options.concurrency ?? 5);
   const errorText = options.errorText ?? ((e: unknown) => (e instanceof Error ? e.message : String(e)));
   const rows: ResultRow[] = [];
   const row = (t: DocumentTarget, status: string, message: string, statusCode: number | null = null) =>
-    resultRow({ objectType: 'Document', objectId: t.uniqueId, name: t.name, operation: 'Archive', status, message, groupId: t.groupId, statusCode });
+    resultRow({ objectType: 'Document', objectId: t.uniqueId, name: t.name, operation: write.operation, status, message, groupId: t.groupId, statusCode });
   let done = 0;
 
   for (let start = 0; start < targets.length; start += size) {
@@ -173,23 +239,24 @@ export async function runDocumentArchive(
     const recheck: ResultRow[] = [];
     // Set from inside the re-reads, so held in an object the loop can see change.
     const stop = { reason: null as string | null };
-    for (let i = 0; i < batch.length && stop.reason === null; i += concurrency) {
+    const check = write.recheck;
+    if (check === undefined) clear.push(...batch);
+    for (let i = 0; check !== undefined && i < batch.length && stop.reason === null; i += concurrency) {
       await Promise.all(
         batch.slice(i, i + concurrency).map(async (t) => {
           try {
-            const props = toDocumentProperties(await gateway.properties(t.documentId));
-            const held = attachedNow(props) ? holdersMessage(props, [], options.index) : null;
-            if (props.isArchived === true) recheck.push(row(t, 'Skipped', `${ALREADY_ARCHIVED} by the time its batch ran`));
-            else if (props.isPending === true) recheck.push(row(t, 'Skipped', PENDING));
-            else if (held !== null) recheck.push(row(t, 'Skipped', `Attached since the plan was built. ${held}`));
-            else clear.push(t);
+            const why = check(toDocumentProperties(await gateway.properties(t.documentId)));
+            if (why === null) clear.push(t);
+            else recheck.push(row(t, 'Skipped', why));
           } catch (error) {
             const reason = controls.isFatal(error);
             if (reason) {
               stop.reason = reason;
               return;
             }
-            recheck.push(row(t, 'Skipped', `Could not re-check what holds it straight before archiving (${errorText(error)}), so it was not archived`, options.statusOf?.(error) ?? null));
+            recheck.push(
+              row(t, 'Skipped', `Could not re-check what holds it straight before ${write.verbing} (${errorText(error)}), so it was not ${write.past}`, options.statusOf?.(error) ?? null),
+            );
           }
         }),
       );
@@ -205,13 +272,13 @@ export async function runDocumentArchive(
       // Keep the plan's order in the batch, whatever order the re-reads finished in.
       const sent = batch.filter((t) => clear.includes(t));
       try {
-        const answer = await gateway.archive(sent.map((t) => t.documentId));
-        rows.push(...rowsFromAnswer(sent, answer, row));
+        const answer = await write.call(sent.map((t) => t.documentId));
+        rows.push(...rowsFromAnswer(sent, answer, row, write));
       } catch (error) {
         const reason = controls.isFatal(error);
         const why = reason ?? errorText(error);
         for (const t of sent) {
-          rows.push(row(t, 'Failed', `The archive call failed (${why}). The final read says whether it took effect.`, options.statusOf?.(error) ?? null));
+          rows.push(row(t, 'Failed', `The ${write.verb} call failed (${why}). The final read says whether it took effect.`, options.statusOf?.(error) ?? null));
         }
         if (reason) {
           controls.stop(reason);
@@ -237,6 +304,7 @@ export function rowsFromAnswer(
   sent: readonly DocumentTarget[],
   answer: DocumentBulkAnswer,
   row: (t: DocumentTarget, status: string, message: string) => ResultRow,
+  write: Pick<BatchWrite, 'done' | 'skipCodes'> = { done: 'Archived.' },
 ): ResultRow[] {
   const ids = new Set(sent.map((t) => t.documentId));
   const codes = new Map<number, string[]>();
@@ -248,7 +316,9 @@ export function rowsFromAnswer(
   const note = loose.length > 0 ? ` Process Manager also reported an error it did not tie to a document in this batch (${loose.join(', ')}).` : '';
   return sent.map((t) => {
     const mine = codes.get(t.documentId);
-    return mine ? row(t, 'Failed', `Process Manager refused: ${mine.join(', ')}`) : row(t, 'Success', `Archived.${note}`);
+    if (!mine) return row(t, 'Success', `${write.done}${note}`);
+    const skip = mine.length === 1 ? write.skipCodes?.[mine[0]!] : undefined;
+    return skip !== undefined ? row(t, 'Skipped', skip) : row(t, 'Failed', `Process Manager refused: ${mine.join(', ')}`);
   });
 }
 

@@ -25,37 +25,18 @@ import {
   runDocumentArchive,
   settleDocumentArchive,
   type DocumentArchivePlan,
-  type PropertiesRead,
 } from '@/lib/documents/archive.ts';
-import { toDocumentProperties } from '@/lib/documents/holders.ts';
-import { documentPath, loadDocumentIndex, loadDocumentList, type DocumentEntry } from '@/lib/documents/list.ts';
-import { scanProcessesForDocuments } from '@/lib/documents/references.ts';
-import {
-  CHOSEN_FROM_LIST,
-  CHOSEN_FROM_TREE,
-  combineChosen,
-  resolveDocumentIds,
-  splitByPrimaryGroup,
-  type ChosenDocument,
-} from '@/lib/documents/select.ts';
+import { loadDocumentIndex } from '@/lib/documents/list.ts';
 import { resultsToCsv, type ResultRow } from '@/lib/exec/report.ts';
 import { createControls, errorMessage } from '@/lib/exec/runner.ts';
-import { loadGroupPaths } from '@/lib/select/archived.ts';
-import { chosenLabel, EMPTY_ID_INPUT, typedIds, type IdInput } from '@/lib/select/ids.ts';
-import { loadForSelection } from '@/lib/select/resolve.ts';
-import { hasSelection, type Selection } from '@/lib/select/selection.ts';
-import { loadProcessIndex, type ProcessIndex } from '@/lib/tenant/state.ts';
+import type { ProcessIndex } from '@/lib/tenant/state.ts';
 import { datedFilename, downloadCsv } from '@/lib/ui/download.ts';
-import { browserDocumentGateway, browserGateway, groupBreadcrumb, PmRequestError, type SessionInfo } from '@/lib/ui/gateway.ts';
+import { browserDocumentGateway, browserGateway, PmRequestError, type SessionInfo } from '@/lib/ui/gateway.ts';
 import { Notice, Progress } from '../../_ui/kit.tsx';
-import { Checkbox } from '../../components/Checkbox.tsx';
-import { DocumentList } from '../../components/DocumentList.tsx';
-import { ProcessIdInput } from '../../components/ProcessIdInput.tsx';
 import { ResultsSummary } from '../../components/ResultsSummary.tsx';
 import { SessionGate } from '../../components/SessionGate.tsx';
-import { TreeBrowser, useBrowseTree } from '../../components/TreeBrowser.tsx';
-
-type Source = 'tree' | 'list' | 'ids';
+import { useBrowseTree } from '../../components/TreeBrowser.tsx';
+import { isSignedOut, LeftOut, readWhatHolds, UnreadProcesses, useDocumentChoice } from '../choose.tsx';
 
 type Stage =
   | { kind: 'select' }
@@ -64,15 +45,6 @@ type Stage =
   | { kind: 'running'; plan: DocumentArchivePlan; progress: string }
   | { kind: 'done'; rows: ResultRow[]; warning: string | null };
 
-/** What the checked groups hold, read for the selection it was read for. */
-interface TreeDocuments {
-  selection: Selection;
-  inSubtree: DocumentEntry[];
-  associatedOnly: DocumentEntry[];
-  /** Associated-only documents the operator ticked, lowercased ids. */
-  ticked: ReadonlySet<string>;
-}
-
 export default function ArchiveDocumentsPage() {
   return (
     <SessionGate title="Archive documents">
@@ -80,8 +52,6 @@ export default function ArchiveDocumentsPage() {
     </SessionGate>
   );
 }
-
-const isSignedOut = (e: unknown) => e instanceof PmRequestError && e.signedOut;
 
 function ArchiveDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; onSignedOut: () => void }) {
   const gateway = useMemo(() => browserGateway(), []);
@@ -95,15 +65,7 @@ function ArchiveDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; 
   const browse = useBrowseTree(gateway, handleError);
 
   const [stage, setStage] = useState<Stage>({ kind: 'select' });
-  const [source, setSource] = useState<Source>('tree');
   const [error, setError] = useState<string | null>(null);
-  const [treeDocs, setTreeDocs] = useState<TreeDocuments | null>(null);
-  const [treeReading, setTreeReading] = useState<string | null>(null);
-  const [list, setList] = useState<DocumentEntry[] | null>(null);
-  const [listReading, setListReading] = useState<string | null>(null);
-  const [listTicked, setListTicked] = useState<ReadonlySet<string>>(new Set());
-  const [idInput, setIdInput] = useState<IdInput>(EMPTY_ID_INPUT);
-  const [paths, setPaths] = useState<ReadonlyMap<string, string[]>>(new Map());
   const [confirming, setConfirming] = useState(false);
   const abort = useRef<AbortController | null>(null);
 
@@ -112,141 +74,37 @@ function ArchiveDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; 
     setError(errorMessage(cause));
   };
 
-  const ids = typedIds(idInput.text);
-  const treeChosen = hasSelection(browse.selection);
-  // A read of the checked groups is for the selection it was made for, and no other.
-  const treeDocsCurrent = treeDocs !== null && treeDocs.selection === browse.selection ? treeDocs : null;
-
-  /** Breadcrumbs for the primary groups not yet known, merged into the page's paths. */
-  async function addPaths(entries: readonly DocumentEntry[], progress: (text: string) => void): Promise<Map<string, string[]>> {
-    const missing = [...new Set(entries.map((e) => e.primaryGroupUniqueId).filter((g): g is string => g !== null && !paths.has(g)))];
-    const read = await loadGroupPaths(missing, groupBreadcrumb, {
-      isFatal: (e) => (isSignedOut(e) ? 'signed out' : null),
-      onProgress: (done, total) => progress(`Reading group paths… ${done} of ${total}`),
-    });
-    setPaths((current) => new Map([...current, ...read]));
-    return new Map([...paths, ...read]);
-  }
-
-  /** The checked groups' documents, split by where their primary group is. */
-  async function readTreeDocuments(): Promise<TreeDocuments> {
-    setTreeReading('Reading the checked groups…');
-    try {
-      const loaded = await loadForSelection(gateway, browse.tree, browse.selection, {
-        onProgress: (n) => setTreeReading(`Reading the checked groups… ${n} read`),
-      });
-      browse.setTree(loaded.tree);
-      const covered = new Set(loaded.resolution.groups.map((g) => g.uniqueId.toLowerCase()));
-      // The tenant's group filter takes in the subgroups (spike), so only the topmost checked groups are listed.
-      const tops = loaded.resolution.groups.filter((g) => g.parentUniqueId === null || !covered.has(g.parentUniqueId.toLowerCase()));
-      const listed = new Map<string, DocumentEntry>();
-      for (const [i, group] of tops.entries()) {
-        setTreeReading(`Listing documents in ${group.title} (${i + 1} of ${tops.length})…`);
-        for (const entry of await loadDocumentList(docs.list, 'All', group.uniqueId)) listed.set(entry.uniqueId.toLowerCase(), entry);
-      }
-      const split = splitByPrimaryGroup([...listed.values()], covered);
-      await addPaths(split.associatedOnly, setTreeReading);
-      const read = { selection: browse.selection, ...split, ticked: new Set<string>() };
-      setTreeDocs(read);
-      return read;
-    } finally {
-      setTreeReading(null);
-    }
-  }
-
-  /** The list tab reads the active list when first opened, and again after a failed read. */
-  async function openList() {
-    setSource('list');
-    if (list !== null || listReading !== null) return;
-    setListReading('Reading the document list…');
-    try {
-      const entries = await loadDocumentList(docs.list, 'All', null, (n) => setListReading(`Reading the document list… ${n} read`));
-      await addPaths(entries, setListReading);
-      setList(entries);
-    } catch (cause) {
-      fail(cause);
-    } finally {
-      setListReading(null);
-    }
-  }
+  const choice = useDocumentChoice({
+    docs,
+    browse,
+    sources: ['tree', 'list', 'ids'],
+    onError: fail,
+    treeNote: (
+      <>
+        Checking a group takes in the documents whose primary group is that group or one under it. Documents that are only
+        associated with a checked group are listed separately, for you to tick or not.
+      </>
+    ),
+  });
 
   async function buildPlan() {
     setError(null);
     setConfirming(false);
     try {
-      let fromTree = treeDocsCurrent;
-      if (treeChosen && fromTree === null) {
-        fromTree = await readTreeDocuments();
-        if (fromTree.associatedOnly.length > 0) {
-          // The operator decides about these before anything is planned.
-          setSource('tree');
-          return;
-        }
-      }
-
-      setStage({ kind: 'planning', progress: 'Reading the document lists…' });
-      const docIndex = await loadDocumentIndex(docs.list, (n) => setStage({ kind: 'planning', progress: `Reading the document lists… ${n} read` }));
-      const fresh = (e: DocumentEntry) => docIndex.get(e.uniqueId.toLowerCase()) ?? e;
-
-      const tree: ChosenDocument[] = fromTree
-        ? [...fromTree.inSubtree, ...fromTree.associatedOnly.filter((e) => fromTree.ticked.has(e.uniqueId.toLowerCase()))].map((e) => ({
-            entry: fresh(e),
-            chosen: CHOSEN_FROM_TREE,
-          }))
-        : [];
-      const fromList: ChosenDocument[] = (list ?? [])
-        .filter((e) => listTicked.has(e.uniqueId.toLowerCase()))
-        .map((e) => ({ entry: fresh(e), chosen: CHOSEN_FROM_LIST }));
-      const byId = ids.length > 0 ? resolveDocumentIds(ids, docIndex, (v) => chosenLabel(idInput, v)) : null;
-      if (byId && byId.chosen.length === 0 && tree.length === 0 && fromList.length === 0) {
-        setError(`None of the ids matched a document: ${byId.unknown.join(', ')}`);
+      const progress = (text: string) => setStage({ kind: 'planning', progress: text });
+      const collected = await choice.collect(progress);
+      if (collected === null) {
         setStage({ kind: 'select' });
         return;
       }
-      const chosen = combineChosen(tree, fromList, byId?.chosen ?? []);
-      if (chosen.length === 0) {
-        setError('The checked groups hold no active documents.');
+      if ('empty' in collected) {
+        setError(collected.empty);
         setStage({ kind: 'select' });
         return;
       }
-      const merged = await addPaths(
-        chosen.map((c) => c.entry),
-        (progress) => setStage({ kind: 'planning', progress }),
-      );
-
       // Every chosen document, archived and pending ones too: the read gives each row its group's id.
-      const toRead = chosen;
-      const properties = new Map<string, PropertiesRead>();
-      for (let i = 0; i < toRead.length; i += 4) {
-        setStage({ kind: 'planning', progress: `Reading what holds each document… ${i} of ${toRead.length}` });
-        await Promise.all(
-          toRead.slice(i, i + 4).map(async (c) => {
-            try {
-              properties.set(c.entry.uniqueId.toLowerCase(), toDocumentProperties(await docs.properties(c.entry.documentId), c.entry.primaryGroupName));
-            } catch (cause) {
-              if (isSignedOut(cause)) throw cause;
-              properties.set(c.entry.uniqueId.toLowerCase(), { error: errorMessage(cause) });
-            }
-          }),
-        );
-      }
-
-      setStage({ kind: 'planning', progress: 'Reading the process lists…' });
-      const index = await loadProcessIndex(gateway.processesList, {
-        onProgress: (n) => setStage({ kind: 'planning', progress: `Reading the process lists… ${n} processes` }),
-      });
-      const active = [...index.values()].filter((p) => !p.isArchived).map((p) => ({ uniqueId: p.uniqueId, name: p.name }));
-      const scan =
-        chosen.every((c) => c.entry.isArchived || c.entry.isPending)
-          ? { holders: [], unread: [], read: 0 }
-          : await scanProcessesForDocuments(active, docs.readModel, {
-              isFatal: isSignedOut,
-              errorText: errorMessage,
-              onProgress: (done, total) =>
-                setStage({ kind: 'planning', progress: `Checking every active process for references, drafts included… ${done} of ${total}` }),
-            });
-
-      const plan = buildDocumentArchivePlan({ chosen, resolveSkipped: byId?.skipped ?? [], paths: merged, properties, scan, index });
+      const { properties, index, scan } = await readWhatHolds(docs, collected.chosen, progress, (c) => !c.entry.isArchived && !c.entry.isPending);
+      const plan = buildDocumentArchivePlan({ chosen: collected.chosen, resolveSkipped: collected.resolveSkipped, paths: collected.paths, properties, scan, index });
       setStage({ kind: 'plan', plan, index });
     } catch (cause) {
       fail(cause);
@@ -288,16 +146,9 @@ function ArchiveDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; 
   }
 
   function startOver() {
-    browse.refresh();
-    setTreeDocs(null);
-    setList(null);
-    setListTicked(new Set());
-    setIdInput(EMPTY_ID_INPUT);
-    setSource('tree');
+    choice.reset();
     setStage({ kind: 'select' });
   }
-
-  const chosenCount = (treeChosen ? 1 : 0) + listTicked.size + ids.length;
 
   return (
     <>
@@ -316,52 +167,12 @@ function ArchiveDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; 
               process (active or archived) or a training unit, or referenced in a process&rsquo;s unpublished draft, is
               never archived; the preview names what holds it.
             </p>
-            <div className="row" role="tablist">
-              {(
-                [
-                  ['tree', `From the tree${treeChosen ? ' (some checked)' : ''}`],
-                  ['list', `From the document list${listTicked.size > 0 ? ` (${listTicked.size})` : ''}`],
-                  ['ids', `By id or CSV${ids.length > 0 ? ` (${ids.length})` : ''}`],
-                ] as const
-              ).map(([key, label]) => (
-                <Button key={key} role="tab" aria-selected={source === key} buttonType={source === key ? 'primary' : 'secondary'} onClick={() => (key === 'list' ? void openList() : setSource(key))}>
-                  {label}
-                </Button>
-              ))}
-            </div>
+            {choice.tabs}
           </div>
-
-          {source === 'tree' && (
-            <>
-              <div className="panel">
-                <p>
-                  Checking a group takes in the documents whose primary group is that group or one under it. Documents
-                  that are only associated with a checked group are listed separately, for you to tick or not.
-                </p>
-              </div>
-              <TreeBrowser state={browse} groupsOnly />
-              {treeReading !== null && <Progress>{treeReading}</Progress>}
-              {treeDocsCurrent !== null && (
-                <TreeDocumentsPanel
-                  read={treeDocsCurrent}
-                  paths={paths}
-                  onTick={(ticked) => setTreeDocs({ ...treeDocsCurrent, ticked })}
-                />
-              )}
-            </>
-          )}
-
-          {source === 'list' && (
-            <>
-              {listReading !== null && <Progress>{listReading}</Progress>}
-              {list !== null && <DocumentList entries={list} paths={paths} selected={listTicked} onChange={setListTicked} />}
-            </>
-          )}
-
-          {source === 'ids' && <ProcessIdInput kind="document" value={idInput} onChange={setIdInput} />}
+          {choice.body}
 
           <div className="row">
-            <Button disabled={chosenCount === 0 || treeReading !== null} onClick={() => void buildPlan()}>
+            <Button disabled={choice.count === 0 || choice.busy} onClick={() => void buildPlan()}>
               Preview what would be archived
             </Button>
           </div>
@@ -409,56 +220,6 @@ function ArchiveDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; 
   );
 }
 
-function TreeDocumentsPanel({
-  read,
-  paths,
-  onTick,
-}: {
-  read: TreeDocuments;
-  paths: ReadonlyMap<string, string[]>;
-  onTick: (ticked: ReadonlySet<string>) => void;
-}) {
-  return (
-    <div className="panel">
-      <p>
-        The checked groups hold {read.inSubtree.length} active document{read.inSubtree.length === 1 ? '' : 's'} as their
-        primary group. These are included.
-      </p>
-      {read.associatedOnly.length > 0 && (
-        <>
-          <h3>Only associated with a checked group ({read.associatedOnly.length})</h3>
-          <p className="small">
-            Their primary group is elsewhere. They are not included unless you tick them, and archiving one archives it
-            everywhere, not just in this group.
-          </p>
-          <ul className="checklist">
-            {read.associatedOnly.map((e) => {
-              const key = e.uniqueId.toLowerCase();
-              return (
-                <li key={e.uniqueId}>
-                  <label className="inline">
-                    <Checkbox
-                      state={read.ticked.has(key) ? 'checked' : 'unchecked'}
-                      label={`Include document ${e.name}`}
-                      onChange={() => {
-                        const next = new Set(read.ticked);
-                        if (next.has(key)) next.delete(key);
-                        else next.add(key);
-                        onTick(next);
-                      }}
-                    />{' '}
-                    {e.name} <span className="small">(primary group: {documentPath(e, paths).join(' / ') || 'unknown'})</span>
-                  </label>
-                </li>
-              );
-            })}
-          </ul>
-        </>
-      )}
-    </div>
-  );
-}
-
 function PlanView(props: {
   plan: DocumentArchivePlan;
   confirming: boolean;
@@ -491,23 +252,7 @@ function PlanView(props: {
         </div>
       </div>
 
-      {incomplete && (
-        <div className="panel error">
-          <h2>Some processes could not be read</h2>
-          <p>
-            A reference in one of these processes&rsquo; drafts cannot be ruled out, so nothing is archived until every
-            active process has been read.
-          </p>
-          <ul className="checklist">
-            {plan.unreadProcesses.map((p) => (
-              <li key={p.uniqueId}>
-                {p.name}: {p.error}
-              </li>
-            ))}
-          </ul>
-          <Button onClick={props.onReplan}>Build the plan again</Button>
-        </div>
-      )}
+      <UnreadProcesses unread={plan.unreadProcesses} verb="archived" onReplan={props.onReplan} />
 
       {n > 0 && (
         <div className="panel">
@@ -537,19 +282,7 @@ function PlanView(props: {
         </div>
       )}
 
-      {plan.skipped.length > 0 && (
-        <details className="panel" open={n === 0}>
-          <summary>Left out ({plan.skipped.length})</summary>
-          <ul className="checklist">
-            {plan.skipped.map((row) => (
-              <li key={`${row.operation}|${row.objectId}`}>
-                {/* An id that matched nothing has no name; the id is what the operator can look for. */}
-                {row.operation === 'Resolve' ? row.objectId : row.name}: {row.message}
-              </li>
-            ))}
-          </ul>
-        </details>
-      )}
+      <LeftOut rows={plan.skipped} open={n === 0} />
 
       <div className="panel">
         <h2>3. Archive</h2>

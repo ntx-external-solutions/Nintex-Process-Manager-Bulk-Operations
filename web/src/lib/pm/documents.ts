@@ -97,3 +97,35 @@ export async function bulkArchiveDocuments(ctx: PmContext, documentIds: readonly
     }),
   );
 }
+
+/**
+ * Restore up to 50 archived documents (W8b's put-back, W8c). The spike measured it: each
+ * returns to its primary group with its associations. Retried as the archive is.
+ */
+export async function bulkRestoreDocuments(ctx: PmContext, documentIds: readonly number[]): Promise<DocumentBulkAnswer> {
+  return bulkAnswer(
+    await pmRequest<unknown>(ctx, {
+      path: `${DOCUMENTS}/bulk/restore`,
+      method: 'POST',
+      body: { documentIds: [...documentIds] },
+      retry: 'write',
+    }),
+  );
+}
+
+/**
+ * Permanently delete up to 50 archived documents. The tenant refuses an active one
+ * (`NotArchived`) and one a process still holds (`ProcessAttachment`), each as an entry
+ * in a 200, but not one only an unpublished draft points at (spike): the caller's scan
+ * is what keeps those.
+ */
+export async function bulkDeleteDocuments(ctx: PmContext, documentIds: readonly number[]): Promise<DocumentBulkAnswer> {
+  return bulkAnswer(
+    await pmRequest<unknown>(ctx, {
+      path: `${DOCUMENTS}/bulk`,
+      method: 'DELETE',
+      body: { documentIds: [...documentIds] },
+      retry: 'write',
+    }),
+  );
+}
