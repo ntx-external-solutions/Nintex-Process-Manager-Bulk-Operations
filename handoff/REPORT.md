@@ -6,6 +6,118 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## W8 follow-up. Finishing a document run whose session died
+
+Commit `07a8696` on `claude/w8e-document-run-recovery`, built on W8d (#84). JB asked for
+this after W8d: "if a session dies mid-run, we have a recovery mechanism". It has no
+entry in TASKS.md, so I've only reported it here.
+
+**The gap.**
+- **Delete documents:** a dead session left documents archived that the run had found
+  active, with no way to put them back from the page.
+- **All four pages:** a run's rows lived only on screen. Closing or reloading the tab lost
+  the record of what had changed, and CLAUDE.md treats a change with no row as a defect.
+
+**The record.** Each document page keeps a run record in the browser's localStorage, one
+per page (`npmbo.documents.<page>`), tagged with the tenant.
+- **When it's written:** before the first write, and before and after every bulk call
+  (`runDocumentBatches` gains an `onBatch` hook). Repair writes it before and after each
+  process.
+- **What it holds:** every row so far, plus the call that's out at the moment
+  (`inFlight`). Delete also keeps its targets and checked groups.
+- **Why localStorage:** the process archive's journal uses sessionStorage, but this record
+  has to survive the tab closing.
+- **When it goes:** once a run settles with nothing left to finish. A Stop counts as
+  settled, because Delete still puts things back after a Stop.
+
+**Recovery.** Signed in again, a page with a record shows "An earlier run did not finish"
+in place of the choosing step. There are two buttons: finish it, or discard the record
+(which changes nothing on the tenant and asks for confirmation). Nothing is sent again on
+the record's word: a fresh read of both document lists decides every row.
+- **A call that was out when the tab died** (`inFlightRows`) gets its row from what the
+  lists show now: done means Success; not done means "Not attempted, or not taken";
+  missing means Unverified.
+- **Archive and Restore documents:** "Show its results" settles the recorded rows against
+  the read and shows the results to download. The operator builds a new plan for the
+  rest, which lists what's done as "Already archived" or "Not archived".
+- **Repair document references:** "Show its results" reads back the process that was
+  being repaired. No dead reference left is Success (the row says to check whether it
+  still needs publishing); any left is Skipped, with "Scan again to repair it".
+- **Delete documents:** "Finish it" (`recoverDelete`) works out from the read where the
+  run got to:
+  - a target in neither list was deleted, and its row says so;
+  - an active target that is archived now was archived by this run, so it's put back
+    unless it's deleted now;
+  - a target the delete never reached, or whose delete call got no answer, is offered
+    again. A dead session refuses the call, but a dropped connection may not have, so the
+    read decides.
+  - a target the delete reached and left alone (held, refused) keeps its row and isn't
+    retried;
+  - a target someone restored meanwhile gets "No longer archived".
+
+  It then goes to the same confirmation screen: the documents still to delete, a typed
+  DELETE, a re-check per batch, and "Don't delete; put back the n documents this run
+  archived". The earlier rows are kept, with one row per document and operation, and the
+  cleanup offer follows as usual. If the session dies again, the record is still there.
+  The done screen of a run that died now says to sign in again and open Delete documents
+  to finish it, instead of pointing at Restore documents.
+
+**Functions touched.**
+- New `documents/runRecord.ts`: `localRecordStore`, `recorder`, `loadRecord`,
+  `inFlightOf`, `inFlightRows`.
+- `documents/archive.ts`: `DocumentRunOptions.onBatch`.
+- `documents/delete.ts`: `recoverDelete`.
+- `documents/repair.ts`: `interruptedRepairRow`.
+- `app/documents/choose.tsx`: `useRunRecord` and `InterruptedRun`.
+- All four document pages. The Delete page's `Run` gains `priorRows` and `allTargets`.
+  The confirmation shows a note when it's finishing an interrupted run.
+
+**Tests.** 640 tests, all pass, none skipped (634 before). Typecheck and build clean.
+- `documents/runRecord.test.ts`, 6 tests:
+  - the record is written, read back only for its own page and tenant, ignored when
+    malformed, and a broken store never stops a run;
+  - the hook fires before and after each batch;
+  - an in-flight call is decided by the read, for archive, delete and restore;
+  - Delete dying in its archive phase;
+  - Delete dying mid-delete: what went, never reached, no answer, held, refused, and
+    restored meanwhile;
+  - a repair read back clean, not clean, and unreadable.
+- **New driver `dev/drive-docs-delete-resume.mjs`, 19 checks, all pass.**
+  - The mock kills the session at the bulk delete. The done screen says how to finish
+    and the record is kept.
+  - After signing in, "Finish it" asks again for the four documents the delete never
+    reached, and nothing is sent before the typed DELETE.
+  - The results file has one row per document and operation, with the held and refused
+    documents put back.
+  - The record is gone afterwards.
+- **New driver `dev/drive-docs-archive-resume.mjs`, 5 checks, all pass.** The session
+  dies at the bulk archive. After signing in, the rows are settled from a fresh read, and
+  nothing new can be chosen until the record is dealt with.
+- Every other driver was re-run on a fresh mock. They all pass, and the process drivers'
+  output is unchanged.
+
+**Limits, for you to decide.**
+- **Per browser.** A record is in the browser that ran the run. Signing in on another
+  machine shows nothing; the results file is still the record there.
+- **Two tabs on the same page** share one record, and the second run overwrites the first.
+  Say if you want one record per run instead.
+- **A call with no answer on Archive or Restore** stays `Failed` ("The archive call
+  failed ...") if the read shows it didn't take. Delete offers those documents again.
+  Archive and Restore leave them to a new plan, which picks them up.
+- **The process pages are unchanged.** They have their own journal and saved plan.
+
+**For R16.**
+- **Delete documents:** on ZZ content, start a delete and sign the session out (or close
+  the tab) after the confirmation. Sign in again: "Finish it" should offer the rest,
+  delete them behind the typed DELETE, and put back anything the run archived and didn't
+  delete.
+- **The same after phase 1,** before confirming: finishing should go to the
+  confirmation.
+- **Archive or Restore documents:** close the tab mid-run. Reopen the page: "Show its
+  results" should give a row for every document the run reached.
+
+---
+
 ## W8d. Repair document references
 
 Commit `de9eab7` on `claude/w8d-repair-document-references`. Built on

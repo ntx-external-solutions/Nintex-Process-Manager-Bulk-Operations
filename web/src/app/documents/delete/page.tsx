@@ -19,6 +19,7 @@ import type { DocumentTarget } from '@/lib/documents/archive.ts';
 import {
   afterArchivePhase,
   buildDocumentDeletePlan,
+  recoverDelete,
   DELETE_MID_RUN_NOTE,
   deletePreviewRows,
   DOCUMENT_DELETE_STATUSES,
@@ -32,6 +33,7 @@ import {
   type DocumentDeletePlan,
 } from '@/lib/documents/delete.ts';
 import { loadDocumentIndex } from '@/lib/documents/list.ts';
+import { inFlightOf, type DocumentRunRecord, type Recorder } from '@/lib/documents/runRecord.ts';
 import { nameList } from '@/lib/documents/holders.ts';
 import { groupsTheRunDeletedFrom } from '@/lib/delete/selection.ts';
 import { resultsToCsv, type ResultRow } from '@/lib/exec/report.ts';
@@ -45,7 +47,7 @@ import { CleanupPanel } from '../../components/CleanupPanel.tsx';
 import { ResultsSummary } from '../../components/ResultsSummary.tsx';
 import { SessionGate } from '../../components/SessionGate.tsx';
 import { useBrowseTree } from '../../components/TreeBrowser.tsx';
-import { isSignedOut, LeftOut, readWhatHolds, UnreadProcesses, useDocumentChoice } from '../choose.tsx';
+import { InterruptedRun, isSignedOut, LeftOut, readWhatHolds, UnreadProcesses, useDocumentChoice, useRunRecord } from '../choose.tsx';
 
 /** What the done screen needs to offer the group cleanup, or why it can't. */
 type CleanupOffer =
@@ -58,7 +60,16 @@ interface Run {
   plan: DocumentDeletePlan;
   index: ProcessIndex;
   groups: CoveredGroup[];
+  /** Rows an interrupted run made before this page picked it up; empty for a new run. */
+  priorRows: ResultRow[];
+  /** Every target, for the cleanup offer: a resumed run's plan holds none. */
+  allTargets: DocumentTarget[];
 }
+
+/** Rows made before the current phase: what an interrupted run recorded, then the plan's. */
+const before = (run: Run) => [...run.priorRows, ...run.plan.skipped];
+
+const EMPTY_PLAN: DocumentDeletePlan = { toArchive: [], alreadyArchived: [], skipped: [], unreadProcesses: [], processesRead: 0 };
 
 type Stage =
   | { kind: 'select' }
@@ -92,6 +103,9 @@ function DeleteDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; o
   const [stage, setStage] = useState<Stage>({ kind: 'select' });
   const [error, setError] = useState<string | null>(null);
   const abort = useRef<AbortController | null>(null);
+  // The run's record (lib/documents/runRecord.ts), from the first write to the settled end.
+  const record = useRef<Recorder | null>(null);
+  const runs = useRunRecord('delete', session.tenant);
 
   const fail = (cause: unknown) => {
     handleError(cause);
@@ -129,7 +143,7 @@ function DeleteDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; o
       // Archived documents are scanned for too: deleting one a draft points at breaks that process (spike).
       const { properties, index, scan } = await readWhatHolds(docs, collected.chosen, progress, (c) => !c.entry.isPending);
       const plan = buildDocumentDeletePlan({ chosen: collected.chosen, resolveSkipped: collected.resolveSkipped, paths: collected.paths, properties, scan, index });
-      setStage({ kind: 'plan', run: { plan, index, groups: collected.groups } });
+      setStage({ kind: 'plan', run: { plan, index, groups: collected.groups, priorRows: [], allTargets: [...plan.toArchive, ...plan.alreadyArchived] } });
     } catch (cause) {
       fail(cause);
       setStage({ kind: 'select' });
@@ -141,16 +155,23 @@ function DeleteDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; o
     return createControls({ signal: abort.current.signal });
   }
 
-  const runOptions = (run: Run, title: string, verb: string) => ({
+  /** `earlier`: rows made before this phase, which the record keeps ahead of the phase's own. */
+  const runOptions = (run: Run, title: string, verb: string, operation: string, earlier: ResultRow[]) => ({
     index: run.index,
     errorText: errorMessage,
     statusOf,
     onProgress: (done: number, total: number, label: string) => setStage({ kind: 'running', title, progress: `${verb} ${done} of ${total}. Last: ${label}` }),
+    onBatch: (e: { sending: readonly DocumentTarget[] | null; rows: readonly ResultRow[] }) =>
+      record.current?.save({ rows: [...earlier, ...e.rows], inFlight: e.sending ? inFlightOf(operation, e.sending) : null }),
   });
 
   /** Phase 1, then the confirmation. With nothing active to archive, straight to the confirmation. */
   async function archiveFirst(run: Run) {
     setError(null);
+    // Before the first write: a run whose session dies from here on can be finished.
+    record.current = runs.start(before(run), {
+      delete: { toArchive: run.plan.toArchive, alreadyArchived: run.plan.alreadyArchived, groups: run.groups, confirmed: false },
+    });
     if (run.plan.toArchive.length === 0) {
       setStage({ kind: 'confirm', run, between: afterArchivePhase(run.plan, [], null), note: null });
       return;
@@ -159,7 +180,7 @@ function DeleteDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; o
     setStage({ kind: 'running', title, progress: 'Re-checking the first batch…' });
     const controls = freshControls();
     try {
-      const archiveRows = await runArchivePhase(docs, run.plan, controls, runOptions(run, title, 'Archived'));
+      const archiveRows = await runArchivePhase(docs, run.plan, controls, runOptions(run, title, 'Archived', 'Archive', before(run)));
       let after = null;
       let note: string | null = null;
       try {
@@ -170,6 +191,7 @@ function DeleteDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; o
         else note = `The read after archiving failed (${errorMessage(cause)}), so the archive statuses are what the calls reported. Each document is read again straight before it is deleted.`;
       }
       const between = afterArchivePhase(run.plan, archiveRows, after);
+      record.current?.save({ rows: [...before(run), ...between.archiveRows], inFlight: null });
       if (controls.stopped()) {
         // Stopped, or the session ended: no delete. Put back what this phase archived.
         await finish(run, between, [], controls.stoppedReason() === CANCELLED ? 'the run was stopped before the delete' : null, controls.stoppedReason());
@@ -190,8 +212,10 @@ function DeleteDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; o
     const title = 'Phase 2: deleting';
     setStage({ kind: 'running', title, progress: 'Re-checking the first batch…' });
     const controls = freshControls();
+    const current = record.current?.current().delete;
+    if (current) record.current?.save({ delete: { ...current, confirmed: true } });
     try {
-      const deleteRows = await runDeletePhase(docs, between.toDelete, controls, runOptions(run, title, 'Deleted'));
+      const deleteRows = await runDeletePhase(docs, between.toDelete, controls, runOptions(run, title, 'Deleted', 'Delete', [...before(run), ...between.archiveRows]));
       const fatal = controls.stopped() && controls.stoppedReason() !== CANCELLED;
       await finish(run, between, deleteRows, fatal ? null : 'it was not deleted', controls.stoppedReason());
     } catch (cause) {
@@ -214,12 +238,10 @@ function DeleteDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; o
       // Its own controls: an operator's stop of the delete still puts things back.
       restoreRows = await putBack(docs, between.archivedByRun, deleteRows, createControls(), {
         why,
-        errorText: errorMessage,
-        statusOf,
-        onProgress: (done, total, label) => setStage({ kind: 'running', title, progress: `Restored ${done} of ${total}. Last: ${label}` }),
+        ...runOptions(run, title, 'Restored', 'Restore', [...before(run), ...between.archiveRows, ...deleteRows]),
       });
     }
-    let rows = [...run.plan.skipped, ...between.archiveRows, ...deleteRows, ...restoreRows];
+    let rows = [...before(run), ...between.archiveRows, ...deleteRows, ...restoreRows];
     const warnings: string[] = stopped ? [stopped] : [];
     let settled = false;
     try {
@@ -234,10 +256,16 @@ function DeleteDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; o
     if (stranded.length > 0) {
       warnings.push(
         `${stranded.length} document${stranded.length === 1 ? '' : 's'} this run archived ${stranded.length === 1 ? 'is' : 'are'} still archived: ` +
-          `${nameList(stranded.map((t) => t.name))}. Restore ${stranded.length === 1 ? 'it' : 'them'} on the Restore documents page, using this results file.`,
+          `${nameList(stranded.map((t) => t.name))}. Sign in again and open Delete documents to finish the run: it offers to delete ${stranded.length === 1 ? 'it' : 'them'} or put ${stranded.length === 1 ? 'it' : 'them'} back.`,
       );
     }
-    const cleanup = await cleanupOffer(run, between.toDelete, rows, settled && stopped === null);
+    // The record goes once the run has settled with nothing left to finish; otherwise it
+    // stays, and signing in again offers to finish the run.
+    const finished = settled && stranded.length === 0 && (stopped === null || stopped === CANCELLED);
+    if (finished) record.current?.clear();
+    else record.current?.save({ rows, inFlight: null });
+    record.current = null;
+    const cleanup = await cleanupOffer(run, run.allTargets, rows, settled && stopped === null);
     setStage({ kind: 'done', rows, warning: warnings.length > 0 ? warnings.join(' ') : null, cleanup });
   }
 
@@ -254,7 +282,43 @@ function DeleteDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; o
     }
   }
 
+  /** Pick up an interrupted run from its record: settle what it did, then confirm the rest or put it back. */
+  async function finishInterrupted(interrupted: DocumentRunRecord) {
+    setError(null);
+    const title = 'Finishing the interrupted run';
+    try {
+      setStage({ kind: 'running', title, progress: 'Reading the document lists to see what the interrupted run did…' });
+      const after = await loadDocumentIndex(docs.list);
+      const recovered = recoverDelete(interrupted, after);
+      if (recovered === null) {
+        setError('The record of the interrupted run is incomplete, so it cannot be finished here. Its rows are discarded; build a new plan.');
+        runs.discard();
+        setStage({ kind: 'select' });
+        return;
+      }
+      setStage({ kind: 'running', title, progress: 'Reading the process lists…' });
+      const index = await loadProcessIndex(gateway.processesList);
+      const run: Run = { plan: EMPTY_PLAN, index, groups: interrupted.delete?.groups ?? [], priorRows: recovered.priorRows, allTargets: recovered.allTargets };
+      record.current = runs.resume({ ...interrupted, rows: recovered.priorRows, inFlight: null });
+      runs.dismiss();
+      if (recovered.between.toDelete.length === 0) {
+        await finish(run, recovered.between, [], 'it was not deleted', null);
+        return;
+      }
+      setStage({
+        kind: 'confirm',
+        run,
+        between: recovered.between,
+        note: `This finishes a run that was interrupted. ${recovered.priorRows.length} rows it recorded are kept, corrected by the lists read now; the documents below are the ones its delete never reached.`,
+      });
+    } catch (cause) {
+      fail(cause);
+      setStage({ kind: 'select' });
+    }
+  }
+
   function startOver() {
+    runs.reload();
     choice.reset();
     setStage({ kind: 'select' });
   }
@@ -267,7 +331,17 @@ function DeleteDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; o
         </Notice>
       )}
 
-      {stage.kind === 'select' && (
+      {stage.kind === 'select' && runs.interrupted !== null && (
+        <InterruptedRun
+          record={runs.interrupted}
+          what="A delete run"
+          finish="Finish it"
+          onFinish={() => void finishInterrupted(runs.interrupted!)}
+          onDiscard={runs.discard}
+        />
+      )}
+
+      {stage.kind === 'select' && runs.interrupted === null && (
         <>
           <div className="panel">
             <h2>1. Choose the documents to delete</h2>
@@ -482,7 +556,12 @@ function ConfirmView(props: { plan: DocumentDeletePlan; between: AfterArchive; n
           <p>
             {docs(back)} archived. {notArchived.length > 0 && `${docs(notArchived.length)} not archived, so not deleted (listed below).`}
           </p>
-          {props.note !== null && <p className="small">{props.note}</p>}
+        </div>
+      )}
+
+      {props.note !== null && (
+        <div className="panel">
+          <p className="small">{props.note}</p>
         </div>
       )}
 

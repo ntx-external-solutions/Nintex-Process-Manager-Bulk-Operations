@@ -27,8 +27,9 @@ import {
   type DocumentArchivePlan,
 } from '@/lib/documents/archive.ts';
 import { loadDocumentIndex } from '@/lib/documents/list.ts';
+import { inFlightOf, inFlightRows, type DocumentRunRecord } from '@/lib/documents/runRecord.ts';
 import { resultsToCsv, type ResultRow } from '@/lib/exec/report.ts';
-import { createControls, errorMessage } from '@/lib/exec/runner.ts';
+import { CANCELLED, createControls, errorMessage } from '@/lib/exec/runner.ts';
 import type { ProcessIndex } from '@/lib/tenant/state.ts';
 import { datedFilename, downloadCsv } from '@/lib/ui/download.ts';
 import { browserDocumentGateway, browserGateway, PmRequestError, type SessionInfo } from '@/lib/ui/gateway.ts';
@@ -36,7 +37,7 @@ import { Notice, Progress } from '../../_ui/kit.tsx';
 import { ResultsSummary } from '../../components/ResultsSummary.tsx';
 import { SessionGate } from '../../components/SessionGate.tsx';
 import { useBrowseTree } from '../../components/TreeBrowser.tsx';
-import { isSignedOut, LeftOut, readWhatHolds, UnreadProcesses, useDocumentChoice } from '../choose.tsx';
+import { InterruptedRun, isSignedOut, LeftOut, readWhatHolds, UnreadProcesses, useDocumentChoice, useRunRecord } from '../choose.tsx';
 
 type Stage =
   | { kind: 'select' }
@@ -73,6 +74,8 @@ function ArchiveDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; 
     handleError(cause);
     setError(errorMessage(cause));
   };
+
+  const runs = useRunRecord('archive', session.tenant);
 
   const choice = useDocumentChoice({
     docs,
@@ -118,9 +121,12 @@ function ArchiveDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; 
     setStage({ kind: 'running', plan, progress: 'Re-checking the first batch…' });
     abort.current = new AbortController();
     const controls = createControls({ signal: abort.current.signal });
+    // Kept until the run is settled, so a run whose session dies can be finished.
+    const record = runs.start(plan.skipped);
     try {
       const draft = await runDocumentArchive(docs, plan.targets, controls, {
         index,
+        onBatch: (e) => record.save({ rows: [...plan.skipped, ...e.rows], inFlight: e.sending ? inFlightOf('Archive', e.sending) : null }),
         errorText: errorMessage,
         statusOf: (e) => (e instanceof PmRequestError ? e.status : null),
         onProgress: (done, total, label) => setStage({ kind: 'running', plan, progress: `Archived ${done} of ${total}. Last: ${label}` }),
@@ -136,6 +142,8 @@ function ArchiveDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; 
           `${warning ? `${warning} ` : ''}The final read failed (${errorMessage(cause)}), so these statuses are what ` +
           `the calls reported, not confirmed.`;
       }
+      if (warning === null || warning === CANCELLED) record.clear();
+      else record.save({ rows: [...plan.skipped, ...rows], inFlight: null });
       setStage({ kind: 'done', rows: [...plan.skipped, ...rows], warning });
     } catch (cause) {
       fail(cause);
@@ -145,7 +153,23 @@ function ArchiveDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; 
     }
   }
 
+  /** An interrupted run's rows, settled against the lists read now. */
+  async function finishInterrupted(record: DocumentRunRecord) {
+    setError(null);
+    setStage({ kind: 'running', plan: { targets: [], skipped: [], unreadProcesses: [], processesRead: 0 }, progress: 'Reading the document lists to confirm what the interrupted run did…' });
+    try {
+      const after = await loadDocumentIndex(docs.list);
+      const rows = settleDocumentArchive([...record.rows, ...inFlightRows(record, after)], after);
+      runs.discard();
+      setStage({ kind: 'done', rows, warning: 'These are the results of an interrupted run. Build a new plan for anything it did not reach.' });
+    } catch (cause) {
+      fail(cause);
+      setStage({ kind: 'select' });
+    }
+  }
+
   function startOver() {
+    runs.reload();
     choice.reset();
     setStage({ kind: 'select' });
   }
@@ -158,7 +182,17 @@ function ArchiveDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; 
         </Notice>
       )}
 
-      {stage.kind === 'select' && (
+      {stage.kind === 'select' && runs.interrupted !== null && (
+        <InterruptedRun
+          record={runs.interrupted}
+          what="An archive run"
+          finish="Show its results"
+          onFinish={() => void finishInterrupted(runs.interrupted!)}
+          onDiscard={runs.discard}
+        />
+      )}
+
+      {stage.kind === 'select' && runs.interrupted === null && (
         <>
           <div className="panel">
             <h2>1. Choose the documents to archive</h2>

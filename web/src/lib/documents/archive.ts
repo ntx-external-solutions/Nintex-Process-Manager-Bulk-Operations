@@ -157,6 +157,12 @@ export interface DocumentRunOptions {
   errorText?: (error: unknown) => string;
   statusOf?: (error: unknown) => number | null;
   onProgress?: (done: number, total: number, label: string) => void;
+  /**
+   * Called straight before each bulk call with the documents it sends, and after it with
+   * every row so far (`sending` null). The pages keep a run record from it, so a run whose
+   * session dies or whose tab closes can be finished (runRecord.ts).
+   */
+  onBatch?: (event: { sending: readonly DocumentTarget[] | null; rows: readonly ResultRow[] }) => void;
 }
 
 /** One bulk write, as the batch runner needs it. */
@@ -271,6 +277,7 @@ export async function runDocumentBatches(
     if (clear.length > 0) {
       // Keep the plan's order in the batch, whatever order the re-reads finished in.
       const sent = batch.filter((t) => clear.includes(t));
+      options.onBatch?.({ sending: sent, rows });
       try {
         const answer = await write.call(sent.map((t) => t.documentId));
         rows.push(...rowsFromAnswer(sent, answer, row, write));
@@ -288,10 +295,12 @@ export async function runDocumentBatches(
       }
     }
 
+    options.onBatch?.({ sending: null, rows });
     done += batch.length;
     options.onProgress?.(done, targets.length, batch[batch.length - 1]!.name);
   }
 
+  options.onBatch?.({ sending: null, rows });
   return rows;
 }
 

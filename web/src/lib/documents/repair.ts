@@ -268,3 +268,29 @@ export async function repairProcess(
 }
 
 export const REPAIR_STATUSES = ['Success', 'Skipped', 'Unverified', 'Failed'] as const;
+
+/**
+ * The row for a process whose repair was under way when the run died (W8 follow-up): it
+ * is read back with both document lists, and what the read shows decides the row. Nothing
+ * is saved: a repair half-sent is finished by scanning again, which offers whatever is
+ * still dead.
+ */
+export async function interruptedRepairRow(
+  gateway: Pick<RepairGateway, 'readModel' | 'list'>,
+  item: { uniqueId: string; name: string; groupId: number | null },
+  errorText: (error: unknown) => string = (e) => (e instanceof Error ? e.message : String(e)),
+): Promise<ResultRow> {
+  const row = (status: string, message: string) =>
+    resultRow({ objectType: 'Process', objectId: item.uniqueId, name: item.name, operation: REPAIR_OPERATION, status, message, groupId: item.groupId });
+  const why = 'The run was interrupted while repairing it';
+  try {
+    const read = await gateway.readModel(item.uniqueId);
+    if (read.kind !== 'model') return row('Unverified', `${why}, and it is archived now, so the repair could not be confirmed`);
+    const left = deadReferencesIn(read.model, existingDocuments(await loadDocumentIndex(gateway.list)));
+    const state = stateText(nodeString(read.model, 'Version'), Number(nodeString(read.model, 'ProcessRevisionStateId')) || null);
+    if (left.length === 0) return row('Success', `${why}; the read afterwards finds no dead reference left (${state}). Check in Process Manager whether it still needs publishing.`);
+    return row('Skipped', `Not repaired: ${why.toLowerCase()}, and the read afterwards still finds ${left.length} dead reference${left.length === 1 ? '' : 's'} (${state}). Scan again to repair it.`);
+  } catch (error) {
+    return row('Unverified', `${why}, and it could not be read back (${errorText(error)}), so the repair could not be confirmed`);
+  }
+}
