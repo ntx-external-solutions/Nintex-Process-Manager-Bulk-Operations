@@ -753,6 +753,13 @@ because archiving publishes the draft. The archived model never shows one, so th
 refuse-and-offer-a-tick branch for archived holders never fires. Leave it as a guard,
 but say so in its comment and test name.
 
+## W7. Pick processes by id or CSV in Bulk Archive, shared with Bulk Delete
+
+Status: Done (865c22b)
+
+Handed over in the session on 30 Oct (the brief is in the PR). Archive gets Delete's "By id
+or CSV" tab; both pages share one id input. See REPORT.md.
+
 ## F7. Small items from live round R15
 
 Status: Ready

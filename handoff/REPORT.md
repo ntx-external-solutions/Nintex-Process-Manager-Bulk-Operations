@@ -6,6 +6,186 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## W7. Pick processes by id or CSV in Bulk Archive, shared with Bulk Delete
+
+Commit `865c22b` on `claude/w7-archive-ids`, branched from `claude/main` as asked. F7 is
+PR #78 and isn't in this branch, so the two will conflict in `REPORT.md` and `TASKS.md`
+only.
+
+**1. One shared input.**
+- **Parsing** moved to `lib/select/ids.ts`. `CSV_ID_COLUMNS`, `idFromCsvRow`,
+  `targetsFromCsv` and `resolveTargetIds` moved there, and `delete/targets.ts`
+  re-exports them, so the engine's imports didn't change.
+- **New in the parser:**
+  - each id once, with a count of duplicates;
+  - the file line of each row with no id. `csv/parse.ts` has a new `parseCsvLines` that
+    counts a quoted cell spanning lines, so the number is the one an editor shows;
+  - a name column spotted when there is no id column;
+  - `csvReadNote`, `typedIds`, `looksLikeId`, `ID_TEMPLATE_CSV`, and the `IdInput` state
+    with `afterFileRead` and `chosenLabel`.
+- **Component:** `app/components/ProcessIdInput.tsx`, built from Textura `Textarea`,
+  `FileUpload` (dropzone) and `TextLink` (the template, a `data:` link to a one-column
+  `ProcessID` file).
+- **What reading a file does:** it replaces the box, and the note says so: "file.csv: 7
+  row(s) read, 5 id(s) found, 1 duplicate(s) dropped, 1 row(s) with no id (line 7). This
+  replaced what was in the box." A file with names but no ids leaves the box alone. Its
+  note names the name column, says names are not unique, and points to `ObjectID` in a
+  results file or the template.
+- **Delete** uses the component. Its resolution, its "By id" source text and its
+  `#ids` box are unchanged. Every Delete driver still passes.
+- **One semantic change in `targetsFromCsv`:** `idColumnMissing` is now true only when
+  no accepted id header exists. A file whose `ProcessID` column is present but blank on
+  every row used to say "no id column". It now lists those rows by line. The engine's
+  `csvNoIdColumn` event follows the same rule.
+
+**2. Archive takes the same input.** "From the tree" and "By id or CSV" tabs, as on
+Delete. New `lib/archive/ids.ts`:
+- `resolveArchiveIds`:
+  - an active process is a target, chosen "By id" or "From <file name>";
+  - an archived one is a `Select` `Skipped` row, "Already archived";
+  - an id neither list returns is a `Resolve` `Skipped` row, "Process not found in
+    active or archived lists" (Delete's words);
+  - a value that is neither a GUID nor a number is a `Resolve` `Skipped` row, "Not a
+    process id ...", so a name is never matched;
+  - numeric ids resolve through the listing's number. `IndexEntry` gains an optional
+    `numericId`, read from `id` or `processId` as Delete's index reads it;
+  - if nothing resolves and the tree has nothing, the page names the failed ids and
+    stays on the select step.
+- `combineSelections`: tree first, then ids, each process once. Only the tree's
+  covered groups are kept.
+- `withGroupPaths`: one breadcrumb per distinct group, through `loadGroupPaths`, which
+  now has `onProgress`. A group whose path can't be read keeps the listing's group
+  name.
+- The plan table has a "Chosen" column. "Left out" shows the id for a `Resolve` row,
+  because there's no name to show.
+- `buildArchivePlan` takes the id rows as `resolved.skipped` and puts them first.
+  `ArchiveTarget` gains an optional `chosen`. In the results file the id rows are at the
+  top, above the tree's own skipped rows.
+- **Shortcuts:** the id resolves to the home process in its own group. Tested.
+
+**Variations: a cheaper signal than one GET per target, and as complete.**
+- **What it reads:** one tree level per distinct group of the id targets
+  (`readGroupLevels`). `idTargetsNeedingSetReads` then picks which targets get a
+  `process.variationSet` read:
+  - a target shown with a `variationSetId` gets a read, as a tree target would;
+  - a target shown with none gets no read;
+  - a target its level doesn't show gets a read. That covers a variation other than the
+    one node the tree shows per set, and a level that failed to read.
+- **Why it's as complete:** it rests on the same `variationSetId` the tree targets are
+  already judged by.
+- **Cost:** about one call per group plus one per target in a set, not one per target.
+- The results go into `buildArchivePlan` as before, and the `::` name match still runs.
+- Progress shows for each step: paths, group levels, variation sets.
+
+**Revalidation.**
+- **Tree check:** id targets with a known group join the tree-level check
+  (`revalidatePlacements`) like tree targets.
+- **List check (new):** `idTargetFindings` checks every id target against the fresh lists
+  the run already reads before its first write. It flags a target that is archived,
+  moved to another group, or in neither list. Findings show with "Build the plan again",
+  and nothing is written.
+
+**Cleanup.**
+- Candidates are still `plan.groups`, the tree's checked groups only.
+- When any target was picked by id, the offer adds: "Only groups checked in the tree are
+  offered. Processes picked by id cover no group, so they never make a group a
+  candidate, even if this run emptied it."
+- With no checked groups at all, a short panel says the same, so the step doesn't just
+  vanish.
+
+**3. Scale.** Resolution is in memory. Above 500 ids (`LARGE_ID_LIST`), the page says how
+many and asks before the preview button is enabled again.
+
+**Also fixed.** The global `input[type='file']` rule set `display: block`, which
+un-hid both of Textura FileUpload's own inputs. The second one (`hidden`) showed a raw
+"Choose File" under the dropzone. The rule now skips `[hidden]` and Textura's class.
+
+**Functions touched.**
+- New in `select/ids.ts`: `afterFileRead`, `chosenLabel`, `csvReadNote`, `linesText`,
+  `typedIds`, `looksLikeId`.
+- Moved to `select/ids.ts`: `targetsFromCsv` (extended), `idFromCsvRow`,
+  `resolveTargetIds`.
+- `csv/parse.ts`: `parseCsvLines`, and `parseCsv` is now a wrapper over it.
+- New `archive/ids.ts`: `resolveArchiveIds`, `groupsOfPicked`, `withGroupPaths`,
+  `idTargetsNeedingSetReads`, `combineSelections`, `idTargetFindings`,
+  `readGroupLevels`.
+- Changed: `archive/plan.ts` (`buildArchivePlan`), `select/archived.ts`
+  (`loadGroupPaths`), `tenant/state.ts` (`loadProcessIndex`).
+- Pages: `app/archive/page.tsx` and `app/delete/page.tsx`, plus the new
+  `ProcessIdInput`.
+
+**Results-file operations.** No new names. Archive can now write `Select` `Skipped`
+"Already archived" and `Resolve` `Skipped` rows. Delete already wrote both.
+
+**Tests.** 587 tests, all pass, none skipped (570 on `claude/main`). Typecheck and build
+are clean.
+- `select/ids.test.ts` replaces `delete/targets.test.ts`: 11 tests, 8 of them new. They
+  cover:
+  - every accepted header in three cases;
+  - a BOM, CRLF and quoted cells;
+  - duplicates;
+  - rows with no id, by line, across a multi-line quoted cell;
+  - a name-only file;
+  - one of this app's results files as downloaded;
+  - the template;
+  - typed-id splitting.
+- `archive/ids.test.ts` is new, with 9 tests. They cover:
+  - an active, an archived, an unknown and a numeric id, and a name;
+  - a shortcut id;
+  - the tree plus a CSV adding up, each process once, with the "Chosen" label;
+  - paths;
+  - a CSV target in a variation set getting both review signals;
+  - the fresh read catching a target archived, moved or gone;
+  - a group emptied only by ids never offered (through `planCleanup`);
+  - the id rows first;
+  - level reads tolerating a failure and stopping on a dead session.
+- The Delete tests pass unchanged.
+- **New driver `dev/drive-archive-ids.mjs` (16 checks, all pass against the mock).**
+  - It checks one group in the tree and uploads a results-shaped CSV (BOM, CRLF,
+    quotes, a duplicate, a group row with no id, a numeric id, an archived id, an
+    unknown id).
+  - It then builds the plan, runs it, and checks the plan's Chosen column, the left-out
+    list, the results file (the `Skipped` rows on top, an `Archive` row per target) and
+    the cleanup offer.
+- **Other drivers re-run against the mock:** `drive-delete`, `drive-delete-archived`,
+  `drive-delete-run`, `drive-delete-refused` and `drive-archive`. All pass.
+
+`Tests/Run-AllTests.ps1` wasn't run and the PowerShell version wasn't bumped: there's no
+`pwsh` here, and the PowerShell is frozen.
+
+**Deferred, or for you to decide.**
+- **A results file brings in every row with an id.** That includes `VariationWarning` and
+  `Collateral` rows, whose ObjectID is a relative or bystander, not a target. Feeding an
+  Archive preview back in would therefore make a variation's relatives targets. The plan
+  shows each one "From <file>" before anything runs, so it's visible, but you may want
+  rows filtered to the target operations (`Archive`, `Delete`, `Select`, `Resolve`) when
+  the file has an `Operation` column. I didn't add that, because the brief says any
+  results file must work as input. Group rows resolve to "not found".
+- Delete's id targets still get no variation-set read (only tree targets do). That's
+  unchanged, per "Delete: still passes unchanged". The same level-read signal would
+  carry over directly.
+
+**For R16.**
+- **A results file from each operation as input:** Archive, Delete, Move, Ownership and
+  cleanup. Check the counts in the note and the left-out rows.
+- **A file of a few thousand ids across many groups.** Time the three planning reads,
+  which cost about one breadcrumb and one tree level per distinct group, then one
+  `process.variationSet` per target in a set or missing from its level. On the demo
+  tenant (186 active), a file of every active process would be about 13+ groups' worth
+  of levels plus the variation members. Compare that with 186 GETs one per target.
+- **The S2 variation set** (published at 3.0): put one variation's id in a CSV. If it's
+  the one the tree shows, the read is triggered by its `variationSetId`. If it's the
+  other, it's triggered by its absence from the level. Either way the sibling should be
+  listed under "Variations".
+- **A shortcut's id** in a CSV picks the home process, in the home group.
+- **Archive a CSV target from Process Manager between preview and run.** The run should
+  stop with "has been archived since this plan was built".
+- **An ids-only run that empties a group.** The cleanup step should not offer it, and
+  should say why.
+- Over 500 ids: the confirmation shows, and the plan builds after it.
+
+---
+
 ## W6 follow-up. Closing the gaps against the W6 brief
 
 Commit `362ad0a` on `claude/web-w6-delete-ui`. The full W6 brief was more detailed than
