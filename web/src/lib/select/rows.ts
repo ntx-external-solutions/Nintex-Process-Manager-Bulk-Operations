@@ -33,6 +33,8 @@ export function visibleRows(
   tree: BrowseTree,
   selection: Selection,
   expanded: ReadonlySet<string>,
+  /** The document pages choose groups only (W8); processes are not drawn. */
+  options: { groupsOnly?: boolean } = {},
 ): TreeRow[] {
   const rows: TreeRow[] = [];
   // A tenant can list a group inside its own subtree (F3); drawn once, it is not opened again.
@@ -41,6 +43,7 @@ export function visibleRows(
   const walk = (nodes: readonly BrowseNode[], depth: number): void => {
     for (const node of nodes) {
       const isGroup = node.kind === 'group';
+      if (options.groupsOnly === true && !isGroup) continue;
       const open = isGroup && expanded.has(node.key) && !opened.has(node.key);
       if (open) opened.add(node.key);
       rows.push({

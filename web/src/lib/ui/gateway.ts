@@ -23,6 +23,8 @@ import type { TreeItem, ValidateActionResponse } from '../pm/types.ts';
 import type { PlanGateway } from '../plan/load.ts';
 import type { Operation, ProcessSummary } from '../pm/operations.ts';
 import type { ProcessListPage, VariationSet } from '../pm/processes.ts';
+import type { DocumentBulkAnswer, DocumentListPage, DocumentListType } from '../pm/documents.ts';
+import type { DocumentArchiveGateway } from '../documents/archive.ts';
 import type { ChildTreeItemsResponse } from '../pm/types.ts';
 import { slowCalls } from './slowCalls.ts';
 
@@ -243,6 +245,23 @@ export function browserDeleteGateway(): DeleteGateway {
     renameGroup: (groupUniqueId, newName) => callPm({ op: 'group.rename', groupUniqueId, newName }),
     deleteGroup: (groupUniqueId) => callPm({ op: 'group.delete', groupUniqueId }),
     groupProcesses: (group) => callPm<GroupProcess[]>({ op: 'group.processes', groupUniqueId: group.uniqueId }),
+  };
+}
+
+/**
+ * The document pages' calls (W8). The archive names at most 50 numeric document ids; the
+ * proxy refuses anything else. The model read is the process pages' own, for the scan of
+ * draft references.
+ */
+export function browserDocumentGateway(): DocumentArchiveGateway & {
+  list(listType: DocumentListType, page: number, groupUniqueId: string | null): Promise<DocumentListPage>;
+  readModel(processUniqueId: string): Promise<ActiveRead>;
+} {
+  return {
+    list: (listType, page, groupUniqueId) => callPm<DocumentListPage>({ op: 'documents.list', listType, page, groupUniqueId }),
+    properties: (documentId) => callPm<Record<string, unknown>>({ op: 'document.properties', documentId }),
+    archive: (documentIds) => callPm<DocumentBulkAnswer>({ op: 'documents.archive', documentIds }),
+    readModel: (processUniqueId) => callPm<ActiveRead>({ op: 'process.model', processUniqueId }),
   };
 }
 

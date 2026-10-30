@@ -9,7 +9,7 @@
  */
 
 import { Button } from '@exp-textura/react';
-import { Archive, Delete, FolderOpen, Users } from '@exp-textura/icons';
+import { Archive, Delete, Documents, FolderOpen, ScrewdriverWrench, Undo, Users } from '@exp-textura/icons';
 import Link from 'next/link';
 import { useEffect, useState, type ReactNode } from 'react';
 
@@ -51,6 +51,34 @@ const OPERATIONS: readonly OperationTile[] = [
     summary: 'Upload a CSV of owners and experts, check it, then apply.',
     icon: <Users />,
     href: '/ownership',
+  },
+];
+
+/** Documents are their own area (W8). Kept apart so no tile leaves it unclear which one it acts on. */
+const DOCUMENT_OPERATIONS: readonly OperationTile[] = [
+  {
+    title: 'Archive documents',
+    summary: 'Pick documents by group, from the list or by id. Anything attached to a process or training unit is left alone.',
+    icon: <Documents />,
+    href: '/documents/archive',
+  },
+  {
+    title: 'Delete documents',
+    summary: 'Permanently delete documents nothing is attached to.',
+    icon: <Delete />,
+    href: null,
+  },
+  {
+    title: 'Restore documents',
+    summary: 'Bring archived documents back to their groups.',
+    icon: <Undo />,
+    href: null,
+  },
+  {
+    title: 'Repair document references',
+    summary: 'Find processes pointing at deleted documents and remove those references.',
+    icon: <ScrewdriverWrench />,
+    href: null,
   },
 ];
 
@@ -100,36 +128,16 @@ export default function Home() {
     <AppShell
       title="Bulk Operations"
       meta={<SignedInAs username={session.username} tenant={session.tenant} />}
-      description="Archive, delete, move and update ownership across many processes at once."
+      description="Archive, delete, move and update ownership across many processes at once, and archive documents."
       actions={
         <Button buttonType="secondary" onClick={() => void signOut()} isLoading={signingOut}>
           Sign out
         </Button>
       }
     >
-      <div className="tiles">
-        {OPERATIONS.map((operation) => {
-          const content = (
-            <>
-              <span className="tile-icon" aria-hidden="true">
-                {operation.icon}
-              </span>
-              <h2>{operation.title}</h2>
-              <p>{operation.summary}</p>
-            </>
-          );
-          return operation.href === null ? (
-            <div key={operation.title} className="tile" aria-disabled="true">
-              {content}
-              <span className="status">Not available yet</span>
-            </div>
-          ) : (
-            <Link key={operation.title} className="tile" href={operation.href}>
-              {content}
-            </Link>
-          );
-        })}
-      </div>
+      <Tiles operations={OPERATIONS} />
+      <h2>Documents</h2>
+      <Tiles operations={DOCUMENT_OPERATIONS} />
 
       <div className="panel">
         <h2>Every operation works the same way</h2>
@@ -141,5 +149,33 @@ export default function Home() {
         </ol>
       </div>
     </AppShell>
+  );
+}
+
+function Tiles({ operations }: { operations: readonly OperationTile[] }) {
+  return (
+    <div className="tiles">
+      {operations.map((operation) => {
+        const content = (
+          <>
+            <span className="tile-icon" aria-hidden="true">
+              {operation.icon}
+            </span>
+            <h2>{operation.title}</h2>
+            <p>{operation.summary}</p>
+          </>
+        );
+        return operation.href === null ? (
+          <div key={operation.title} className="tile" aria-disabled="true">
+            {content}
+            <span className="status">Not available yet</span>
+          </div>
+        ) : (
+          <Link key={operation.title} className="tile" href={operation.href}>
+            {content}
+          </Link>
+        );
+      })}
+    </div>
   );
 }

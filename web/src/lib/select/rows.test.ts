@@ -67,3 +67,18 @@ test('a group listed inside its own subtree is drawn, not opened forever (F3)', 
   assert.ok(rows.length < 50, 'the walk ends');
   assert.equal(rows.filter((r) => r.node.key === 'g-fin' && r.expanded).length, 1, 'opened once');
 });
+
+test('the document pages draw groups only: no processes, document groups or shortcuts (W8)', () => {
+  const t = tree(null, 'g-fin', 'g-ap');
+  const rows = visibleRows(t, EMPTY_SELECTION, new Set(['g-fin']), { groupsOnly: true });
+  assert.deepEqual(
+    rows.map((r) => [r.depth, r.node.title]),
+    [
+      [0, 'Finance'],
+      [1, 'Accounts Payable'],
+      [0, 'People'],
+    ],
+    'Policies is a document group in the recorded tree',
+  );
+  assert.ok(rows.every((r) => r.node.kind === 'group' && r.selectable));
+});

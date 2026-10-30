@@ -118,12 +118,21 @@ export function useBrowseTree(
   };
 }
 
-export function TreeBrowser({ state, disabled }: { state: BrowseState; disabled?: boolean | undefined }) {
+export function TreeBrowser({
+  state,
+  disabled,
+  groupsOnly,
+}: {
+  state: BrowseState;
+  disabled?: boolean | undefined;
+  /** Groups without their processes, for the document pages (W8). */
+  groupsOnly?: boolean | undefined;
+}) {
   if (state.loading && state.tree.roots === null) {
     return <p className="small">Reading the group tree…</p>;
   }
 
-  const rows = visibleRows(state.tree, state.selection, state.expanded);
+  const rows = visibleRows(state.tree, state.selection, state.expanded, { groupsOnly: groupsOnly === true });
 
   return (
     <div className="tree">
@@ -163,7 +172,7 @@ export function TreeBrowser({ state, disabled }: { state: BrowseState; disabled?
             <span className="title">{row.node.title}</span>
             {row.tag !== null && <span className="tag">{row.tag}</span>}
             {row.loading && <span className="small"> reading…</span>}
-            {row.expanded && row.node.childrenLoaded && row.node.children.length === 0 && (
+            {row.expanded && row.node.childrenLoaded && row.node.children.length === 0 && groupsOnly !== true && (
               <span className="small"> empty</span>
             )}
           </li>

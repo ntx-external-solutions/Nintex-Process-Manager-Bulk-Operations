@@ -37,6 +37,9 @@ const NAME_COLUMNS = ['Name', 'ProcessName', 'Process Name', 'Process', 'Title']
 /** The template the page offers: one column, headed as the first accepted header. */
 export const ID_TEMPLATE_CSV = 'ProcessID\r\n';
 
+/** The document pages' template (W8). `DocumentID` is already an accepted column. */
+export const DOCUMENT_ID_TEMPLATE_CSV = 'DocumentID\r\n';
+
 /**
  * The id in one row: the first id column with a value. A header that exists but is blank
  * on this row does not end the search. Port of `Get-IdFromCsvRow`.
@@ -112,18 +115,18 @@ function isIdHeader(header: string): boolean {
 }
 
 /** What the page says after reading a file. Uploading replaces the box, and the note says so. */
-export function csvReadNote(fileName: string, read: CsvTargets): string {
+export function csvReadNote(fileName: string, read: CsvTargets, kind: 'process' | 'document' = 'process'): string {
   if (read.rowCount === 0) return `${fileName}: no rows to read. Nothing was put in the box.`;
   if (read.ids.length === 0 && !read.idColumnMissing) {
     return `${fileName}: read ${read.rowCount} row(s), and none had an id (${linesText(read.noIdLines)}). Nothing was put in the box.`;
   }
   if (read.idColumnMissing) {
     const why = read.nameColumn
-      ? `It has a name column (${read.nameColumn}), but processes are picked by id only: names are not unique.`
+      ? `It has a name column (${read.nameColumn}), but ${kind === 'document' ? 'documents' : 'processes'} are picked by id only: names are not unique.`
       : `Columns in the file: ${read.headers.join(', ')}.`;
     return (
       `${fileName}: read ${read.rowCount} row(s) but found no id column. ${why} ` +
-      `A results file from this app has the ids in ObjectID, or download the template and fill in ProcessID. ` +
+      `A results file from this app has the ids in ObjectID, or download the template and fill in ${kind === 'document' ? 'DocumentID' : 'ProcessID'}. ` +
       `Nothing was put in the box.`
     );
   }
@@ -191,9 +194,9 @@ export interface IdInput {
 export const EMPTY_ID_INPUT: IdInput = { text: '', file: null, note: null };
 
 /** The box after reading a file. A file with no usable ids leaves the box as it was and says why. */
-export function afterFileRead(current: IdInput, fileName: string, text: string): IdInput {
+export function afterFileRead(current: IdInput, fileName: string, text: string, kind: 'process' | 'document' = 'process'): IdInput {
   const read = targetsFromCsv(text);
-  const note = csvReadNote(fileName, read);
+  const note = csvReadNote(fileName, read, kind);
   if (read.ids.length === 0) return { ...current, note };
   return { text: read.ids.join('\n'), file: { name: fileName, ids: new Set(read.ids.map((id) => id.toLowerCase())) }, note };
 }

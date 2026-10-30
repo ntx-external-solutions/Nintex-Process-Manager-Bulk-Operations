@@ -13,6 +13,9 @@
  * exactly one process or group id, checked here on the server: the id must be a single GUID,
  * and a body carrying any field the operation does not name is refused outright, so
  * the proxy can never be asked to act on a list.
+ *
+ * The document writes (W8) are the one exception: Process Manager only offers them in
+ * bulk. Each takes 1 to 50 numeric document ids and nothing else, and never a path.
  */
 
 import type { PmContext } from './client.ts';
@@ -42,6 +45,13 @@ import {
   restoreProcess,
   updateProcess,
 } from './processes.ts';
+import {
+  bulkArchiveDocuments,
+  DOCUMENT_BATCH_SIZE,
+  getDocumentProperties,
+  listDocuments,
+  type DocumentListType,
+} from './documents.ts';
 import { ARCHIVED_BATCH_SIZE, checkDependencies, readActiveModel, readArchivedModels } from './dependencies.ts';
 import { getOwnership, setOwnership, type UserRef } from './ownership.ts';
 import { listDirectoryUsers, scimBaseUrl } from './scim.ts';
@@ -143,7 +153,16 @@ export type Operation =
   /** Rename one group: the holding group, straight after it is made (F5). */
   | { op: 'group.rename'; groupUniqueId: string; newName: string }
   /** The live processes directly in one group. */
-  | { op: 'group.processes'; groupUniqueId: string };
+  | { op: 'group.processes'; groupUniqueId: string }
+  /**
+   * One page of 500 documents, active (`All`) or archived. With a group, the tenant adds
+   * its subgroups' documents and documents only associated with it (W8 spike).
+   */
+  | { op: 'documents.list'; listType: DocumentListType; page: number; groupUniqueId: string | null }
+  /** What holds one document: processes, training units, groups. */
+  | { op: 'document.properties'; documentId: number }
+  /** Archive up to 50 documents. 200 even when some fail; the answer's `errors` says which. */
+  | { op: 'documents.archive'; documentIds: number[] };
 
 export type OperationName = Operation['op'];
 
@@ -173,6 +192,9 @@ export const OPERATION_NAMES: readonly OperationName[] = [
   'group.create',
   'group.rename',
   'group.processes',
+  'documents.list',
+  'document.properties',
+  'documents.archive',
 ];
 
 /**
@@ -193,6 +215,8 @@ export const WRITE_OPERATIONS: readonly OperationName[] = [
   'group.create',
   // F5: the holding group is named for what it is, so a stranded one can be found.
   'group.rename',
+  // W8a: documents, archived only when nothing holds them (the caller's check, W8).
+  'documents.archive',
 ];
 
 /**
@@ -321,6 +345,15 @@ export async function execute(ctx: PmContext, operation: Operation): Promise<unk
 
     case 'group.processes':
       return getGroupProcesses(ctx, operation.groupUniqueId);
+
+    case 'documents.list':
+      return listDocuments(ctx, operation.listType, operation.page, operation.groupUniqueId);
+
+    case 'document.properties':
+      return getDocumentProperties(ctx, operation.documentId);
+
+    case 'documents.archive':
+      return bulkArchiveDocuments(ctx, operation.documentIds);
   }
 }
 
@@ -651,6 +684,46 @@ export function parseOperation(input: unknown): ParseResult {
       return { ok: true, operation: { op, groupUniqueId, newName: newName.trim() } };
     }
 
+    case 'documents.list': {
+      const extra = Object.keys(body).filter((key) => !['op', 'listType', 'page', 'groupUniqueId'].includes(key));
+      const listType = body['listType'];
+      const page = body['page'];
+      const groupUniqueId = nullableGuid(body['groupUniqueId']);
+      if (extra.length > 0 || (listType !== 'All' && listType !== 'Archived')) {
+        return { ok: false, error: `${op}: "listType" must be "All" or "Archived", and nothing else rides along.` };
+      }
+      if (typeof page !== 'number' || !Number.isInteger(page) || page < 1 || page > MAX_DOCUMENT_PAGES) {
+        return { ok: false, error: `${op}: "page" must be a positive integer.` };
+      }
+      if (groupUniqueId === undefined) return { ok: false, error: `${op}: "groupUniqueId" must be one group id or null.` };
+      return { ok: true, operation: { op, listType, page, groupUniqueId } };
+    }
+
+    case 'document.properties': {
+      const extra = Object.keys(body).filter((key) => key !== 'op' && key !== 'documentId');
+      const documentId = body['documentId'];
+      if (extra.length > 0 || !isDocumentId(documentId)) {
+        return { ok: false, error: `${op}: "documentId" must be exactly one numeric document id.` };
+      }
+      return { ok: true, operation: { op, documentId } };
+    }
+
+    case 'documents.archive': {
+      const extra = Object.keys(body).filter((key) => key !== 'op' && key !== 'documentIds');
+      const ids = body['documentIds'];
+      if (
+        extra.length > 0 ||
+        !Array.isArray(ids) ||
+        ids.length === 0 ||
+        ids.length > DOCUMENT_BATCH_SIZE ||
+        !ids.every(isDocumentId) ||
+        new Set(ids).size !== ids.length
+      ) {
+        return { ok: false, error: `${op}: "documentIds" must be 1 to ${DOCUMENT_BATCH_SIZE} distinct numeric document ids, and nothing else.` };
+      }
+      return { ok: true, operation: { op, documentIds: ids as number[] } };
+    }
+
     default:
       return { ok: false, error: `Unknown operation "${op}".` };
   }
@@ -684,6 +757,14 @@ function userRef(value: unknown): UserRef | null | undefined {
   if (typeof id !== 'number' || !Number.isInteger(id) || id <= 0) return undefined;
   if (typeof name !== 'string' || name.trim() === '' || name.length > MAX_USER_NAME_LENGTH) return undefined;
   return { id, name: name.trim() };
+}
+
+/** 100 pages of 500 is far past any tenant measured (208 documents on the demo tenant). */
+const MAX_DOCUMENT_PAGES = 100;
+
+/** Documents are written by their numeric id (the script-era notes); never a GUID or a path. */
+function isDocumentId(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0;
 }
 
 /** A move's preview reads both ends of every move in one call. */

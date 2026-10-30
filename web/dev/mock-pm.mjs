@@ -14,6 +14,13 @@
 // group takes it in beside Old thing, and Pinned, whose delete the tenant refuses with the body R14
 // captured. Archiving publishes a new major version and a restore opens a minor one on
 // top, as R13 and R14 measured.
+// For the document pages (W8): a Library group (with Manuals under it) and a Shared group,
+// holding a document attached to an active process, one attached to an archived process,
+// one used by a training unit, one referenced only in a process's open draft, a pending
+// one, an archived one, one that picks up an attachment between the plan and the run, one
+// the bulk archive refuses inside a 200, and one in Shared that is also associated with
+// Manuals. The list filter by group is recursive and takes in associated documents, as the
+// spike measured; the bulk archive does not check attachments, as the tenant does not.
 // For ownership, start the app with SCIM_BASE_URL=http://localhost:<port>.
 //
 //   node dev/mock-pm.mjs [port]      (default 4999; sign in to http://localhost:4999/tenant)
@@ -31,6 +38,7 @@ const port = Number(process.argv[2] ?? 4999);
 const id = (n) => `${String(n).padStart(8, '0')}-0000-4000-8000-${String(n).padStart(12, '0')}`;
 
 const ROOT = id(900), FIN = id(901), SUB = id(902), OTHER = id(903), RET = id(904), FORMS = id(905), POLICIES = id(906);
+const LIB = id(907), MAN = id(908), SHARED = id(909);
 const groups = {
   [FIN]: { parent: '', title: 'Finance' },
   [SUB]: { parent: FIN, title: 'Payables' },
@@ -38,9 +46,34 @@ const groups = {
   [FORMS]: { parent: FIN, title: 'Forms' },
   [POLICIES]: { parent: FIN, title: 'Policies' },
   [OTHER]: { parent: '', title: 'Other' },
+  [LIB]: { parent: '', title: 'Library' },
+  [MAN]: { parent: LIB, title: 'Manuals' },
+  [SHARED]: { parent: '', title: 'Shared' },
 };
-// ListType=All does not return archived documents (spike S1), so they are kept apart.
-const documents = { [FORMS]: { live: ['Expense form.docx'], archived: [] }, [POLICIES]: { live: [], archived: ['Old policy.pdf'] } };
+// Documents by numeric id. ListType=All does not return archived ones (spike S1).
+// attached: process ids its properties list; trainings: training unit names.
+const doc = (n, name, primary, more = {}) => ({ uniqueId: id(n), name, primary, associated: [], archived: false, pending: false, location: 'Cloud', attached: [], trainings: [], reads: 0, ...more });
+const docs = Object.fromEntries([
+  doc(100, 'Expense form.docx', FORMS),
+  doc(101, 'Old policy.pdf', POLICIES, { archived: true }),
+  doc(201, 'Payables checklist.xlsx', MAN, { attached: [id(3)] }),
+  doc(202, 'Retired guide.pdf', MAN, { attached: [id(8)] }),
+  doc(203, 'Training handout.pdf', LIB, { trainings: ['Induction'] }),
+  doc(204, 'Draft-only form.docx', LIB),
+  doc(205, 'Free notes.txt', MAN),
+  doc(206, 'Pending memo.docx', LIB, { pending: true }),
+  // Free when the plan reads it, attached to Outright by the time its batch re-reads it.
+  doc(207, 'Late attachment.pdf', LIB, { attachOnRead: 2, attachTo: id(1) }),
+  doc(208, 'Refused by tenant.pdf', LIB, { refuseArchive: 'Locked' }),
+  doc(209, 'Shared template.docx', SHARED, { associated: [MAN] }),
+  doc(210, 'Supplier link', SHARED, { location: 'External' }),
+  doc(211, 'Archived manual.pdf', MAN, { archived: true }),
+].map((d) => [Number(d.uniqueId.slice(-3)), d]));
+const docNumber = (d) => Number(d.uniqueId.slice(-3));
+const within = (g, top) => {
+  for (let at = g, hops = 0; at && hops < 64; at = groups[at]?.parent, hops++) if (at === top) return true;
+  return false;
+};
 
 // mode: how ArchiveProcess behaves. version/state: the model's revision (1 in progress,
 // 2 awaiting approval, 3 published), for the move plan's draft check and for how an
@@ -62,8 +95,13 @@ procs[id(7)] = { name: 'Archived input', group: OTHER, archived: true, mode: 'ou
 procs[id(8)] = { name: 'Old retired step', group: RET, archived: true, mode: 'outright', rev: 800, version: '3.0', state: null, owner, expert };
 // The tenant refuses to delete it, as it did R14's still-linked target.
 procs[id(9)] = { name: 'Pinned', group: OTHER, archived: false, mode: 'outright', rev: 900, version: '1.0', state: 3, owner, expert, refuseDelete: true };
+const formIn = (n, name) => ({ Activity: [{ Id: n * 10, Text: 'Do the step', ChildProcessProcedures: { Form: [{ Id: n * 10 + 1, DocumentId: n, DocumentUniqueId: id(n), Text: name }] } }] });
 const links = {
   [id(5)]: { ProcessProcedures: { ProcessLink: [{ Id: 501, LinkedProcessUniqueId: id(6), LinkedProcessName: 'Old thing' }] } },
+  // Needs approval's open draft points at a document no properties answer lists (W8 spike).
+  [id(2)]: { ProcessProcedures: formIn(204, 'Draft-only form') },
+  // Disabled owner's model and the document's properties both name the attachment.
+  [id(3)]: { ProcessProcedures: formIn(201, 'Payables checklist') },
   [id(7)]: { Inputs: { Input: [{ Id: 701, FromProcessUniqueId: id(6), Name: 'From old thing' }] } },
 };
 const dependencies = {
@@ -188,9 +226,45 @@ http.createServer(async (req, res) => {
     return send(res, 200, { success: true, errors: [] });
   }
   if (p === '/bff/document/api/v1/documents') {
-    const held = documents[url.searchParams.get('ProcessGroupId')] ?? { live: [], archived: [] };
-    const names = url.searchParams.get('ListType') === 'Archived' ? held.archived : held.live;
-    return send(res, 200, { items: names.map((documentName) => ({ documentName })), totalItemCount: names.length });
+    const archived = url.searchParams.get('ListType') === 'Archived';
+    const g = url.searchParams.get('ProcessGroupId');
+    const all = Object.values(docs)
+      .filter((d) => d.archived === archived)
+      // Recursive, and associated groups count (spike).
+      .filter((d) => !g || [d.primary, ...d.associated].some((at) => within(at, g)));
+    const size = Number(url.searchParams.get('PageSize') ?? 20);
+    const page = Number(url.searchParams.get('Page') ?? 1);
+    const items = all.slice((page - 1) * size, page * size).map((d) => ({
+      documentId: docNumber(d), documentUniqueId: d.uniqueId, documentName: d.name, primaryGroupUniqueId: d.primary,
+      primaryGroupName: groups[d.primary]?.title ?? '', isArchived: d.archived, isPending: d.pending,
+      documentLocationType: d.location, isLinkedFile: d.location !== 'Cloud',
+    }));
+    return send(res, 200, { items, totalItemCount: all.length });
+  }
+  let pm = p.match(/^\/bff\/document\/api\/v1\/documents\/(\d+)\/properties$/);
+  if (pm) {
+    const d = docs[Number(pm[1])];
+    if (!d) return send(res, 404, { message: 'not found' });
+    d.reads++;
+    if (d.attachOnRead && d.reads >= d.attachOnRead && !d.attached.includes(d.attachTo)) d.attached.push(d.attachTo);
+    return send(res, 200, {
+      primaryProcessGroupId: Number(d.primary.slice(-3)),
+      associatedGroups: [d.primary, ...d.associated].map((g) => ({ key: groups[g]?.title ?? '', value: Number(g.slice(-3)) })),
+      attachedProcesses: d.attached.map((u) => ({ processName: procs[u]?.name ?? '', processUniqueId: u })),
+      attachedTrainings: d.trainings.map((name) => ({ name })),
+      isArchived: d.archived, isPending: d.pending, documentLocationType: d.location,
+    });
+  }
+  if (p === '/bff/document/api/v1/documents/bulk/archive') {
+    // 200 whatever happens; each failure is an entry (spike). Attachments are not checked.
+    const errors = [];
+    for (const n of JSON.parse(body).documentIds) {
+      const d = docs[n];
+      if (!d) errors.push({ documentId: n, errorCode: 'NotFound' });
+      else if (d.refuseArchive) errors.push({ documentId: n, errorCode: d.refuseArchive });
+      else d.archived = true;
+    }
+    return send(res, 200, { errors });
   }
   let dm = p.match(/^\/Api\/v1\/Processes\/([^/]+)\/CheckProcessDependencies$/);
   if (dm) {
@@ -212,9 +286,10 @@ http.createServer(async (req, res) => {
   }
   if (p === '/Process/Edit/DeleteGroup') {
     const { processGroupUniqueId: g } = JSON.parse(body);
-    const held = documents[g];
-    if (held && held.live.length + held.archived.length > 0) {
-      return send(res, 409, { errorCode: 'AssociatedContents', caption: 'Unable to Delete Group', additionalInfos: { documents: [...held.live, ...held.archived] } });
+    // Any document whose primary or associated group it is, archived or not (spike).
+    const held = Object.values(docs).filter((d) => d.primary === g || d.associated.includes(g));
+    if (held.length > 0) {
+      return send(res, 409, { errorCode: 'AssociatedContents', caption: 'Unable to Delete Group', additionalInfos: { documents: held.map((d) => d.name) } });
     }
     if (levels(g).length > 0) return send(res, 409, { errorCode: 'AssociatedContents', caption: 'Unable to Delete Group', additionalInfos: {} });
     delete groups[g];
