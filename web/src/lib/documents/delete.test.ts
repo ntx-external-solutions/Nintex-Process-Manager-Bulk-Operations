@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { createControls } from '../exec/runner.ts';
 import type { DocumentBulkAnswer } from '../pm/documents.ts';
 import type { IndexEntry, ProcessIndex } from '../tenant/state.ts';
-import { type DocumentTarget, type PropertiesRead } from './archive.ts';
+import { PENDING, type DocumentTarget, type PropertiesRead } from './archive.ts';
 import {
   afterArchivePhase,
   buildDocumentDeletePlan,
@@ -270,4 +270,23 @@ test('a run that dies names what it archived and could not put back', async () =
   assert.ok(controls.stopped());
   const restoreRows = await putBack(t.gateway, archivedByRun, deleteRows, createControls(), {});
   assert.deepEqual(leftArchived(archivedByRun, [...deleteRows, ...restoreRows]).map((x) => x.documentId), [1, 2]);
+});
+
+test('the delete re-check drops a document whose read shows an upload waiting (S4)', async () => {
+  const target = (n: number): DocumentTarget => ({ documentId: n, uniqueId: d(n), name: `Doc ${n}`, path: [], groupId: null, groupUniqueId: null, isArchived: true, chosen: CHOSEN_BY_ID, location: 'Cloud', type: 'PDF' });
+  const deleted: number[][] = [];
+  const read = { attachedProcesses: [], attachedTrainings: [], isArchived: true };
+  const gateway = {
+    properties: async (id: number) => (id === 2 ? { ...read, action: { actionType: 'None', caption: 'Upload Pending Approval' } } : read),
+    archive: async () => ({ errors: [] }),
+    restore: async () => ({ errors: [] }),
+    delete: async (ids: number[]) => {
+      deleted.push(ids);
+      return { errors: [] };
+    },
+  };
+  const rows = await runDeletePhase(gateway, [target(1), target(2)], createControls(), { index: INDEX });
+  assert.deepEqual(deleted, [[1]]);
+  const dropped = rows.find((r) => r.objectId === d(2))!;
+  assert.deepEqual([dropped.status, dropped.message], ['Skipped', PENDING]);
 });

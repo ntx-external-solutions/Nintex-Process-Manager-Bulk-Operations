@@ -191,6 +191,26 @@ test('a process both lists and the scan finds is named once; holders of several 
   );
 });
 
+test('a list row is pending if an upload is waiting, approved version or not (S4)', () => {
+  const pending = (more: Record<string, unknown>) => toDocumentEntry({ documentId: 3, documentUniqueId: d(3), documentName: 'A', ...more }, 'All')?.isPending;
+  assert.equal(pending({ isPending: true, hasUpdatesPending: true }), true, 'first upload waiting');
+  assert.equal(pending({ isPending: false, hasUpdatesPending: true }), true, 'new version on an approved one');
+  assert.equal(pending({ isPending: false, hasUpdatesPending: false, isDeclined: true }), false, 'declined is not pending');
+  assert.equal(pending({}), false);
+});
+
+test('a read is pending only by its caption, and otherwise leaves it to the list (S4)', () => {
+  const pending = (action: unknown) => toDocumentProperties({ action }).isPending;
+  assert.equal(pending({ actionType: 'None', caption: 'Upload Pending Approval' }), true);
+  for (const action of [{ actionType: 'None', caption: 'Approval Declined' }, { actionType: 'Replace', caption: 'Replace with new version' }, { actionType: 'None' }, null]) {
+    assert.equal(pending(action), null, JSON.stringify(action));
+  }
+  const docs = [entry(1, 'Pending on the list', 1, { isPending: true })];
+  const properties = new Map<string, PropertiesRead>([[d(1), free({ isPending: null, action: { actionType: 'Replace', caption: 'Some new wording' } })]]);
+  const plan = buildDocumentArchivePlan({ chosen: docs.map((e) => chosen(e)), paths: new Map(), properties, scan: NO_SCAN, index: INDEX });
+  assert.deepEqual(plan.skipped.map((r) => r.message), [PENDING], 'a caption it does not know can not clear the list');
+});
+
 test('archived, pending and unreadable documents are left out, each with its reason', () => {
   const docs = [entry(1, 'Archived', 1, { isArchived: true }), entry(2, 'Pending', 1, { isPending: true }), entry(3, 'Unreadable', 1), entry(4, 'Pending per properties', 1)];
   const properties = new Map<string, PropertiesRead>([[d(3), { error: '500' }], [d(4), free({ isPending: true })]]);
@@ -256,6 +276,15 @@ function fakeGateway(propsById: Record<number, Record<string, unknown>>, answers
 
 const target = (n: number, more: Partial<DocumentTarget> = {}): DocumentTarget => ({ documentId: n, uniqueId: d(n), name: `Doc ${n}`, path: [], groupId: 7, groupUniqueId: g(7), isArchived: false, chosen: CHOSEN_FROM_TREE, location: 'Cloud', type: 'PDF', ...more });
 const FREE_RAW = { attachedProcesses: [], attachedTrainings: [], isArchived: false };
+
+test('the re-check drops a document whose read shows an upload waiting: the read has no isPending field (S4)', async () => {
+  const targets = [target(1), target(2)];
+  const { gateway, sent } = fakeGateway({ 1: FREE_RAW, 2: { ...FREE_RAW, action: { actionType: 'None', caption: 'Upload Pending Approval' } } }, []);
+  const rows = await runDocumentArchive(gateway, targets, createControls(), { index: INDEX });
+  assert.deepEqual(sent, [[1]]);
+  const dropped = rows.find((r) => r.objectId === d(2))!;
+  assert.deepEqual([dropped.status, dropped.message], ['Skipped', PENDING]);
+});
 
 test('batches of 50, each re-checked first: a document attached since the plan is dropped with its new holder', async () => {
   const targets = Array.from({ length: 52 }, (_, i) => target(i + 1));
