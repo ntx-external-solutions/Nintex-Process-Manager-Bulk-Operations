@@ -6,6 +6,30 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## Link type label
+
+Commit `007041d` on `claude/link-type-label`, branched from the Beta label, so it needs #89 first. The small
+item from Cowork's W9c live check, 4 Nov. It has no entry in TASKS.md.
+
+**What changed for the operator.** A link whose name has no extension now shows `Link` in the Type
+column, on every page that has one, rather than a blank. A link named like a file still shows that
+type. The archived list prints type and location together, so it leaves `Link` out to avoid "Link,
+External link".
+
+**Functions touched.** `typeOf` and `toDocumentEntry` (`documents/list.ts`), new `LINK_TYPE`,
+`ArchivedDocumentList`. Comment only: `documentMoveForm`, now that the live check shows
+`implicitlyAssociatedGroups` follows the primary. `API_ARCHITECTURE.md` has the live check's results
+and no longer lists a tagged link and an undeclined link as unmeasured.
+
+**Results-file operations.** None.
+
+**Tests.** `npm test` in `web/`: 721 tests, 721 pass (1 new). Typecheck and build clean.
+Not run in a browser: it's one label, covered by the new test.
+
+**Deferred.** A network link gets `Link` too, though the tenant has none to show it on.
+
+---
+
 ## Beta label
 
 Commit `6c2374f` on `claude/beta-label`. JB's request, 4 Nov. It has no entry in TASKS.md.
