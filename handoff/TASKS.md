@@ -53,7 +53,8 @@ only) and left active. Then delete N1 and both groups.
 
 ## S4. What "pending" means on a document (Cowork spike)
 
-Status: For Cowork. Claude Code: don't start this; it needs the tenant. A build task follows from it.
+Status: For Cowork. Steps 1 to 3 are done; step 4 is cleared to run. Claude Code: don't start this;
+it needs the tenant.
 
 **Why.** The app's idea of pending comes from one field, and a 4 Nov capture shows that field can
 miss. A real document's read had `action.caption` "Upload Pending Approval", while its list row had
@@ -68,8 +69,12 @@ miss. A real document's read had `action.caption` "Upload Pending Approval", whi
   left that unexplained. Whether a document is pending at all with approvals off is part of this.
 
 **Measure.** The census is read-only. Use only `ZZ` content for anything that writes, remove it
-after, and give the document counts before and after. Don't change the approvals setting without
-asking JB.
+after, and give the document counts before and after.
+
+JB agreed on 4 Nov that document approvals can be turned on and off on the demo tenant for this
+spike. Keep the window short, act only on `ZZ` content while it's on, and read
+`enableDocumentApprovals` afterwards to confirm it's back to false. The 21 existing pending documents
+may behave differently while it's on: note any change, and report if they don't come back the same.
 
 1. **Census.** Read `/bff/document/api/v1/configuration` again. Then, for every active document,
    read the list row and the properties, and tabulate `isPending`, `hasUpdatesPending`, `isDeclined`
@@ -92,9 +97,9 @@ asking JB.
 - what each state risks, if anything, so we can see whether skipping is even the right default on
   Archive and Delete, and whether Move's tick should cover these documents.
 
-Then write the build task in this file as `Ready`, covering the Move plan, the Archive and Delete
-plans and both re-checks. If it turns out the mismatch is harmless, say so and write only the fix for
-the re-checks that can't fire.
+PR #92 already treats any waiting upload as pending and makes both re-checks work, from steps 1 to
+3. So step 4 only needs to say whether that's the right default: if skipping or the tick should
+change, write that as a `Ready` task. If not, say so and S4 is done.
 
 **Keep out of the handoff:** tenant ids, account names and document names, as usual.
 
