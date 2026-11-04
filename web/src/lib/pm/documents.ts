@@ -137,11 +137,16 @@ export const MOVE_PENDING = 'Pending in Process Manager';
 export const MOVE_ALREADY_THERE = 'Already in that group';
 export const MOVE_LINK = 'A linked document. Its save form has not been measured, and a save without its address could lose it, so it was left alone';
 
-export const MOVE_TAGGED = 'It has tags. The save form for a tagged document has not been measured, and a save could lose them, so it was left alone';
 export const MOVE_AUTOMATED_FORM = 'An automated form. Its save form has not been measured, so it was left alone';
 
 const moveMissing = (field: string) =>
   `Its properties did not give ${field}, which a save has to send back unchanged, so it was left alone`;
+
+/** Each tag's id for the form, or null if any entry has none: sent without it, that tag would go. */
+const tagIds = (tags: readonly unknown[]): string[] | null => {
+  const ids = tags.map((tag) => nodeValue(tag, 'value'));
+  return ids.every((id) => Number.isInteger(id) && (id as number) > 0) ? ids.map(String) : null;
+};
 
 /**
  * The form that moves one document, or why it can't be built.
@@ -166,11 +171,15 @@ const moveMissing = (field: string) =>
  * Pending isn't refused here: the read doesn't say, so the list decides at the plan, where
  * the operator can opt in (W9a).
  *
+ * Tags go back as one `AssociatedTags` or `AssociatedSystemTags` field per id, after
+ * `GroupList` (W9b, 4 Nov). A save without those fields wipes the document's tags and still
+ * answers 204, and the UI's "remove every tag" is that same form, so the tenant has no way to
+ * say "leave them as they are". A list that's empty sends no field: there's no empty value.
+ *
  * Refused until a capture shows their form: links (the create call has `Url` and
- * `NetworkPath`, which this form hasn't), tagged documents (the read has tags, and the
- * captured form, for a document with none, has no field for them) and automated forms.
+ * `NetworkPath`, which this form hasn't) and automated forms.
  */
-export function documentMoveForm(raw: unknown, targetGroupId: number): { form: Record<string, string> } | { refused: string } {
+export function documentMoveForm(raw: unknown, targetGroupId: number): { form: Array<[string, string]> } | { refused: string } {
   const props = toDocumentProperties(raw);
   if (props.isArchived === true) return { refused: MOVE_ARCHIVED };
   if (props.primaryGroupId === null) return { refused: moveMissing('its primary group') };
@@ -186,7 +195,9 @@ export function documentMoveForm(raw: unknown, targetGroupId: number): { form: R
   const tags = nodeValue(raw, 'associatedTags');
   const systemTags = nodeValue(raw, 'associatedSystemTags');
   if (!Array.isArray(tags) || !Array.isArray(systemTags)) return { refused: moveMissing('its tags') };
-  if (tags.length > 0 || systemTags.length > 0) return { refused: MOVE_TAGGED };
+  const tagFields = tagIds(tags);
+  const systemTagFields = tagIds(systemTags);
+  if (tagFields === null || systemTagFields === null) return { refused: moveMissing('the id of a tag') };
 
   const name = nodeString(raw, 'documentName');
   if (name.trim() === '') return { refused: moveMissing('its name') };
@@ -213,15 +224,17 @@ export function documentMoveForm(raw: unknown, targetGroupId: number): { form: R
   const selected = [...new Set(props.associatedGroups.map((g) => g.id as number))].filter((id) => !notSelected.has(id));
 
   return {
-    form: {
-      DoOverrideDocumentReviewFreq: String(override),
-      DocumentReviewFreqMonths: months === null ? '' : String(months),
-      ReferenceNo: nodeString(raw, 'referenceNumber'),
-      DocumentName: name,
-      DocumentType: type,
-      PrimaryProcessGroupId: String(targetGroupId),
-      GroupList: JSON.stringify({ selected }),
-    },
+    form: [
+      ['DoOverrideDocumentReviewFreq', String(override)],
+      ['DocumentReviewFreqMonths', months === null ? '' : String(months)],
+      ['ReferenceNo', nodeString(raw, 'referenceNumber')],
+      ['DocumentName', name],
+      ['DocumentType', type],
+      ['PrimaryProcessGroupId', String(targetGroupId)],
+      ['GroupList', JSON.stringify({ selected })],
+      ...tagFields.map((id): [string, string] => ['AssociatedTags', id]),
+      ...systemTagFields.map((id): [string, string] => ['AssociatedSystemTags', id]),
+    ],
   };
 }
 

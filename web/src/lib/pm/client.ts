@@ -45,8 +45,11 @@ export interface PmRequestOptions {
   body?: unknown;
   /** Send as application/x-www-form-urlencoded instead of JSON. */
   form?: Record<string, string>;
-  /** Send as multipart/form-data, as the document properties save is captured doing (W9). */
-  multipart?: Record<string, string>;
+  /**
+   * Send as multipart/form-data, as the document properties save is captured doing (W9).
+   * Pairs in send order: a tag is one field per id, so a name can repeat (W9b).
+   */
+  multipart?: ReadonlyArray<readonly [name: string, value: string]>;
   query?: Record<string, string | number | undefined>;
   retry?: RetryPolicy;
   /** Overrides the default attempt count. */
@@ -157,7 +160,7 @@ export async function pmRequest<T>(ctx: PmContext, options: PmRequestOptions): P
   if (multipart) {
     // No Content-Type: fetch writes it, because it has to carry the boundary it chose.
     payload = new FormData();
-    for (const [name, value] of Object.entries(multipart)) payload.append(name, value);
+    for (const [name, value] of multipart) payload.append(name, value);
   } else if (form) {
     headers['Content-Type'] = 'application/x-www-form-urlencoded';
     payload = new URLSearchParams(form).toString();

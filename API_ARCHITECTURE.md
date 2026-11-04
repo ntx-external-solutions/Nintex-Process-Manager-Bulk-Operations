@@ -1721,6 +1721,19 @@ form plus the tag fields) moved the document and kept all three.
 - The document list shows an upload's name with its file extension; the properties read and
   the form carry it without.
 
+**A second capture (HAR, 4 Nov 2026).** A UI move of a real document, not `ZZ`, with one system
+tag and no search tags, attached to a process, its upload pending approval. It agrees with the
+above and adds three things:
+
+- With only a system tag, the form carries `AssociatedSystemTags` once and no `AssociatedTags`,
+  in the same place after `GroupList`. The tag was there on the read afterwards.
+- A document whose upload is pending approval moves the same way: 204, group changed, and the
+  read still has `action.caption` "Upload Pending Approval".
+- **The list and the read disagree on pending.** That document's list row has `isPending: false`
+  and `hasUpdatesPending: true`, while its read says "Upload Pending Approval". Anything judging
+  pending from the list's `isPending` doesn't see this one. What `hasUpdatesPending` means in
+  general isn't measured.
+
 ### How processes hold documents
 
 An item in `Activity[].ChildProcessProcedures.<Type>[]` with `DocumentId` (numeric) and

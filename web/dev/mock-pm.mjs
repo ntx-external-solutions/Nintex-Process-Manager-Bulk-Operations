@@ -33,8 +33,9 @@
 // 200, and one a Delete run archived and left archived. The restore answers NotArchived
 // for an active document.
 // For Move documents (W9): POST .../{id}/properties takes the captured multipart form and
-// replaces the record, blanks included, as the tenant does. Draft-only form's read leaves out
-// its reference, Retired guide has a tag, and Refused by tenant's save answers 400.
+// replaces the record, blanks included, as the tenant does, tags too: a form without the tag
+// fields clears them and still answers 204 (W9b). Draft-only form's read leaves out its
+// reference, Retired guide has two tags and a system tag, and Refused by tenant's save answers 400.
 // For Repair document references (W8d): Outright (published) points at a deleted image
 // and at an archived document, which is not dead; Needs approval's open draft points at a
 // deleted image; Elsewhere points at a deleted image and at a form that is missing at the
@@ -85,7 +86,7 @@ const docs = Object.fromEntries([
   doc(100, 'Expense form.docx', FORMS),
   doc(101, 'Old policy.pdf', POLICIES, { archived: true }),
   doc(201, 'Payables checklist.xlsx', MAN, { attached: [id(3)] }),
-  doc(202, 'Retired guide.pdf', MAN, { attached: [id(8)], tags: [{ key: 'internal', value: 58 }] }),
+  doc(202, 'Retired guide.pdf', MAN, { attached: [id(8)], tags: [{ key: 'internal', value: 58 }, { key: 'legacy', value: 59 }], systemTags: [{ key: 'Payroll', value: 71 }] }),
   doc(203, 'Training handout.pdf', LIB, { trainings: ['Induction'] }),
   doc(204, 'Draft-only form.docx', LIB, { omitReference: true }),
   doc(205, 'Free notes.txt', MAN),
@@ -330,6 +331,14 @@ http.createServer(async (req, res) => {
       d.referenceNo = field('ReferenceNo');
       d.reviewOverride = field('DoOverrideDocumentReviewFreq') === 'true';
       d.reviewMonths = field('DocumentReviewFreqMonths');
+      // One field per tag. What the form leaves out is gone, which is the tenant's behaviour.
+      const sentIds = (name, held = []) =>
+        [...body.matchAll(new RegExp(`name="${name}"\\r\\n\\r\\n(.*?)\\r\\n`, 'g'))].map((m) => {
+          const value = Number(m[1]);
+          return { key: held.find((t) => t.value === value)?.key ?? `tag ${value}`, value };
+        });
+      d.tags = sentIds('AssociatedTags', d.tags);
+      d.systemTags = sentIds('AssociatedSystemTags', d.systemTags);
       return send(res, 204);
     }
     d.reads++;
@@ -339,7 +348,7 @@ http.createServer(async (req, res) => {
       // As captured (W9): the primary and its attached processes' groups come back too, and only `associated` is real.
       associatedGroups: [...implicitOf(d), ...d.associated].map((g) => ({ key: groups[g]?.title ?? '', value: Number(g.slice(-3)) })),
       implicitlyAssociatedGroups: implicitOf(d).map((g) => Number(g.slice(-3))),
-      associatedTags: d.tags ?? [], associatedSystemTags: [], isAutomatedForm: false,
+      associatedTags: d.tags ?? [], associatedSystemTags: d.systemTags ?? [], isAutomatedForm: false,
       attachedProcesses: d.attached.map((u) => ({ processName: procs[u]?.name ?? '', processUniqueId: u })),
       attachedTrainings: d.trainings.map((name) => ({ name })),
       isArchived: d.archived, isPending: d.pending, documentLocationType: d.location,
