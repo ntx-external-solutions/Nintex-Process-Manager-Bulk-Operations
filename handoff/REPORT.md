@@ -32,8 +32,8 @@ the spec, and shows the system-tag-only form, which the spike's table didn't cov
 
 **Results-file operations.** None new or renamed.
 
-**Tests.** `npm test` in `web/`: 718 tests, 718 pass (713 before; 5 new, 2 changed to the list
-form, 2 rewritten around the removed refusal). `npm run typecheck` and `npm run build` clean.
+**Tests.** `npm test` in `web/`: 718 tests, 718 pass (713 before; 5 new, and the existing form
+tests updated for the list form and the removed refusal). `npm run typecheck` and `npm run build` clean.
 `drive-docs-move` run against the built app and the mock: 32 checks, all ok. Probing the mock by
 hand, a tag-less save answers 204 and leaves both lists empty, so the read-back can fail.
 `Tests/Run-AllTests.ps1` not run: `pwsh` isn't on this machine, and no PowerShell changed.
