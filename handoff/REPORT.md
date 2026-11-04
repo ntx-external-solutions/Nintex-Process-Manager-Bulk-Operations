@@ -6,6 +6,84 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## W9. Move documents
+
+Commit `98d363b` on `claude/w9-move-documents`. JB asked for this directly, with a browser
+capture of the save call, so it has no entry in TASKS.md and no spike behind it. **Don't run
+it on real content until the checks below pass.**
+
+**What changed.** A new page, `/documents/move`, in the side nav and on the home page.
+Documents are chosen from the tree, the document list, or by id or CSV, which add up as on
+the other document pages. One destination group a run. Plan, two-step confirm, run, then a
+read of the lists to settle every row. A run record finishes an interrupted run.
+
+**The risk this is built around.** The tenant has no move or bulk call. A move is
+`POST .../documents/{id}/properties`, which replaces the whole record, so anything sent blank
+is presumably wiped, with a success answer. The final read only checks the group and wouldn't
+see that. So `documentMoveForm` refuses when the read didn't carry a field, and never sends it
+blank. The save reads the record itself, so it sends what the tenant holds at that moment.
+
+**Functions.**
+- `pm/client.ts`: `pmRequest` gains `multipart`.
+- `pm/documents.ts`: `documentMoveForm`, `moveDocument`.
+- `pm/operations.ts`: new write `document.move`, two positive integers and nothing else. The
+  browser never supplies a name, a reference or a list of groups.
+- `documents/move.ts` (new): `readForMove`, `buildDocumentMovePlan`, `movePreviewRows`,
+  `runDocumentMove`, `settleDocumentMove`, `moveInFlightRows`.
+- `documents/runRecord.ts`: page `move`, and a `move` field holding the destination.
+
+**Results-file operations.** `UpdateLocation` with `ObjectType` `Document`, the name the
+process Move uses. One row per document, including skips. `GroupId` is the group it left.
+
+**Tests.** `npm test`: 657 tests, 657 pass (17 new, was 640). Typecheck and build clean.
+New: `documents/move.test.ts` (16) and one allowlist test. `Tests/Run-AllTests.ps1` not run:
+`pwsh` isn't on this machine and no PowerShell changed. `$script:ScriptVersion` not bumped:
+the script is frozen at v4.11. New driver `drive-docs-move`: every check passes against the
+mock. The six older document drivers still pass after the mock changes. Nothing was run
+against a tenant, and the capture's cookies and token were not used.
+
+**Unmeasured. Cowork, please check these first, on `ZZ` content, one document at a time.**
+
+1. **The read's field names decide whether anything moves.** The capture shows the form, not
+   the `GET`. I assumed `documentName`, `documentType`, `referenceNo` (or `referenceNumber`),
+   `doOverrideDocumentReviewFreq` and `documentReviewFreqMonths`. If one is wrong, every
+   document is skipped with "Its properties did not give ...", and nothing is written. The fix
+   is a one-line change in `documentMoveForm`.
+2. **`documentType` in the read has to be the word the form takes**, such as `Image`. A number
+   is refused.
+3. **The tree's numeric group id has to be what `PrimaryProcessGroupId` takes.** Assumed, and
+   the one assumption that wouldn't fail safely: a wrong id could land a document in the wrong
+   group. The final read would show it as Failed, but only after it moved.
+4. **Compare the whole record before and after a move**: name, reference, review frequency,
+   associated groups, implicit associations, version, the last-modified fields, attachments.
+5. **Whether `associatedGroups` lists the primary group.** Handled either way.
+6. **No override with no months:** this sends `DocumentReviewFreqMonths` blank, which is a
+   guess. If the tenant refuses it, the row is Failed and nothing changes.
+7. **The bearer token on this call, and multipart with it.**
+8. **A document attached to a process, a training unit and a draft** still opens from each
+   after moving.
+
+**Decisions to check.**
+- **Attached documents move.** Holders point at the document, not at its group, so W8 decision
+  1 (never archive or delete) doesn't apply. Item 8 tests that.
+- **Linked documents are skipped.** External and network documents get a Skipped row. The create
+  call takes `Url` and `NetworkPath` and this form has neither, so a save could lose the address.
+  12 of the demo tenant's documents are links. A capture of saving one would let this open up.
+- **Document groups can't be a destination.** `DestinationPicker` already disables them, and
+  whether a document can live in one isn't measured.
+- **A checked group flattens.** Documents in subgroups land directly in the destination, and the
+  tree tab says so. Subgroups aren't recreated.
+- **The old primary group isn't kept as an association**, and the destination leaves the
+  association list if it was on it.
+- **Pending documents are skipped**, as on the other document pages.
+
+**Deferred.**
+- **A destination per CSV row.** The CSV takes ids only, so one run is one destination.
+- **Undo from a results file.** The file holds the old group for each document, but putting them
+  back needs a run with many destinations, which is the same change.
+
+---
+
 ## W8 follow-up. Finishing a document run whose session died
 
 Commit `07a8696` on `claude/w8e-document-run-recovery`, built on W8d (#84). JB asked for
