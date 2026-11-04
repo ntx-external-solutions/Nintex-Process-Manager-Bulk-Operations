@@ -202,6 +202,7 @@ test('a list row is pending if an upload is waiting, approved version or not (S4
 test('a read is pending only by its caption, and otherwise leaves it to the list (S4)', () => {
   const pending = (action: unknown) => toDocumentProperties({ action }).isPending;
   assert.equal(pending({ actionType: 'None', caption: 'Upload Pending Approval' }), true);
+  assert.equal(pending({ actionType: 'None', caption: 'Approval Required' }), true, 'how it reads to someone who can approve');
   for (const action of [{ actionType: 'None', caption: 'Approval Declined' }, { actionType: 'Replace', caption: 'Replace with new version' }, { actionType: 'None' }, null]) {
     assert.equal(pending(action), null, JSON.stringify(action));
   }
@@ -277,14 +278,16 @@ function fakeGateway(propsById: Record<number, Record<string, unknown>>, answers
 const target = (n: number, more: Partial<DocumentTarget> = {}): DocumentTarget => ({ documentId: n, uniqueId: d(n), name: `Doc ${n}`, path: [], groupId: 7, groupUniqueId: g(7), isArchived: false, chosen: CHOSEN_FROM_TREE, location: 'Cloud', type: 'PDF', ...more });
 const FREE_RAW = { attachedProcesses: [], attachedTrainings: [], isArchived: false };
 
-test('the re-check drops a document whose read shows an upload waiting: the read has no isPending field (S4)', async () => {
-  const targets = [target(1), target(2)];
-  const { gateway, sent } = fakeGateway({ 1: FREE_RAW, 2: { ...FREE_RAW, action: { actionType: 'None', caption: 'Upload Pending Approval' } } }, []);
-  const rows = await runDocumentArchive(gateway, targets, createControls(), { index: INDEX });
-  assert.deepEqual(sent, [[1]]);
-  const dropped = rows.find((r) => r.objectId === d(2))!;
-  assert.deepEqual([dropped.status, dropped.message], ['Skipped', PENDING]);
-});
+for (const caption of ['Upload Pending Approval', 'Approval Required']) {
+  test(`the re-check drops a document whose read says "${caption}": the read has no isPending field (S4, F9)`, async () => {
+    const targets = [target(1), target(2)];
+    const { gateway, sent } = fakeGateway({ 1: FREE_RAW, 2: { ...FREE_RAW, action: { actionType: 'None', caption } } }, []);
+    const rows = await runDocumentArchive(gateway, targets, createControls(), { index: INDEX });
+    assert.deepEqual(sent, [[1]]);
+    const dropped = rows.find((r) => r.objectId === d(2))!;
+    assert.deepEqual([dropped.status, dropped.message], ['Skipped', PENDING]);
+  });
+}
 
 test('batches of 50, each re-checked first: a document attached since the plan is dropped with its new holder', async () => {
   const targets = Array.from({ length: 52 }, (_, i) => target(i + 1));
