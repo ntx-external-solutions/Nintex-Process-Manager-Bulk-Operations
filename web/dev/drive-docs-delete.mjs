@@ -37,6 +37,8 @@ await b.until(`document.body.innerText.includes('Only associated with a checked 
 const treePanel = await b.js(`document.body.innerText`);
 expect(/hold 5 documents as their primary group \(2 archived\)/.test(treePanel), 'five documents, two archived, in Old forms and Spent');
 expect(/Borrowed archive\.pdf \(archived\)/.test(treePanel), 'the archived associated-only document, left unticked');
+await b.js(`$btn('Back to the selection')`);
+await b.until(`!!document.querySelector('[role=tablist]')`, 'back at the selection');
 
 await b.js(`$btn('From the archived list')`);
 await b.until(`!!document.querySelector('input[aria-label="Select archived document Archived manual.pdf"]')`, 'the archived list');

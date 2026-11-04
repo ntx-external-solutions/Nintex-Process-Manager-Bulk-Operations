@@ -40,6 +40,19 @@ export interface DocumentMovePlan {
   skipped: ResultRow[];
 }
 
+export interface DocumentMovePlanInput {
+  chosen: readonly ChosenDocument[];
+  resolveSkipped?: readonly ResultRow[];
+  paths: ReadonlyMap<string, string[]>;
+  reads: ReadonlyMap<string, MoveRead>;
+  destination: MoveDestination;
+  /** Off by default: move documents whose upload is awaiting approval too (W9a). */
+  includePending?: boolean;
+}
+
+/** Pending documents the tick would add or take out. */
+export const pendingChosen = (chosen: readonly ChosenDocument[]) => chosen.filter((c) => c.entry.isPending && !c.entry.isArchived).length;
+
 export const destinationLabel = (d: MoveDestination) => d.path.join(' / ');
 
 /** Each chosen document's record, four at a time. A failed read is kept; a dead session ends the plan. */
@@ -69,13 +82,7 @@ export async function readForMove(
   return out;
 }
 
-export function buildDocumentMovePlan(input: {
-  chosen: readonly ChosenDocument[];
-  resolveSkipped?: readonly ResultRow[];
-  paths: ReadonlyMap<string, string[]>;
-  reads: ReadonlyMap<string, MoveRead>;
-  destination: MoveDestination;
-}): DocumentMovePlan {
+export function buildDocumentMovePlan(input: DocumentMovePlanInput): DocumentMovePlan {
   const targets: DocumentTarget[] = [];
   const skipped: ResultRow[] = [...(input.resolveSkipped ?? [])];
   const destination = input.destination.uniqueId.toLowerCase();
@@ -89,7 +96,7 @@ export function buildDocumentMovePlan(input: {
 
     // What the list already says needs no read, so these hold even when the read failed.
     if (c.entry.isArchived) skip(MOVE_ARCHIVED);
-    else if (c.entry.isPending) skip(MOVE_PENDING);
+    else if (c.entry.isPending && input.includePending !== true) skip(MOVE_PENDING);
     else if (c.entry.primaryGroupUniqueId?.toLowerCase() === destination) skip(MOVE_ALREADY_THERE);
     else if (read === undefined || failed) skip(`Could not read it (${failed ? read.error : 'it was not read'}), so it is not moved. Build the plan again to retry.`);
     else if (read.refused !== null) skip(read.refused);
@@ -102,7 +109,7 @@ export function buildDocumentMovePlan(input: {
         groupId,
         groupUniqueId: c.entry.primaryGroupUniqueId,
         isArchived: false,
-        chosen: c.chosen,
+        chosen: c.entry.isPending ? `${c.chosen} (pending)` : c.chosen,
         location: c.entry.location,
         type: c.entry.type,
       });

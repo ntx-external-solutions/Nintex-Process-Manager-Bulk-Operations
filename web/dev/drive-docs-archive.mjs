@@ -52,6 +52,8 @@ const treePanel = await b.js(`document.body.innerText`);
 expect(/hold 8 active documents as their primary group/.test(treePanel), 'eight documents in Library and Manuals as their primary group');
 expect(/Shared template\.docx\s+\(primary group: Shared\)/.test(treePanel), 'the associated-only document, labelled with its primary group');
 await b.js(`$check('Include document Shared template.docx')`);
+await b.js(`$btn('Back to the selection')`);
+await b.until(`!!document.querySelector('[role=tablist]')`, 'back at the selection');
 
 await b.js(`$btn('From the document list')`);
 await b.until(`!!document.querySelector('input[aria-label="Select document Supplier link"]')`, 'the document list');

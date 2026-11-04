@@ -51,6 +51,85 @@ only) and left active. Then delete N1 and both groups.
 
 ---
 
+## W9b. Move tagged documents: send their tags back
+
+Status: Ready
+
+Measured on the demo tenant on 4 Nov. Read "Document tags (4 Nov 2026)" in
+`API_ARCHITECTURE.md` first. Don't run anything against a tenant yourself. Keep tenant names
+and ids out of code, tests and handoff files.
+
+**What the tenant does.** `POST .../documents/{id}/properties` treats missing tag fields as
+"no tags". A move or a no-change save sent without them answered 204 and wiped every tag and
+system tag on the document. The UI's own "remove every tag" save is the same form with the
+fields left out, so there's no way to say "leave them as they are". The skip in
+`documentMoveForm` was right to exist; the fix is to send the tags back, not to drop them.
+
+**What `documentMoveForm` should send.** Everything it sends now, plus one field per tag,
+after `GroupList`:
+
+- `AssociatedTags` once for each entry in the read's `associatedTags`, value its numeric
+  `value` as a string.
+- `AssociatedSystemTags` once for each entry in `associatedSystemTags`, the same way.
+- A list that is empty sends no field of that name. Don't send an empty value.
+
+Example for A4, a document with two tags and one system tag, moved to group 77:
+
+```
+DoOverrideDocumentReviewFreq=false
+DocumentReviewFreqMonths=12
+ReferenceNo=
+DocumentName=Example document
+DocumentType=Information
+PrimaryProcessGroupId=77
+GroupList={"selected":[]}
+AssociatedTags=101
+AssociatedTags=102
+AssociatedSystemTags=201
+```
+
+Example for A6, the same document with no tags, moved to group 77:
+
+```
+DoOverrideDocumentReviewFreq=false
+DocumentReviewFreqMonths=12
+ReferenceNo=
+DocumentName=Example document
+DocumentType=Information
+PrimaryProcessGroupId=77
+GroupList={"selected":[]}
+```
+
+**Changes.**
+
+1. **Repeated fields.** The form is `Record<string, string>` today, which can't hold
+   `AssociatedTags` twice. Change it to an ordered list of name and value pairs (or allow
+   `string[]` values), and have `pmRequest`'s `multipart` append each one. Keep the field order
+   the browser uses.
+2. **Remove the `MOVE_TAGGED` refusal** and its constant. This also lets the W9a pending tick
+   take a pending document with tags, since that exclusion came from this refusal. Keep refusing when either list is
+   absent or not an array (`moveMissing('its tags')`, as now), and add a refusal when any entry
+   lacks a positive integer `value`, since sending it without would drop that tag.
+3. **Comments:** replace "tagged documents not measured" in the `documentMoveForm` doc comment
+   with what was measured, and that a save without the fields wipes them (W9b, 4 Nov).
+4. **Mock:** the properties save in `web/dev/mock-pm.mjs` should replace the document's tags
+   with what the form sends, so a form missing them clears them. That's what makes the tests
+   below able to fail.
+
+**Tests.**
+
+- A document with two tags and one system tag builds the A4 form above, in that order.
+- A document with none builds the A6 form, with no tag fields at all.
+- Absent `associatedTags` or `associatedSystemTags` still refuses; an entry with no numeric
+  `value` refuses.
+- Driver `drive-docs-move` against the mock: a tagged document moves and its tags read back
+  unchanged.
+
+Report the assertion count as usual. Live check after merge (Cowork): move a `ZZ` document with
+two tags and one system tag through the app, and read its tags back.
+
+---
+
 ## F1. Answers to the W2 to W3 questions, and one cleanup bug
 
 Status: Done (c1667ad)

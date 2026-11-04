@@ -22,6 +22,7 @@ import type { DocumentEntry } from './list.ts';
 import {
   buildDocumentMovePlan,
   movePreviewRows,
+  pendingChosen,
   moveInFlightRows,
   readForMove,
   runDocumentMove,
@@ -169,7 +170,6 @@ test('values a save could not send back faithfully refuse it too', () => {
 
 test('archived, pending, already there and linked documents are refused by name', () => {
   assert.deepEqual(documentMoveForm(record({ isArchived: true }), 77), { refused: MOVE_ARCHIVED });
-  assert.deepEqual(documentMoveForm(record({ isPending: true }), 77), { refused: MOVE_PENDING });
   assert.deepEqual(documentMoveForm(record({ primaryProcessGroupId: 77 }), 77), { refused: MOVE_ALREADY_THERE });
   assert.deepEqual(documentMoveForm(record({ documentLocationType: 'External' }), 77), { refused: MOVE_LINK });
 });
@@ -248,6 +248,21 @@ test('the plan moves what can be saved, attached or not, and says why the rest s
   const preview = movePreviewRows(plan).at(-1)!;
   assert.equal(preview.status, 'Preview');
   assert.equal(preview.message, 'Would move from Top / Old to Finance / Forms');
+});
+
+test('pending documents stay out until the operator opts in, and then only those a save can send back', async () => {
+  const docs = [entry(1), entry(2, { isPending: true }), entry(3, { isPending: true }), entry(4, { isPending: true, isArchived: true })];
+  const reads = await readForMove(docs.map(chosen), async (id) => (id === 3 ? record({ associatedTags: [{ key: 'tag', value: 1 }] }) : record()), destination);
+  const input = { chosen: docs.map(chosen), paths: new Map(), reads, destination };
+  assert.equal(pendingChosen(input.chosen), 2, 'an archived one is not on offer');
+
+  const off = buildDocumentMovePlan(input);
+  assert.deepEqual(off.targets.map((t) => t.name), ['Doc 1']);
+  assert.deepEqual(off.skipped.map((r) => r.message), [MOVE_PENDING, MOVE_PENDING, MOVE_ARCHIVED]);
+
+  const on = buildDocumentMovePlan({ ...input, includePending: true });
+  assert.deepEqual(on.targets.map((t) => [t.name, t.chosen]), [['Doc 1', CHOSEN_BY_ID], ['Doc 2', `${CHOSEN_BY_ID} (pending)`]]);
+  assert.deepEqual(on.skipped.map((r) => r.message), [MOVE_TAGGED, MOVE_ARCHIVED]);
 });
 
 test('a dead session while reading ends the plan', async () => {

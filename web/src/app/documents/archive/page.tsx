@@ -37,10 +37,11 @@ import { Notice, Progress } from '../../_ui/kit.tsx';
 import { ResultsSummary } from '../../components/ResultsSummary.tsx';
 import { SessionGate } from '../../components/SessionGate.tsx';
 import { useBrowseTree } from '../../components/TreeBrowser.tsx';
-import { InterruptedRun, isSignedOut, LeftOut, readWhatHolds, UnreadProcesses, useDocumentChoice, useRunRecord } from '../choose.tsx';
+import { AssociatedDecision, InterruptedRun, isSignedOut, LeftOut, readWhatHolds, UnreadProcesses, useDocumentChoice, useRunRecord } from '../choose.tsx';
 
 type Stage =
   | { kind: 'select' }
+  | { kind: 'decide' }
   | { kind: 'planning'; progress: string }
   | { kind: 'plan'; plan: DocumentArchivePlan; index: ProcessIndex }
   | { kind: 'running'; plan: DocumentArchivePlan; progress: string }
@@ -97,7 +98,7 @@ function ArchiveDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; 
       const progress = (text: string) => setStage({ kind: 'planning', progress: text });
       const collected = await choice.collect(progress);
       if (collected === null) {
-        setStage({ kind: 'select' });
+        setStage({ kind: 'decide' });
         return;
       }
       if ('empty' in collected) {
@@ -211,6 +212,15 @@ function ArchiveDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; 
             </Button>
           </div>
         </>
+      )}
+
+      {stage.kind === 'decide' && (
+        <AssociatedDecision
+          decision={choice.decision}
+          previewLabel="Preview what would be archived"
+          onPreview={() => void buildPlan()}
+          onBack={() => setStage({ kind: 'select' })}
+        />
       )}
 
       {stage.kind === 'planning' && <Progress>{stage.progress}</Progress>}
