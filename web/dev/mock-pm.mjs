@@ -103,11 +103,7 @@ const docs = Object.fromEntries([
   doc(232, 'Reappeared form.docx', SHARED, { appearsOnListRead: 3 }),
 ].map((d) => [Number(d.uniqueId.slice(-3)), d]));
 const docNumber = (d) => Number(d.uniqueId.slice(-3));
-const implicitOf = (g) => {
-  const out = [];
-  for (let at = g, hops = 0; at && groups[at] && hops < 64; at = groups[at].parent, hops++) out.push(at);
-  return [...out, ROOT];
-};
+const implicitOf = (d) => [...new Set([d.primary, ...d.attached.map((u) => procs[u]?.group).filter(Boolean)])];
 const within = (g, top) => {
   for (let at = g, hops = 0; at && hops < 64; at = groups[at]?.parent, hops++) if (at === top) return true;
   return false;
@@ -310,9 +306,9 @@ http.createServer(async (req, res) => {
     if (d.attachOnRead && d.reads >= d.attachOnRead && !d.attached.includes(d.attachTo)) d.attached.push(d.attachTo);
     return send(res, 200, {
       primaryProcessGroupId: Number(d.primary.slice(-3)),
-      // As captured (W9): the primary, every group above it and the root come back too, and only `associated` is real.
-      associatedGroups: [...implicitOf(d.primary), ...d.associated].map((g) => ({ key: groups[g]?.title ?? 'Example Organisation', value: Number(g.slice(-3)) })),
-      implicitlyAssociatedGroups: implicitOf(d.primary).map((g) => Number(g.slice(-3))),
+      // As captured (W9): the primary and its attached processes' groups come back too, and only `associated` is real.
+      associatedGroups: [...implicitOf(d), ...d.associated].map((g) => ({ key: groups[g]?.title ?? '', value: Number(g.slice(-3)) })),
+      implicitlyAssociatedGroups: implicitOf(d).map((g) => Number(g.slice(-3))),
       associatedTags: d.tags ?? [], associatedSystemTags: [], isAutomatedForm: false,
       attachedProcesses: d.attached.map((u) => ({ processName: procs[u]?.name ?? '', processUniqueId: u })),
       attachedTrainings: d.trainings.map((name) => ({ name })),

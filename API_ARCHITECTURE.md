@@ -1632,16 +1632,25 @@ things differently:
 | `PrimaryProcessGroupId` | `primaryProcessGroupId` (same numeric id) |
 | `GroupList={"selected":[ids]}` | `associatedGroups`, minus the primary and `implicitlyAssociatedGroups` |
 
-`associatedGroups` also holds the primary group and the implicit ones (on the captured document,
-the primary and the root), and that document saved `{"selected":[]}`. The read also carries
+`associatedGroups` also holds the primary group and the implicit ones, and all three captured
+saves left those out of `GroupList`. Implicit looks like the primary plus the groups of attached
+processes: only the attached document had a second group there. Linking a document to a group
+without moving it is the same save, with the primary unchanged and the group's id in `selected`.
+
+The read's `lastReviewDate` and `nextReviewDueDate` look computed when read, not stored: they carry
+seven decimal places and fall at the moment of the read, on a document just saved and on one not
+yet saved, and `nextReviewDueDate` is that moment plus the frequency. `currentReviewDueDate` looks
+like the stored one, and it stayed in the past across a captured move. The read also carries
 `associatedTags`, `associatedSystemTags`, `isAutomatedForm`, `stakeholdersGroupedByType`,
-`possibleDocumentTypes` (`value` is the word; `Info` is `Information`) and
-`documentReview.lastReviewDate`, `nextReviewDueDate`, `currentReviewDueDate`.
+and `possibleDocumentTypes` (`value` is the word; `Info` is `Information`). A document with its
+upload pending approval has `action.caption` "Upload Pending Approval", and the read has no
+`isPending`.
 `GET .../{id}/history?Page&PageSize` is the document's history.
 
-Not measured: the form for a linked, tagged or automated document; a document with a real
-association; whether a save restarts the review clock or adds a version; whether owners change
-with the group.
+`stakeholdersGroupedByType` differs between groups, so owners look like they come from the group.
+
+Not measured: the form for a linked-file or tagged document or an automated form; the read of a
+document with a real association; whether a save changes `currentReviewDueDate` or adds a version.
 
 **The bulk calls answer 200 when items fail.** Each failure is an entry in `errors`.
 Codes seen: `NotArchived` (delete of an active document), `NotFound`, `ProcessAttachment`.

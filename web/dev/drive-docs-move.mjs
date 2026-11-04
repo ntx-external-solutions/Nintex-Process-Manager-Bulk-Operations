@@ -78,6 +78,6 @@ const of = (n) => saves.find((l) => l.includes(`/documents/${n}/properties`)) ??
 expect(/name="ReferenceNo"\r\n\r\nREF-205\r\n/.test(of(205)), 'the reference went back unchanged');
 expect(/name="DocumentReviewFreqMonths"\r\n\r\n12\r\n/.test(of(205)), 'the review frequency went back unchanged');
 expect(/name="DocumentName"\r\n\r\nFree notes\.txt\r\n/.test(of(205)), 'the name went back unchanged');
-expect(of(205).includes('{"selected":[]}'), 'groups a document only inherits do not become associations');
+expect(of(201).includes('{"selected":[]}'), 'the group of the process it is attached to does not become an association');
 expect(of(209).includes('{"selected":[908]}'), 'the association with Manuals went back; the old primary and the inherited root did not');
 b.close();

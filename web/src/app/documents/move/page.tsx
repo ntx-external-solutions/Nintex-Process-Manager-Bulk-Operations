@@ -239,6 +239,10 @@ function MoveDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; onS
             <p>
               {n} {noun} would move to {destinationLabel(plan.destination)}. {plan.skipped.length > 0 && `${plan.skipped.length} left out (listed below).`}
             </p>
+            <p className="small">
+              Each move is the same save Process Manager makes when a document is moved by hand, so whatever that save does to
+              review dates, and to owners that come from the group, happens here too.
+            </p>
             <div className="row">
               <Button buttonType="secondary" onClick={() => downloadCsv(datedFilename('document-move-preview'), resultsToCsv(movePreviewRows(plan)))}>
                 Download the preview

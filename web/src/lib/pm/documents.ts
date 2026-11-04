@@ -155,10 +155,13 @@ const moveMissing = (field: string) =>
  * `documentReview` in the read.
  *
  * `associatedGroups` in the read is not what `GroupList` takes. It also holds the primary
- * group and the groups in `implicitlyAssociatedGroups`: the capture read two groups, both
- * implicit, and saved `{"selected":[]}`. Sending those back would turn a group the document
- * only inherits into a real association, so they are taken out, along with the destination.
- * The old primary isn't kept as an association.
+ * group and the groups in `implicitlyAssociatedGroups`, which looks like the groups of the
+ * processes it's attached to: only the attached document of the three captured had a group
+ * there beyond its primary. The browser saved `{"selected":[]}` for all of them. Sending
+ * those back would turn a group the document is only implied in into a real association,
+ * so they are taken out, along with the destination. The old primary isn't kept as an
+ * association. A group that is both real and implied can't be told apart in the read; the
+ * browser's own save drops it too, if it builds its list the same way.
  *
  * Refused until a capture shows their form: links (the create call has `Url` and
  * `NetworkPath`, which this form hasn't), tagged documents (the read has tags, and the

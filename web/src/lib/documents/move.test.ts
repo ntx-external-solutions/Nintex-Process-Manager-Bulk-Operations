@@ -84,10 +84,40 @@ test('a real association survives; the primary, the old primary, inherited group
   assert.equal(built.form['GroupList'], '{"selected":[7,8]}');
 });
 
-test('a captured read of a document with no real associations saves an empty list, as the browser did', () => {
+test('gives the form the browser sent for a captured move: no override, months kept, blank reference, nothing selected', () => {
+  const built = documentMoveForm(
+    record({
+      primaryProcessGroupId: 500,
+      associatedGroups: [{ key: 'Old', value: 500 }],
+      implicitlyAssociatedGroups: [500],
+      referenceNumber: '',
+      documentReview: { doOverrideDocumentReviewFreq: false, documentReviewFreqMonths: 12 },
+    }),
+    77,
+  );
+  assert.deepEqual(built, {
+    form: {
+      DoOverrideDocumentReviewFreq: 'false',
+      DocumentReviewFreqMonths: '12',
+      ReferenceNo: '',
+      DocumentName: 'Expense form',
+      DocumentType: 'Image',
+      PrimaryProcessGroupId: '77',
+      GroupList: '{"selected":[]}',
+    },
+  });
+});
+
+test('an attached document: the group its process lives in is implied, and stays out of the list', () => {
   const built = documentMoveForm(record({ associatedGroups: [{ key: 'Old', value: 500 }, { key: 'Top', value: 1 }] }), 77);
   assert.ok('form' in built);
   assert.equal(built.form['GroupList'], '{"selected":[]}');
+});
+
+test('a group linked as well as primary is what GroupList holds, as in the captured link', () => {
+  const built = documentMoveForm(record({ associatedGroups: [{ key: 'Old', value: 500 }, { key: 'Linked', value: 80 }], implicitlyAssociatedGroups: [500] }), 77);
+  assert.ok('form' in built);
+  assert.equal(built.form['GroupList'], '{"selected":[80]}');
 });
 
 test('a blank reference and no review override are real values, not missing ones', () => {
