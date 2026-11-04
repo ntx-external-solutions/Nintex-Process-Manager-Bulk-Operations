@@ -24,7 +24,7 @@ and no longer lists a tagged link and an undeclined link as unmeasured.
 **Results-file operations.** None.
 
 **Tests.** `npm test` in `web/`: 721 tests, 721 pass (1 new). Typecheck and build clean.
-Not run in a browser: it's one label, covered by the new test.
+`drive-docs-archive`, whose two checks expected a blank type, is updated and passes.
 
 **Deferred.** A network link gets `Link` too, though the tenant has none to show it on.
 
