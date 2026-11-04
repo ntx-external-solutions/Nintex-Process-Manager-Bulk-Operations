@@ -169,8 +169,8 @@ const tagIds = (tags: readonly unknown[]): string[] | null => {
  * association. A group that is both real and implied can't be told apart in the read; the
  * browser's own save drops it too, if it builds its list the same way.
  *
- * Pending isn't refused here: the read doesn't say, so the list decides at the plan, where
- * the operator can opt in (W9a).
+ * Pending isn't refused here, though a read can show it: the list decides at the plan, where
+ * the operator can opt in (W9a), and a refusal here could only undo that tick.
  *
  * Tags go back as one `AssociatedTags` or `AssociatedSystemTags` field per id, after
  * `GroupList` (W9b, 4 Nov). A save without those fields wipes the document's tags and still

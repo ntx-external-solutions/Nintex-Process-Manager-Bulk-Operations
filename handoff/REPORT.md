@@ -6,6 +6,47 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## Pending uploads (from S4 steps 1 to 3)
+
+Commit `a9f015c` on `claude/pending-uploads`, branched from the link type label, so it needs
+#89 and #90 first. It has no entry in TASKS.md. S4 stays open for step 4, and its write-up in
+`API_ARCHITECTURE.md` is still Cowork's.
+
+**What changed for the operator.** A document with any upload waiting now counts as pending, not
+just one that was never approved. On the demo tenant that's 21 documents rather than 13. Archive and
+Delete documents skip all 21, and Move leaves them out unless the tick is on. Every pending tag and
+count in the app follows.
+
+**Functions touched.**
+
+- `toDocumentEntry` (`documents/list.ts`): pending is `isPending` or `hasUpdatesPending`.
+- `toDocumentProperties` (`documents/holders.ts`): new `pendingFromRead`. The caption can say pending
+  but can't clear it: anything else gives null and the list decides, so a reworded caption costs the
+  re-check, not the list's answer. This is what makes the Archive and Delete re-checks able to fire.
+- Mock: the read has no `isPending` now, as on the tenant, and carries `action`. Pending memo is a
+  new upload on an approved version, the shape `isPending` misses, so the drivers cover it.
+
+**Results-file operations.** None. The extra documents get the existing `Pending in Process Manager`
+Skipped row.
+
+**Tests.** `npm test` in `web/`: 725 tests, 725 pass (4 new). Typecheck and build clean.
+`drive-docs-move` 34, `drive-docs-archive` 29, `drive-docs-delete` 32, `drive-docs-restore` 16,
+`drive-docs-repair` 20, `drive-docs-archive-resume` 5, `drive-docs-delete-resume` 19, all ok.
+Running the archive driver also showed that #90 had left two of its checks failing. That's fixed on
+#90's branch, and its report and PR now say so.
+
+**Disagreed or deferred.**
+
+- I built this ahead of step 4 and without a build task, because it holds whatever step 4 finds: it
+  only makes the app recognise documents the spike already identified, and skipping is the existing
+  behaviour. Step 4 could relax that default, not tighten it. Cowork or JB can say so if they'd
+  rather have waited.
+- The Move plan's reads aren't used for pending. The list decides there, as in W9a.
+- Matching display text is fragile, but it's all a read has. The match is on "pending approval",
+  case-insensitive. English is the only wording measured.
+
+---
+
 ## Link type label
 
 Commit `007041d` on `claude/link-type-label`, branched from the Beta label, so it needs #89 first. The small

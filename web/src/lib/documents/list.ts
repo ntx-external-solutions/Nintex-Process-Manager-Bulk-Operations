@@ -5,7 +5,7 @@
  * measured from a browser session and the shape the bearer token gets is R16's to
  * confirm. The fields used are the script-era notes' (`documentId`, `documentUniqueId`,
  * `documentName`, `primaryGroupUniqueId`, `primaryGroupName`, `isArchived`,
- * `isLinkedFile`) and the spike's (`documentLocationType`, `isPending`).
+ * `isLinkedFile`) and the spikes' (`documentLocationType`, `isPending`, `hasUpdatesPending`).
  */
 
 import { nodeString, nodeValue } from '../delete/model.ts';
@@ -74,7 +74,9 @@ export function toDocumentEntry(item: unknown, listType: DocumentListType): Docu
     primaryGroupName: nodeString(item, 'primaryGroupName').trim(),
     // The list it came from decides, unless the row says otherwise.
     isArchived: archivedField === null ? listType === 'Archived' : flag(item, 'isArchived'),
-    isPending: flag(item, 'isPending'),
+    // `isPending` is only "never approved". `hasUpdatesPending` is any upload waiting, so it
+    // also finds a new version on top of an approved one, which `isPending` misses (S4, 4 Nov).
+    isPending: flag(item, 'isPending') || flag(item, 'hasUpdatesPending'),
     location,
     type: typeOf(item, name, location),
   };

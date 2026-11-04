@@ -45,6 +45,17 @@ function groupsOf(value: unknown): DocumentProperties['associatedGroups'] {
   return [];
 }
 
+/**
+ * Whether a read shows an upload waiting. The read has no pending field, and the caption is the
+ * only sign (S4, 4 Nov): `actionType` is the same on a declined document. It can only add to what
+ * the list says: anything else gives null and the list decides, so a reworded caption loses the
+ * re-check rather than clearing a pending document.
+ */
+function pendingFromRead(raw: unknown): boolean | null {
+  if (/pending approval/i.test(nodeString(nodeValue(raw, 'action'), 'caption'))) return true;
+  return bool(nodeValue(raw, 'isPending'));
+}
+
 export function toDocumentProperties(raw: unknown, primaryGroupName = ''): DocumentProperties {
   const associatedGroups = groupsOf(nodeValue(raw, 'associatedGroups'));
   // `primaryProcessGroupId` was seen without its type being recorded; a number is taken
@@ -55,7 +66,7 @@ export function toDocumentProperties(raw: unknown, primaryGroupName = ''): Docum
     null;
   return {
     isArchived: bool(nodeValue(raw, 'isArchived')),
-    isPending: bool(nodeValue(raw, 'isPending')),
+    isPending: pendingFromRead(raw),
     primaryGroupId,
     associatedGroups,
     attachedProcesses: nodeArray(raw, 'attachedProcesses').map((p) => ({

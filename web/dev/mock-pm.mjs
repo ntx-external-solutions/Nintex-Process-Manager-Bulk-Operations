@@ -90,7 +90,8 @@ const docs = Object.fromEntries([
   doc(203, 'Training handout.pdf', LIB, { trainings: ['Induction'] }),
   doc(204, 'Draft-only form.docx', LIB, { omitReference: true }),
   doc(205, 'Free notes.txt', MAN),
-  doc(206, 'Pending memo.docx', LIB, { pending: true }),
+  // A new upload on top of an approved version: `isPending` misses it, as measured (S4).
+  doc(206, 'Pending memo.docx', LIB, { uploadWaiting: true }),
   // Free when the plan reads it, attached to Outright by the time its batch re-reads it.
   doc(207, 'Late attachment.pdf', LIB, { attachOnRead: 2, attachTo: id(1) }),
   doc(208, 'Refused by tenant.pdf', LIB, { refuseArchive: 'Locked', refuseSave: true }),
@@ -311,7 +312,7 @@ http.createServer(async (req, res) => {
     const page = Number(url.searchParams.get('Page') ?? 1);
     const items = all.slice((page - 1) * size, page * size).map((d) => ({
       documentId: docNumber(d), documentUniqueId: d.uniqueId, documentName: d.name, primaryGroupUniqueId: d.primary,
-      primaryGroupName: groups[d.primary]?.title ?? '', isArchived: d.archived, isPending: d.pending,
+      primaryGroupName: groups[d.primary]?.title ?? '', isArchived: d.archived, isPending: d.pending, hasUpdatesPending: d.pending || d.uploadWaiting === true,
       documentLocationType: d.location, isLinkedFile: d.location !== 'Cloud',
     }));
     return send(res, 200, { items, totalItemCount: all.length });
@@ -351,7 +352,9 @@ http.createServer(async (req, res) => {
       associatedTags: d.tags ?? [], associatedSystemTags: d.systemTags ?? [], isAutomatedForm: false,
       attachedProcesses: d.attached.map((u) => ({ processName: procs[u]?.name ?? '', processUniqueId: u })),
       attachedTrainings: d.trainings.map((name) => ({ name })),
-      isArchived: d.archived, isPending: d.pending, documentLocationType: d.location, documentPath: d.url ?? null,
+      isArchived: d.archived, documentLocationType: d.location, documentPath: d.url ?? null,
+      // The read has no pending field; the caption is all it gives (S4).
+      action: d.pending || d.uploadWaiting ? { actionType: 'None', caption: 'Upload Pending Approval' } : { actionType: 'Replace', caption: 'Replace with new version' },
       documentName: d.name, documentType: 'Form',
       documentReview: { doOverrideDocumentReviewFreq: d.reviewOverride ?? true, documentReviewFreqMonths: d.reviewMonths ?? 12 },
       ...(d.omitReference ? {} : { referenceNumber: d.referenceNo ?? `REF-${docNumber(d)}` }),
