@@ -1739,8 +1739,15 @@ above and adds three things:
 tags. The form is the same seven fields as an upload, with no `Url` or `NetworkPath`: 204, and
 `documentPath` and `documentLocationType` were unchanged on the read afterwards. The history gained
 the one `type` 6 entry. The read still says "Approval Declined", and the list row has
-`isDeclined: true`, `isLinkedFile: true` and `linkedFileUrl`. Not measured: a link with tags, and a
-link that wasn't declined.
+`isDeclined: true`, `isLinkedFile: true` and `linkedFileUrl`.
+
+**Live check of W9b and W9c (4 Nov 2026).** Through the app, so with the bearer proxy: a web link and
+an upload, each with a search tag, a system tag and an associated group, not declined or pending.
+Both moved and the tenant matched. Tags, the association, name, type, reference, review frequency,
+`currentReviewDueDate`, `action` and stakeholders were unchanged, and the link's `documentPath` and
+`linkedFileUrl` kept the whole URL, query string included. Each gained one `type` 6 history entry.
+`implicitlyAssociatedGroups` went from the old primary to the new one, so it follows the primary.
+Not measured: a pending link, documents with approvals on, and network file links.
 
 ### How processes hold documents
 

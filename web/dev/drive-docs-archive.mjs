@@ -58,7 +58,7 @@ await b.until(`!!document.querySelector('[role=tablist]')`, 'back at the selecti
 await b.js(`$btn('From the document list')`);
 await b.until(`!!document.querySelector('input[aria-label="Select document Supplier link"]')`, 'the document list');
 const listText = await b.js(`document.querySelector('table.plan').innerText`);
-expect(/Supplier link\s+Shared\s+External link/.test(listText), 'the list shows group, location');
+expect(/Supplier link\s+Shared\s+Link\s+External link/.test(listText), 'the list shows group, type, location');
 await b.js(`$check('Select document Supplier link'); $check('Select document Free notes.txt'); true`);
 
 await b.js(`$btn('By id or CSV')`);
@@ -77,7 +77,7 @@ const leftOut = await b.js(`[...document.querySelectorAll('details.panel')].map(
 console.log('--- LEFT OUT ---\n' + leftOut);
 expect(/Free notes\.txt\s+Library \/ Manuals\s+TXT\s+Cloud\s+From the tree/.test(plan), 'Free notes from the tree, once');
 expect(/Shared template\.docx\s+Shared\s+DOCX\s+Cloud\s+From the tree/.test(plan), 'the ticked associated-only document');
-expect(/Supplier link\s+Shared\s+\s*External link\s+From the document list/.test(plan), 'Supplier link from the list');
+expect(/Supplier link\s+Shared\s+Link\s+External link\s+From the document list/.test(plan), 'Supplier link from the list');
 expect(plan.includes('Late attachment.pdf') && plan.includes('Refused by tenant.pdf'), 'the two that fail later are free at plan time');
 expect((plan.match(/\n/g) ?? []).length === 5, 'five documents would be archived');
 expect(leftOut.includes('Payables checklist.xlsx: Attached to 1 process: Disabled owner.'), 'attached to an active process');
