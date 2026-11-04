@@ -6,6 +6,45 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## W9a. Move documents: the linked-documents step, and moving pending documents
+
+Commit `1da17de` on `claude/w9a-move-pending`. From JB's first live try of W9. It has no entry in
+TASKS.md.
+
+**The linked-documents step.** A checked group with documents only linked to it stopped the
+preview and sent the operator back to the selection, with the question up the page and the
+button to press again. JB read that as the page doing nothing. It's now a step with the page to
+itself (`AssociatedDecision` in `choose.tsx`), on Archive, Delete and Move documents. Back to the
+selection is on the step, and ticks survive it.
+
+**Pending.** Move documents leaves pending documents out by default. A tick on the plan,
+"Also move the N pending documents", adds them, and the plan's Chosen column marks them. A pending
+document with a tag or a link is still left out. `documentMoveForm` no longer refuses on
+`isPending`: the captured read doesn't carry it, so the list decides at the plan, and a refusal in
+the save could only have undone the tick. The other pages still skip pending documents.
+
+**Functions.** `AssociatedDecision`, `useDocumentChoice` (returns `decision`),
+`buildDocumentMovePlan` (`includePending`), `pendingChosen`, and a `decide` stage on three pages.
+
+**Results-file operations.** None new.
+
+**Tests.** `npm test`: 661 tests, 661 pass (1 new, was 660). Typecheck and build clean.
+`drive-docs-move` gains the step and the tick, and the archive and delete drivers use Back. All
+seven document drivers pass. They caught a crash the unit tests can't: `window.scrollTo` returns a
+promise in current Chrome, so returning it from an effect made React call it as a cleanup.
+
+**Unmeasured. Cowork, please add these to the W9 list.**
+
+1. **What a move does to a pending upload.** JB moved one by hand, but we haven't seen the answer
+   or the document afterwards. Check that the upload still awaits approval and stays attached.
+2. **W9's checks are still open.** JB's run stopped at the preview, so no save has gone out from
+   the app yet. Its list has no "did not give" reasons, but the pending and linked rows are decided
+   before those checks, so it doesn't prove the bearer read.
+
+**Waiting on a capture.** Tags and links stay left out until someone captures a save of each.
+
+---
+
 ## W9. Move documents
 
 Commits `98d363b`, `0bdc148` and `7da2320` on `claude/w9-move-documents`. JB asked for this directly, with a browser
