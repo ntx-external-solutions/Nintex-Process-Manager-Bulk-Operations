@@ -53,7 +53,7 @@ only) and left active. Then delete N1 and both groups.
 
 ## W9b. Move tagged documents: send their tags back
 
-Status: Ready
+Status: Done (775331e)
 
 Measured on the demo tenant on 4 Nov. Read "Document tags (4 Nov 2026)" in
 `API_ARCHITECTURE.md` first. Don't run anything against a tenant yourself. Keep tenant names

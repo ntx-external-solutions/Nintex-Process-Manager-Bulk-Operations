@@ -6,6 +6,54 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## W9b. Move tagged documents: send their tags back
+
+Commit `775331e` on `claude/w9b-move-tagged-documents`. Live check after merge is Cowork's.
+
+**What changed for the operator.** Move documents now takes documents with tags, search tags and
+system tags alike, and they keep them. The pending tick takes tagged pending documents too, since
+that exclusion came from the same refusal.
+
+**Functions touched.**
+
+- `documentMoveForm` (`pm/documents.ts`): returns an ordered list of name and value pairs, with one
+  `AssociatedTags` or `AssociatedSystemTags` per id after `GroupList`, and none for an empty list.
+  New `tagIds` helper. `MOVE_TAGGED` removed. Absent or non-list tags still refuse (`its tags`). An
+  entry without a positive integer `value` now refuses (`the id of a tag`).
+- `pmRequest` (`pm/client.ts`): `multipart` is now pairs in send order, so a name can repeat.
+- Mock: the save replaces tags and system tags with what the form sends, so a form without them
+  clears them and still answers 204. Retired guide now has two tags and a system tag.
+- `drive-docs-move`: the tagged document is in the plan and moves, and its tags are read back from
+  the mock. That needs the direct read, as the results file only checks the group.
+
+**The HAR JB supplied (4 Nov).** A UI move of a real document with one system tag. It agrees with
+the spec, and shows the system-tag-only form, which the spike's table didn't cover on its own: only
+`AssociatedSystemTags`, in the same place. Recorded in `API_ARCHITECTURE.md` and tested.
+
+**Results-file operations.** None new or renamed.
+
+**Tests.** `npm test` in `web/`: 718 tests, 718 pass (713 before; 5 new, 2 changed to the list
+form, 2 rewritten around the removed refusal). `npm run typecheck` and `npm run build` clean.
+`drive-docs-move` run against the built app and the mock: 32 checks, all ok. Probing the mock by
+hand, a tag-less save answers 204 and leaves both lists empty, so the read-back can fail.
+`Tests/Run-AllTests.ps1` not run: `pwsh` isn't on this machine, and no PowerShell changed.
+`$script:ScriptVersion` not bumped, as the PowerShell is frozen.
+
+**Disagreed or deferred.**
+
+- **Pending can be missed, for Cowork or JB to decide.** In the HAR the document's read says
+  "Upload Pending Approval", but its list row has `isPending: false` and `hasUpdatesPending: true`.
+  The plan judges pending from the list's `isPending`, so without the tick this document would move
+  anyway, without being shown as pending. The UI moved the same document without trouble, so
+  nothing is lost by it, but the W9a tick doesn't cover every pending document. Not changed here:
+  what `hasUpdatesPending` means in general is unmeasured, and Archive and Delete judge pending the
+  same way.
+- An entry with a numeric string `value` refuses. The read has only been seen with numbers, and
+  refusing is the safe side.
+- Linked documents and automated forms stay refused: neither form has been measured.
+
+---
+
 ## F8. Delete in link order, and break link cycles
 
 Commit `ceda316` on `claude/f8-delete-link-order`. From the 4 Nov customer run (331 targets, 25
