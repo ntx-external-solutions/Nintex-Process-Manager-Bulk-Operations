@@ -1649,7 +1649,8 @@ upload pending approval has `action.caption` "Upload Pending Approval", and the 
 
 `stakeholdersGroupedByType` differs between groups, so owners look like they come from the group.
 
-Not measured: the form for a linked-file document or an automated form; the read of a document
+Not measured: the form for a network file link or an automated form (a web link's is under
+"Document tags"); the read of a document
 with a real association. The tagged form, `currentReviewDueDate` and history are in "Document
 tags" below.
 
@@ -1733,6 +1734,13 @@ above and adds three things:
   and `hasUpdatesPending: true`, while its read says "Upload Pending Approval". Anything judging
   pending from the list's `isPending` doesn't see this one. What `hasUpdatesPending` means in
   general isn't measured.
+
+**A web link (HAR, 4 Nov 2026).** A UI move of a real `External` document, approval declined, no
+tags. The form is the same seven fields as an upload, with no `Url` or `NetworkPath`: 204, and
+`documentPath` and `documentLocationType` were unchanged on the read afterwards. The history gained
+the one `type` 6 entry. The read still says "Approval Declined", and the list row has
+`isDeclined: true`, `isLinkedFile: true` and `linkedFileUrl`. Not measured: a link with tags, and a
+link that wasn't declined.
 
 ### How processes hold documents
 
