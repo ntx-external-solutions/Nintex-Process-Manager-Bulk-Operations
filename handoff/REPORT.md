@@ -6,6 +6,45 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## W9c. Move documents: web links
+
+Commit `1a504a6` on `claude/w9c-move-linked-documents`, branched from W9b. It has no entry in TASKS.md: it
+comes from the capture of a link move JB supplied on 4 Nov, which W9a's report was waiting on.
+
+**What changed for the operator.** Move documents now takes web links (`External`), and a pending
+one when the tick is on. They keep their address. Network file links and any location type not seen
+before stay left out, with their own reason.
+
+**What the capture showed.** The same seven fields as an upload, with no address field, answering
+204. On the read afterwards `documentPath` and `documentLocationType` were unchanged and the group
+had moved. So the fear behind the refusal, that a save without the address could lose it, was wrong
+for web links. Recorded in `API_ARCHITECTURE.md`.
+
+**Functions touched.**
+
+- `documentMoveForm` (`pm/documents.ts`): accepts `External`. The form itself is unchanged.
+  `MOVE_LINK` is renamed `MOVE_OTHER_LOCATION`, with wording that says what's still refused.
+- Mock: a read now carries `documentPath`, and Supplier link has an address.
+- `drive-docs-move`: the link is in the plan, moves, sends no address field, and reads back in the
+  new group with its address.
+
+**Results-file operations.** None new or renamed.
+
+**Tests.** `npm test` in `web/`: 720 tests, 720 pass (2 new; the refusal tests now use
+`Network`). `npm run typecheck` and `npm run build` clean. `drive-docs-move` run against the built
+app and the mock: 34 checks, all ok. `Tests/Run-AllTests.ps1` not run (no `pwsh`, no PowerShell
+changed), and `$script:ScriptVersion` not bumped, as the PowerShell is frozen.
+
+**Disagreed or deferred.**
+
+- One capture, of a declined link with no tags. A link with tags gets the same tag fields, which
+  rests on W9b's measurement on an upload. Cowork's live check should move a `ZZ` web link with a
+  tag, and read back its address, tag and group. Whether approval state affects the save isn't
+  measured, though this one was declined and saved normally.
+- Network file links stay refused: the tenant has none to capture.
+
+---
+
 ## W9b. Move tagged documents: send their tags back
 
 Commit `775331e` on `claude/w9b-move-tagged-documents`. Live check after merge is Cowork's.
