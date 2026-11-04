@@ -160,9 +160,10 @@ const tagIds = (tags: readonly unknown[]): string[] | null => {
  * `documentReview` in the read.
  *
  * `associatedGroups` in the read is not what `GroupList` takes. It also holds the primary
- * group and the groups in `implicitlyAssociatedGroups`, which looks like the groups of the
- * processes it's attached to: only the attached document of the three captured had a group
- * there beyond its primary. The browser saved `{"selected":[]}` for all of them. Sending
+ * group and the groups in `implicitlyAssociatedGroups`, which is the primary, and it follows
+ * a move (W9c live check), plus what looks like the groups of the processes it's attached to:
+ * only the attached documents captured had a group there beyond the primary. The browser
+ * saved `{"selected":[]}` for all of those without a real association. Sending
  * those back would turn a group the document is only implied in into a real association,
  * so they are taken out, along with the destination. The old primary isn't kept as an
  * association. A group that is both real and implied can't be told apart in the read; the

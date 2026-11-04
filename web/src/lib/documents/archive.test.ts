@@ -121,6 +121,15 @@ test('a list row is read case-insensitively, with its location and type said pla
   assert.equal(toDocumentEntry({ documentName: 'No id' }, 'All'), null, 'a row with no id cannot be acted on');
 });
 
+test('a link whose name has no extension shows as a Link, and an upload with none stays blank', () => {
+  const typed = (more: Record<string, unknown>) => toDocumentEntry({ documentId: 3, documentUniqueId: d(3), documentName: 'Supplier portal', ...more }, 'All')?.type;
+  assert.equal(typed({ documentLocationType: 'External' }), 'Link');
+  assert.equal(typed({ documentLocationType: 'Network' }), 'Link');
+  assert.equal(typed({ isLinkedFile: true }), 'Link', 'the flag alone says it is a link');
+  assert.equal(typed({ documentLocationType: 'Cloud' }), '');
+  assert.equal(typed({ documentLocationType: 'External', documentName: 'Handbook.pdf' }), 'PDF', 'a name that says wins');
+});
+
 // ------------------------------------------------------------------ what holds a document
 
 test('the walk finds a document reference anywhere under ProcessProcedures, not only where the spike saw them', () => {

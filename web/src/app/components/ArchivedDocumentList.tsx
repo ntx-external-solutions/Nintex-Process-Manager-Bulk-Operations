@@ -8,7 +8,7 @@
 
 import { useMemo } from 'react';
 
-import { documentPath, type DocumentEntry } from '@/lib/documents/list.ts';
+import { documentPath, LINK_TYPE, type DocumentEntry } from '@/lib/documents/list.ts';
 import type { CheckState } from '@/lib/select/selection.ts';
 import { Checkbox } from './Checkbox.tsx';
 
@@ -79,7 +79,7 @@ export function ArchivedDocumentList({
                       label={`Select archived document ${e.name}`}
                       onChange={() => flip([keyOf(e)], !selected.has(keyOf(e)))}
                     />{' '}
-                    {e.name || e.uniqueId} <span className="small">{[e.type, e.location].filter((x) => x !== '').join(', ')}</span>
+                    {e.name || e.uniqueId} <span className="small">{[e.type === LINK_TYPE ? '' : e.type, e.location].filter((x) => x !== '').join(', ')}</span>
                   </label>
                 </li>
               ))}

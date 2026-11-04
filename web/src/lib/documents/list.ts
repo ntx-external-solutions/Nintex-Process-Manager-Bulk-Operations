@@ -24,7 +24,7 @@ export interface DocumentEntry {
   isPending: boolean;
   /** "Cloud" (uploaded), "External link" or "Network", as the operator would say it. */
   location: string;
-  /** The file's type, or '' when neither the list nor the name says. */
+  /** The file's type, `LINK_TYPE` for a link with none, or '' when nothing says. */
   type: string;
 }
 
@@ -45,13 +45,17 @@ export function locationOf(item: unknown): string {
   return flag(item, 'isLinkedFile') ? 'External link' : '';
 }
 
-function typeOf(item: unknown, name: string): string {
+/** A link has no file behind it, so its name often has no extension to read (W9c live check). */
+export const LINK_TYPE = 'Link';
+
+function typeOf(item: unknown, name: string, location: string): string {
   for (const field of ['documentType', 'fileType', 'fileExtension', 'extension']) {
     const value = nodeString(item, field).trim();
     if (value !== '' && !/^all$/i.test(value)) return value.replace(/^\./, '').toUpperCase();
   }
   const ext = /\.([a-z0-9]{1,8})$/i.exec(name);
-  return ext ? ext[1]!.toUpperCase() : '';
+  if (ext) return ext[1]!.toUpperCase();
+  return location === 'External link' || location === 'Network' ? LINK_TYPE : '';
 }
 
 /** One list row as an entry, or null when it has no usable id. */
@@ -61,6 +65,7 @@ export function toDocumentEntry(item: unknown, listType: DocumentListType): Docu
   if (!Number.isInteger(documentId) || documentId <= 0 || uniqueId === '') return null;
   const name = nodeString(item, 'documentName').trim();
   const archivedField = nodeValue(item, 'isArchived');
+  const location = locationOf(item);
   return {
     documentId,
     uniqueId,
@@ -70,8 +75,8 @@ export function toDocumentEntry(item: unknown, listType: DocumentListType): Docu
     // The list it came from decides, unless the row says otherwise.
     isArchived: archivedField === null ? listType === 'Archived' : flag(item, 'isArchived'),
     isPending: flag(item, 'isPending'),
-    location: locationOf(item),
-    type: typeOf(item, name),
+    location,
+    type: typeOf(item, name, location),
   };
 }
 
