@@ -53,8 +53,7 @@ only) and left active. Then delete N1 and both groups.
 
 ## S4. What "pending" means on a document (Cowork spike)
 
-Status: For Cowork. Steps 1 to 3 are done; step 4 is cleared to run. Claude Code: don't start this;
-it needs the tenant.
+Status: Done (Cowork, 4 Nov). The defaults stand; the one code change it found is F9.
 
 **Why.** The app's idea of pending comes from one field, and a 4 Nov capture shows that field can
 miss. A real document's read had `action.caption` "Upload Pending Approval", while its list row had
@@ -102,6 +101,27 @@ PR #92 already treats any waiting upload as pending and makes both re-checks wor
 change, write that as a `Ready` task. If not, say so and S4 is done.
 
 **Keep out of the handoff:** tenant ids, account names and document names, as usual.
+
+---
+
+## F9. Recognise "Approval Required" as pending in a read
+
+Status: Ready
+
+- Treat a caption of "Upload Pending Approval" or "Approval Required" as pending in
+  `pendingFromRead`. Anything else still returns null so the list decides.
+- Don't use `subActions` alone: with approvals off, a pending document and a declined one
+  both offer only View and Replace.
+- Tests: "Approval Required" reads as pending; the Archive and Delete re-checks drop it;
+  "Approval Declined" still isn't pending.
+- Add to the S4 section of `API_ARCHITECTURE.md`:
+  - the caption depends on the reader and the approvals setting;
+  - `POST .../documents/{id}/upload` replaces a version (multipart `File`, `DocumentType`,
+    `GroupId`, all three required, 400 naming the missing one; plus `Description` and
+    `DoNotSendChangeNotification`);
+  - `POST .../{id}/decline` and `.../{id}/approve` both answer 204, and approve does nothing
+    when the caller is the uploader;
+  - an archived pending document deletes with no refusal.
 
 ---
 
