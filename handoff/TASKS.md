@@ -18,6 +18,39 @@ Don't run anything against the tenant yourself.
 
 ---
 
+## F8. Delete in link order, break link cycles, and retry refused deletes
+
+Status: Done (ceda316). Live test R16 not yet run.
+
+From a customer run on 4 Nov: 25 of 331 targets refused. 12 because another target still linked
+to them, 13 naming something that is not a process in the plan. What was built, and the decisions to check,
+are in `REPORT.md`.
+
+### Not measured, for Cowork
+
+- What the name in those 13 refusals is. The customer's plan file for that run would show which
+  category those targets' checks returned.
+- Whether a never-published holder's save-only removal frees its target. The `N1`/`T1` pair covers
+  it in R16.
+
+### Live test (R16, Cowork)
+
+Demo tenant, group `ZZ Link Order (Claude test, safe to delete)`:
+
+| Process | State now | Role |
+|---|---|---|
+| ZZ LO 01, 02 | Archived | 02 links to 01. Give the CSV as 01 then 02 |
+| ZZ LO 03, 04 | Archived | 03 links to 04. Give the CSV as 04 then 03 |
+| ZZ LO C1, C2 | Active, published | C2 links to C1. C1's link to C2 was removed during testing; re-add it before R16 to make the cycle |
+| ZZ LO G1 | Active, published | No links. Control |
+| ZZ LO N1 | Active, never published | Links to T1. Not a target |
+| ZZ LO T1 | Active, published | Target held only by N1 |
+
+Pass: everything except N1 deleted in one run, C1 and C2 each with a cycle row, N1 edited (save
+only) and left active. Then delete N1 and both groups.
+
+---
+
 ## W9b. Move tagged documents: send their tags back
 
 Status: Ready

@@ -6,6 +6,109 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## F8. Delete in link order, and break link cycles
+
+Commit `ceda316` on `claude/f8-delete-link-order`. From the 4 Nov customer run (331 targets, 25
+refused). **Not yet checked in a browser: see Tests.** R16 is the live check.
+
+**What changed.**
+1. **Delete order.** Target-held sites and `Linked Process` claims become ordering edges. Holders
+   go before what they link to; ties keep the given order. Recorded as `deleteOrder` in the plan
+   file. A plan without it deletes in `targetUniqueIds` order.
+2. **Cycles.** Links inside a loop of targets are removed before the archive pass: one read, save
+   and publish per member, only those links. Each gets a `RemoveReferences` row with the cycle
+   wording. The preview and the confirmation count and name them. An open draft goes live unasked
+   and its row says so. A member held back or refused says on its `Delete` row that its links were
+   removed.
+3. **Retry.** Refused targets are sent again if something was deleted after the refusal, up to
+   `MAX_DELETE_PASSES` (5) in all. One `Delete` row with the final outcome ("Deleted on pass 2,
+   after the processes linking to it were deleted"). The put-back of an active target now happens
+   after the last pass, not at each refusal.
+4. **Refusal text.** Keeps the category keys: "Still referenced by: linked Process: A, B; linked
+   Process Group: C". A process name gets its id when one process still has it, or "(name matches
+   more than one process)". Names are checked against the whole tenant baseline, minus what the
+   run deleted. Group names are left as they came.
+5. **Group claims.** Own group link: listed as blocking, not removed, delete still tried. No group
+   link in the model: held back, with a `Skipped` `Delete` row. Either way the preview names the
+   group.
+6. **Archive row.** Failed archive then a delete that takes: `Skipped`, "Not archived first:
+   <reason>. Deleted directly." A delete refused keeps `Failed`. A run stopped before the delete
+   says the delete was not sent.
+
+**Functions.**
+- `delete/linkOrder.ts` (new): `planLinkOrder`, `groupBlocksOf`, `hasProcessGroupLink`.
+- `delete/executor.ts`: new `breakLinkCycles`, `MAX_DELETE_PASSES`, `deleteOrderOf`,
+  `refusalLabeller`. Changed `checkHolderDrafts`, `deletePlanTargets`, `deleteRefusalText`,
+  `preDeleteArchiveRow`.
+- `delete/planner.ts`: new `groupClaimsToHoldArchived`, `linkPlanLines`. Changed `buildDeletePlan`,
+  `planSummaryLines`.
+- `delete/bulkDelete.ts`: `runBulkDelete`, `deleteConfirmationLines`, `deleteConfirmationOf`.
+- `delete/ledger.ts`: plan fields `deleteOrder`, `linkEdges`, `linkCycles`, `cycleWorkItems`,
+  `groupBlocks`, all optional. `delete/events.ts`: stage `breaking-link-cycles`.
+- `app/delete/page.tsx`: a "Links between targets, and to groups" panel on the plan.
+- `testing/fakeTenant.ts`: `linkRules`. `dev/mock-pm.mjs`: the measured rules and a `Link order`
+  group. New driver `dev/drive-delete-links.mjs`.
+
+**Results-file operations.** None new or renamed. `RemoveReferences` rows now also cover targets
+(cycle wording). `Archive` can now be `Skipped`.
+
+**Tests.** `npm test`: 712 tests, 712 pass (52 new, was 660). Typecheck and production build clean.
+New: `linkOrder.test.ts` (16), `linkDelete.test.ts` (34), two in `deletion.test.ts`. Five existing
+tests changed, each for behaviour this task asked for: refused rows come after that pass's
+successes, the category is in the text, a refusal followed by a delete is sent twice, and the
+archive row is `Skipped`.
+
+**Not run.**
+- **`drive-delete-links.mjs` has never run, so it is unproven, and neither are the older delete
+  drivers rerun after the mock changes.** Headless Chrome couldn't be started in this session. So
+  the new plan panel and the confirmation have not been seen rendered. In its place I ran the real
+  `runBulkDelete` over HTTP against the patched mock, with a throwaway gateway that isn't committed.
+  That passed: deletes went 20, 21, 22, 23, 24, 26, 25, then 26 again; both loop members were edited;
+  `Group tied` was never archived or restored; the chain wasn't edited. To finish the check, run
+  the driver and the `drive-delete*` set from `web/dev/README.md`. They need the Chrome step there.
+- `Tests/Run-AllTests.ps1`: `pwsh` isn't on this machine and no PowerShell changed.
+  `$script:ScriptVersion` not bumped: the script is frozen.
+- Nothing was run against a tenant.
+
+**Decisions the task didn't spell out. Please check these.**
+- **What a kept target links to is kept too (not asked for).** Once a target is held back, the
+  tenant will refuse anything it links to. So `checkHolderDrafts` holds those as well ("X links to
+  it and is being kept"). Without this, a holder would lose a link to a process that stays, which is
+  the W5 phase 6 defect again. The cost: one held target can keep a whole chain, and the run says so
+  at the confirmation. Links a cycle edit removes don't spread a hold.
+- **Archived targets get one extra dependency check before Hold.** "Never restored" can't be met
+  from the plan, because Hold has already restored them by then. So a real run asks first:
+  `groupClaimsToHoldArchived`, one read per archived target. If archiving hides group claims from
+  that check, the plan still catches them, but with the round trip. Not measured.
+- **`breakLinkCycles` is its own function, called after the verification gate,** not inside
+  `removePlanReferences`. Same save path, but a run stopped at verification has edited no target.
+  It isn't verified as holders are: a link left in place can't dangle, as the tenant refuses.
+- **A cycle through a target held for a group is not edited.** The other members stay too.
+- **A cycle member held for a draft:** its links to members still being deleted are removed, as
+  the task's test asks. Links to it are not, since they go with the other member.
+- **A claim is ignored if the walk found that link the other way round and not this way.** The API
+  labels some Inputs as links, which would turn one reference into a false cycle and a needless
+  publish. The cost: a real two-way cycle where the walk missed one side isn't broken, and both
+  are refused and reported.
+- **Status 0 isn't resent,** since nothing says the tenant answered. Any other refusal is, 404 and
+  403 included, for at most one wasted call per pass.
+- **A session dying mid-retry** writes rows for what was refused, saying it ran out before being
+  sent again or put back. Such a target stays archived, and nothing else records that yet.
+
+**Deferred.**
+- The broader version (strip every link from any target that links to another): I agree with
+  leaving it out. Ordering covers it with no extra writes.
+- Inputs and Outputs held by a target count as ordering edges, but the task measured links only.
+  An Input may not block a delete at all. If so the edge is harmless.
+- A target with its own group link still gets the full archive, refusal and put-back, as the task
+  says. If R16 or the customer's plan shows those always refuse, hold them back too.
+- `claims.ts`'s header still says claims are "summed across both directions". The 4 Nov measurement
+  says links are one-sided. I left it, because the reconciliation maths rests on that wording and
+  it deserves its own look.
+- The questions under "Not measured" in F8 are still open, for Cowork.
+
+---
+
 ## W9a. Move documents: the linked-documents step, and moving pending documents
 
 Commit `1da17de` on `claude/w9a-move-pending`. From JB's first live try of W9. It has no entry in

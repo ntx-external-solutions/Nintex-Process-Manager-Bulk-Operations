@@ -19,6 +19,7 @@ export type DeleteStage =
   | 'building-plan'
   | 'removing-references'
   | 'verifying'
+  | 'breaking-link-cycles'
   | 'archiving-targets'
   | 'deleting-targets'
   | 'checking-collateral-after-delete'

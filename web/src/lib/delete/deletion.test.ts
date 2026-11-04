@@ -111,15 +111,18 @@ test('a refused delete is a Failed row with the status, and the ledger is not ma
     { uniqueId: T2, name: 'Close account', wasArchived: true },
   ]);
   const rows = rowsOf(await deletePlanTargets(tenant, plan), 'Delete');
+  const refused = rows.find((r) => r.objectId === T1);
 
-  assert.equal(rows[0]?.status, 'Failed');
+  assert.equal(refused?.status, 'Failed');
   // R14: archiving published 1.0 as 2.0 and the restore opened 2.1. The row says both, or
-  // the owner finds a version and a draft nobody made.
-  assert.match(rows[0]?.message ?? '', /^Delete failed \(HTTP 409\): In use\. Not deleted, so made active again in group 100\. Archiving published it as 2\.0, and the restore opened 2\.1\.$/);
+  // the owner finds a version and a draft nobody made. F8: T2 went after the refusal, so
+  // it was sent again, and the one row carries the final answer.
+  assert.match(refused?.message ?? '', /^Delete failed \(HTTP 409\): In use\. Sent 2 times, refused each time\. Not deleted, so made active again in group 100\. Archiving published it as 2\.0, and the restore opened 2\.1\.$/);
   assert.equal(tenant.modelOf(T1)?.['Version'], '2.1', 'the row reads what the tenant holds');
-  assert.equal(rows[0]?.statusCode, '409');
+  assert.equal(refused?.statusCode, '409');
   assert.equal(plan.ledger[0]?.deleted, false, 'so the unwind still puts it back');
-  assert.equal(rows[1]?.status, 'Success', 'one refusal does not stop the others');
+  assert.equal(rows.length, 2, 'one Delete row per target');
+  assert.equal(rows.find((r) => r.objectId === T2)?.status, 'Success', 'one refusal does not stop the others');
 });
 
 // ---------------------------------------------------------------- F6 item 6: why the tenant refused
@@ -140,7 +143,8 @@ test('a delete refused for a remaining reference names what holds it, is sent on
     assert.equal(tenant.callsTo('deleteProcess', T1).length, 1, 'never resent');
     assert.equal(rows[0]?.status, 'Failed');
     assert.equal(rows[0]?.statusCode, '500');
-    assert.match(rows[0]?.message ?? '', /HTTP 500\): Process Cannot Be Deleted\. Still referenced by: Order intake\./);
+    // Keyed by category, the category stays in the words (F8); any other shape has none.
+    assert.match(rows[0]?.message ?? '', /HTTP 500\): Process Cannot Be Deleted\. Still referenced by: ((processes|items): )?Order intake\./);
     assert.equal(tenant.isArchived(T1), false, 'active before the run, so active again');
     assert.equal(tenant.groupOf(T1), HOME.id);
   }
@@ -187,7 +191,7 @@ test('the R14 refusal body names the holder, keeps HTTP 500, and is not retried'
   assert.equal(rows[0]?.statusCode, '500');
   assert.equal(
     rows[0]?.message,
-    'Delete failed (HTTP 500): Process cannot be deleted as it has links to the following items. Still referenced by: Order intake. ' +
+    'Delete failed (HTTP 500): Process cannot be deleted as it has links to the following items. Still referenced by: linked Process: Order intake. ' +
       'Not deleted, so made active again in group 100. Archiving published it as 2.0, and the restore opened 2.1.',
   );
 });
@@ -211,14 +215,47 @@ test('each active target the archive pass archives gets an Archive row; a restor
   assert.deepEqual(rows.filter((r) => r.objectId === T1).map((r) => r.operation), ['Archive', 'Delete'], 'archive first, then delete');
 });
 
-test('an archive the tenant refuses is a Failed Archive row, and the delete is still sent', async () => {
+test('an archive the tenant refuses, then a delete that takes, is a Skipped Archive row keeping the tenant\'s words', async () => {
+  // F8: Failed read as if something had gone wrong with a process that is gone.
   const tenant = tenantWith({ fail: (call) => (call.op === 'archive' ? { status: 400, message: 'Locked by another user' } : null) });
   const rows = await deletePlanTargets(tenant, planFor([{ uniqueId: T1, name: 'Raise invoice' }]));
   const archive = rowsOf(rows, 'Archive')[0];
-  assert.equal(archive?.status, 'Failed');
+  assert.equal(archive?.status, 'Skipped');
   assert.equal(archive?.statusCode, '400');
-  assert.match(archive?.message ?? '', /^Could not be archived before the delete: HTTP 400 refused by the tenant: Locked by another user\. The delete was still sent/);
+  assert.equal(archive?.message, 'Not archived first: HTTP 400 refused by the tenant: Locked by another user. Deleted directly.');
   assert.equal(rowsOf(rows, 'Delete')[0]?.status, 'Success');
+  assert.ok(rows.indexOf(archive!) < rows.indexOf(rowsOf(rows, 'Delete')[0]!), 'still before its Delete row');
+});
+
+test('an archive the tenant refuses, then a delete it refuses too, stays a Failed Archive row', async () => {
+  const tenant = tenantWith({
+    fail: (call) => (call.op === 'archive' ? { status: 400, message: 'Locked by another user' } : call.op === 'deleteProcess' ? { status: 409, message: 'In use' } : null),
+  });
+  const rows = await deletePlanTargets(tenant, planFor([{ uniqueId: T1, name: 'Raise invoice' }]));
+  const archive = rowsOf(rows, 'Archive')[0];
+  assert.equal(archive?.status, 'Failed');
+  assert.match(archive?.message ?? '', /^Could not be archived before the delete: HTTP 400 refused by the tenant: Locked by another user\. The delete was still sent/);
+  assert.equal(rowsOf(rows, 'Delete')[0]?.status, 'Failed');
+});
+
+test('an archive the tenant refuses, then a run stopped before the deletes, says the delete was not sent', async () => {
+  const tenant = tenantWith({
+    fail: (call) => (call.op === 'archive' && call.uniqueId === T1 ? { status: 400, message: 'Locked by another user' } : null),
+    after: (call, t) => {
+      if (call.op === 'archive') t.setArchived(MASTER, true);
+    },
+  });
+  tenant.setArchived(T2, false);
+  const baseline = await baselineOf(tenant);
+  const plan = planFor([
+    { uniqueId: T1, name: 'Raise invoice' },
+    { uniqueId: T2, name: 'Close account' },
+  ]);
+  const rows = await deletePlanTargets(tenant, plan, { tenantBaseline: baseline });
+  const archive = rowsOf(rows, 'Archive').find((r) => r.objectId === T1);
+  assert.equal(tenant.callsTo('deleteProcess').length, 0);
+  assert.equal(archive?.status, 'Failed');
+  assert.match(archive?.message ?? '', /The delete was not sent$/);
 });
 
 test('an archive that fails is logged with its reason, and the delete still goes ahead', async () => {

@@ -26,7 +26,7 @@ import { failureOf } from '../archive/outcome.ts';
 import { findVariationMasters } from '../archive/plan.ts';
 import { resultRow, UNKNOWN_NAME, type ResultRow } from '../exec/report.ts';
 import { defaultIsFatal } from '../exec/runner.ts';
-import { reconciliationGate, type Reconciliation } from './claims.ts';
+import { reconciliationGate, type DependencyClaim, type Reconciliation } from './claims.ts';
 import {
   ACCEPTANCE_AUTHORITY,
   decideCollateral,
@@ -40,6 +40,7 @@ import type { DeleteEvent, DeleteEventSink } from './events.ts';
 import {
   collateralGateway,
   checkHolderDrafts,
+  breakLinkCycles,
   deletePlanTargets,
   newRelocationProbe,
   removePlanReferences,
@@ -69,7 +70,7 @@ import {
 } from './ledger.ts';
 import { nodeString, type DeleteIndex, type ProcessModel } from './model.ts';
 import { selectDisplayName } from './names.ts';
-import { buildDeletePlan, loadDeleteIndex, planProcessName } from './planner.ts';
+import { buildDeletePlan, groupClaimsToHoldArchived, loadDeleteIndex, planProcessName } from './planner.ts';
 import type { PlanStore } from './planStore.ts';
 import { RE_ARCHIVE_OPERATIONS, resolveRunOutcome } from './runOutcome.ts';
 import { CSV_ID_COLUMNS, resolveTargetIds, targetsFromCsv, type TargetSource } from './targets.ts';
@@ -119,12 +120,14 @@ export { ACCEPTANCE_AUTHORITY };
 /** What the final confirmation names (F6: R13's said only how many). */
 export interface DeleteConfirmation {
   deleting: Array<{ uniqueId: string; name: string }>;
-  /** Kept because a holder of it has an open draft nobody ticked. */
+  /** Kept: a holder of it has an open draft nobody ticked, a kept target links to it, or it is tied to a process group. */
   heldBack: Array<{ uniqueId: string; name: string; holderUniqueId: string; holderName: string; reason: string }>;
   /** Ticked draft holders: their drafts go live with the removal. */
   publishingDrafts: Array<{ uniqueId: string; name: string }>;
   /** Holders whose references will be removed before anything is deleted. */
   holdersToEdit: number;
+  /** Targets edited first to break a link cycle (F8). Absent reads as none. */
+  cycleTargets?: Array<{ uniqueId: string; name: string }>;
 }
 
 /** The confirmation as the page shows it. */
@@ -132,12 +135,23 @@ export function deleteConfirmationLines(c: DeleteConfirmation): string[] {
   const lines = [`About to permanently delete ${c.deleting.length} process(es). This cannot be undone.`];
   lines.push(...c.deleting.map((t) => `  ${t.name || UNKNOWN_NAME}  (${t.uniqueId})`));
   if (c.heldBack.length > 0) {
-    lines.push('', `Kept, ${c.heldBack.length} target(s): a holder of each has an unpublished draft that was not ticked.`);
-    for (const h of c.heldBack) lines.push(`  ${h.name || UNKNOWN_NAME}  (${h.uniqueId}): held by ${h.holderName || UNKNOWN_NAME} (${h.holderUniqueId})`);
+    lines.push('', `Kept, ${c.heldBack.length} target(s):`);
+    for (const h of c.heldBack) {
+      lines.push(`  ${h.name || UNKNOWN_NAME}  (${h.uniqueId}): held by ${h.holderUniqueId ? `${h.holderName || UNKNOWN_NAME} (${h.holderUniqueId})` : 'a process group'}`);
+      lines.push(`      ${h.reason}`);
+    }
   }
   if (c.publishingDrafts.length > 0) {
     lines.push('', `Published with the removal, drafts included, ${c.publishingDrafts.length} ticked holder(s):`);
     lines.push(...c.publishingDrafts.map((h) => `  ${h.name || UNKNOWN_NAME}  (${h.uniqueId})`));
+  }
+  const cycleTargets = c.cycleTargets ?? [];
+  if (cycleTargets.length > 0) {
+    lines.push(
+      '',
+      `Edited first, to break a link cycle, ${cycleTargets.length} target(s). Only the links between these targets are removed, and each is published, open draft included. One that then can't be deleted stays without those links.`,
+    );
+    lines.push(...cycleTargets.map((t) => `  ${t.name || UNKNOWN_NAME}  (${t.uniqueId})`));
   }
   if (c.holdersToEdit > 0) {
     lines.push(
@@ -312,6 +326,13 @@ export async function runBulkDelete(gateway: DeleteGateway, options: BulkDeleteO
     if (orphans.length > 0) emit({ kind: 'orphanedTargets', orphans, totalTargets: targets.length, holdingGroupName });
     emit({ kind: 'groupExistsCoverage', coverage: groupExistsCoverage(index) });
 
+    // ---- Archived targets the tenant would refuse whatever is done: read, and left archived ----
+    // Before the holding group, so a run with nothing else to do has nothing to clean up.
+    const heldArchivedGroupClaims: DependencyClaim[] = dryRun
+      ? []
+      : await groupClaimsToHoldArchived(gateway, targets.filter((id) => index.get(id.toLowerCase())?.isArchived === true), { isFatal, onEvent: options.onEvent });
+    const heldArchived = new Set(heldArchivedGroupClaims.map((c) => c.queriedUniqueId.toLowerCase()));
+
     // ---- Hold: a real run makes the holding group, then restores archived targets into it ----
     let tempGroup: GroupRef | null = null;
     let preliminary: DependencyPlan | null = null;
@@ -350,7 +371,7 @@ export async function runBulkDelete(gateway: DeleteGateway, options: BulkDeleteO
         stop(`Could not create the holding group (${failureOf(error).error}). Nothing has been changed.`);
         return { results, plan: null };
       }
-      const archivedTargets = targets.filter((id) => index.get(id.toLowerCase())?.isArchived === true);
+      const archivedTargets = targets.filter((id) => index.get(id.toLowerCase())?.isArchived === true && !heldArchived.has(id.toLowerCase()));
       preliminary = newDependencyPlan(options.siteUrl, targets, now());
       preliminary.status = 'Holding';
       preliminary.holdingGroup = tempGroup;
@@ -486,6 +507,7 @@ export async function runBulkDelete(gateway: DeleteGateway, options: BulkDeleteO
       allowRestore: !dryRun,
       scanActiveForInputOutput: options.thoroughScan,
       preHoldSnapshot: snapshot,
+      heldArchivedGroupClaims,
       onRow: addRow,
       onRestored: async (ledger) => {
         if (!preliminary) return;
@@ -587,6 +609,16 @@ export async function runBulkDelete(gateway: DeleteGateway, options: BulkDeleteO
       }
     }
 
+    // ---- Break link cycles: the last step before the targets are archived ----
+    const cycles = await breakLinkCycles(gateway, plan, {
+      ...engine,
+      onRow: addRow,
+      changeDescription: options.changeDescription,
+      heldBack: removal.heldBack,
+      onEvent: options.onEvent,
+    });
+    await save(plan);
+
     // ---- Delete ----
     const holdingGroupNow = tempGroup;
     const deletion = await deletePlanTargets(gateway, plan, {
@@ -598,6 +630,7 @@ export async function runBulkDelete(gateway: DeleteGateway, options: BulkDeleteO
         ? async () => (await gateway.groupProcesses(holdingGroupNow)).map((p) => p.processUniqueId).filter(Boolean)
         : undefined,
       heldBack: removal.heldBack,
+      cycleEdited: cycles.edited,
       onRow: addRow,
       onEvent: options.onEvent,
     });
@@ -697,6 +730,9 @@ function deleteConfirmationOf(plan: DependencyPlan, index: DeleteIndex, check: D
     holdersToEdit: plan.workItems.filter(
       (w) => !refused.has(w.holderUniqueId.toLowerCase()) && w.targetsAffected.some((t) => !kept.has(t.toLowerCase())),
     ).length,
+    cycleTargets: (plan.cycleWorkItems ?? [])
+      .filter((w) => w.targetsAffected.some((t) => !kept.has(t.toLowerCase())))
+      .map((w) => ({ uniqueId: w.holderUniqueId, name: nameOf(w.holderUniqueId) })),
   };
 }
 

@@ -14,6 +14,11 @@
  *  - `onProcessMutation` listeners run before any call that changes a process, which is
  *    how a test sees what had been saved at the moment of the first one.
  *
+ * `linkRules` turns on what F8 measured on the demo tenant, 4 Nov. A delete is refused
+ * while any process that still exists links to the target in its current or its published
+ * revision, and the dependency check answers on the linked-to side only: a published
+ * holder twice, a never-published one once. Hand-written `dependencies` are kept beside it.
+ *
  * Defaults follow the tenant as measured, where the PowerShell mocks agree on it: an
  * archived process is not on the active read (404), a live process is in its group's
  * listing and an archived one is not, RestoreProcess answers 500 for a group that is
@@ -31,6 +36,7 @@ import { LIST_PAGE_SIZE, type ProcessListItem, type ProcessListPage } from '../.
 import type { ProcessActions, ProcessUpdateEnvelope } from '../../pm/types.ts';
 import { ARCHIVED_LIST_TYPE } from '../../tenant/state.ts';
 import { PmRequestError } from '../../ui/gateway.ts';
+import { findProcessReferenceSites } from '../references.ts';
 import { ARCHIVED_BATCH_SIZE, type ActiveRead, type DeleteGateway, type GroupProcess, type GroupRef, type RestoreCallOptions } from '../gateway.ts';
 import type { ProcessModel } from '../model.ts';
 
@@ -57,6 +63,10 @@ export interface FakeProcessSeed {
   groupListingName?: string;
   /** What the active read's `processActions` grants. Default: save, publish and submit, as an administrator. */
   processActions?: Partial<ProcessActions>;
+  /** Under `linkRules`, processes this one links to that neither its model nor any dependency check shows. */
+  hiddenLinksTo?: readonly string[];
+  /** Under `linkRules`, the last published revision. Default: the model, unless its version is 0.x. */
+  publishedModel?: ProcessModel | null;
 }
 
 export interface FakeProcess {
@@ -74,6 +84,8 @@ export interface FakeProcess {
   groupListingName: string | null;
   revisionEditId: number;
   processActions: Partial<ProcessActions>;
+  hiddenLinksTo: readonly string[];
+  publishedModel: ProcessModel | null;
 }
 
 export type FakeOp =
@@ -152,6 +164,8 @@ export interface FakeTenantOptions {
    * of the PowerShell mocks do. The tenant answers 404, which is the default.
    */
   activeReadServesArchived?: boolean;
+  /** The measured link rules: see the head of this file. */
+  linkRules?: boolean;
   fail?: (call: FakeCall, tenant: FakeTenant) => FakeFailure | null | undefined;
   /** True: the call is answered with success and its usual effect does not happen. */
   noEffect?: (call: FakeCall, tenant: FakeTenant) => boolean;
@@ -178,6 +192,7 @@ export class FakeTenant implements DeleteGateway {
   reportGroupExists = true;
   restoreActive: RestoreActiveBehaviour;
   activeReadServesArchived: boolean;
+  linkRules: boolean;
   fail: FakeTenantOptions['fail'];
   noEffect: FakeTenantOptions['noEffect'];
   after: FakeTenantOptions['after'];
@@ -194,6 +209,7 @@ export class FakeTenant implements DeleteGateway {
     this.missingGroupIds = new Set(options.missingGroupIds ?? []);
     this.restoreActive = options.restoreActive ?? 'relocate';
     this.activeReadServesArchived = options.activeReadServesArchived ?? false;
+    this.linkRules = options.linkRules ?? false;
     this.#holdingGroup = options.holdingGroup;
     this.fail = options.fail;
     this.noEffect = options.noEffect;
@@ -223,6 +239,13 @@ export class FakeTenant implements DeleteGateway {
       groupListingName: seed.groupListingName ?? null,
       revisionEditId: typeof revision === 'number' ? revision : 1,
       processActions: seed.processActions ?? { CanSave: true, CanPublishAfterEdit: true, CanSubmitForApprovalAfterEdit: true },
+      hiddenLinksTo: seed.hiddenLinksTo ?? [],
+      publishedModel:
+        seed.publishedModel !== undefined
+          ? structuredClone(seed.publishedModel)
+          : seed.model && !String(seed.model['Version'] ?? '').startsWith('0.')
+            ? structuredClone(seed.model)
+            : null,
     };
     this.#processes.set(key(seed.uniqueId), process);
     return process;
@@ -295,7 +318,16 @@ export class FakeTenant implements DeleteGateway {
   async checkDependencies(processUniqueId: string): Promise<unknown> {
     this.#begin({ op: 'checkDependencies', uniqueId: processUniqueId });
     const process = this.process(processUniqueId);
-    return process ? structuredClone(process.dependencies) : null;
+    if (!process) return null;
+    if (!this.linkRules) return structuredClone(process.dependencies);
+    const holders = this.#linkHolders(process.uniqueId).filter((h) => !h.hiddenLinksTo.some((t) => key(t) === key(process.uniqueId)));
+    const dependencies = holders.flatMap((h) => {
+      const row = { Name: h.name, UniqueId: h.uniqueId };
+      return h.publishedModel ? [row, row] : [row];
+    });
+    const given = (process.dependencies ?? []) as unknown[];
+    const answer = dependencies.length > 0 ? [...given, { Type: 'Linked Process', Dependencies: dependencies }] : given;
+    return answer.length > 0 ? structuredClone(answer) : null;
   }
 
   async readArchivedModels(processUniqueIds: readonly string[]): Promise<ProcessModel[]> {
@@ -347,6 +379,7 @@ export class FakeTenant implements DeleteGateway {
     if (process!.model && !process!.archived) {
       process!.model['Version'] = bumpVersion(process!.model['Version'], 'major');
       process!.model['ProcessRevisionStateId'] = null;
+      process!.publishedModel = structuredClone(process!.model);
     }
     process!.archived = true;
     this.#end(call);
@@ -390,7 +423,7 @@ export class FakeTenant implements DeleteGateway {
 
   async deleteProcess(processUniqueId: string, processGroupUniqueId: string | null): Promise<unknown> {
     const call: FakeCall = { op: 'deleteProcess', uniqueId: processUniqueId, groupUniqueId: processGroupUniqueId };
-    if (this.#begin(call, () => (this.exists(processUniqueId) ? null : notFound()))) return {};
+    if (this.#begin(call, () => (this.exists(processUniqueId) ? this.#stillLinked(processUniqueId) : notFound()))) return {};
     this.remove(processUniqueId);
     this.deleted.push(processUniqueId);
     this.#end(call);
@@ -482,13 +515,34 @@ export class FakeTenant implements DeleteGateway {
   ): Promise<unknown> {
     const call: FakeCall = { op, uniqueId: processUniqueId, revisionEditId: processRevisionEditId, comment: publishMessage };
     this.#begin(call, () => (this.exists(processUniqueId) ? null : notFound()));
-    const model = this.process(processUniqueId)?.model;
+    const process = this.process(processUniqueId);
+    const model = process?.model;
     if (model) {
       model['Version'] = bumpVersion(model['Version'], 'major');
       model['ProcessRevisionStateId'] = 3;
+      process.publishedModel = structuredClone(model);
     }
     this.#end(call);
     return { actionUrl: '' };
+  }
+
+  /** Every process still linking to this one, whichever revision holds the link. */
+  #linkHolders(uniqueId: string): FakeProcess[] {
+    const links = (model: ProcessModel | null) => findProcessReferenceSites(model, [uniqueId]).some((s) => s.category === 'Link');
+    return [...this.#processes.values()].filter(
+      (p) =>
+        key(p.uniqueId) !== key(uniqueId) &&
+        (links(p.model) || links(p.publishedModel) || p.hiddenLinksTo.some((t) => key(t) === key(uniqueId))),
+    );
+  }
+
+  /** The body R14 captured, naming what still links to it. */
+  #stillLinked(uniqueId: string): FakeFailure | null {
+    if (!this.linkRules) return null;
+    const names = this.#linkHolders(uniqueId).map((h) => h.name);
+    if (names.length === 0) return null;
+    const message = 'Process cannot be deleted as it has links to the following items';
+    return { status: 500, message, body: JSON.stringify({ additionalInfos: { 'linked Process': names }, caption: 'Process Cannot Be Deleted', errorMessage: message, field: '' }) };
   }
 
   #onActiveSide(process: FakeProcess): boolean {

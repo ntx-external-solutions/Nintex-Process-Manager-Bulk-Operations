@@ -40,6 +40,12 @@
 // deleted image; Elsewhere points at a deleted image and at a form that is missing at the
 // scan and reappears before the repair; Archived input, archived, points at a deleted
 // image and is reported only.
+// For link order (F8): the rules measured on 4 Nov. A delete is refused while any process
+// still links to the target in its current or published revision, and the dependency check
+// answers on the linked-to side only, twice for a published holder and once for a
+// never-published one. The Link order group holds a chain (Chain head links to Chain middle
+// links to Chain tail), a cycle (Loop one and Loop two), a link no read shows (Hidden holder
+// to Hidden target), and Group tied, which the check ties to a group it holds no link to.
 // For ownership, start the app with SCIM_BASE_URL=http://localhost:<port>.
 //
 //   node dev/mock-pm.mjs [port]      (default 4999; sign in to http://localhost:4999/tenant)
@@ -57,7 +63,7 @@ const port = Number(process.argv[2] ?? 4999);
 const id = (n) => `${String(n).padStart(8, '0')}-0000-4000-8000-${String(n).padStart(12, '0')}`;
 
 const ROOT = id(900), FIN = id(901), SUB = id(902), OTHER = id(903), RET = id(904), FORMS = id(905), POLICIES = id(906);
-const LIB = id(907), MAN = id(908), SHARED = id(909), OLDF = id(910), SPENT = id(911);
+const LIB = id(907), MAN = id(908), SHARED = id(909), OLDF = id(910), SPENT = id(911), LINKS = id(950);
 const groups = {
   [FIN]: { parent: '', title: 'Finance' },
   [SUB]: { parent: FIN, title: 'Payables' },
@@ -70,6 +76,7 @@ const groups = {
   [SHARED]: { parent: '', title: 'Shared' },
   [OLDF]: { parent: '', title: 'Old forms' },
   [SPENT]: { parent: '', title: 'Spent' },
+  [LINKS]: { parent: '', title: 'Link order' },
 };
 // Documents by numeric id. ListType=All does not return archived ones (spike S1).
 // attached: process ids its properties list; trainings: training unit names.
@@ -129,10 +136,19 @@ procs[id(7)] = { name: 'Archived input', group: OTHER, archived: true, mode: 'ou
 procs[id(8)] = { name: 'Old retired step', group: RET, archived: true, mode: 'outright', rev: 800, version: '3.0', state: null, owner, expert };
 // The tenant refuses to delete it, as it did R14's still-linked target.
 procs[id(9)] = { name: 'Pinned', group: OTHER, archived: false, mode: 'outright', rev: 900, version: '1.0', state: 3, owner, expert, refuseDelete: true };
+const inLinkOrder = (n, name) => {
+  procs[id(n)] = { name, group: LINKS, archived: false, mode: 'outright', rev: n * 100, version: '1.0', state: 3, owner, expert };
+};
+[[20, 'Chain head'], [21, 'Chain middle'], [22, 'Chain tail'], [23, 'Loop one'], [24, 'Loop two'], [25, 'Hidden holder'], [26, 'Hidden target'], [27, 'Group tied']].forEach(([n, name]) => inLinkOrder(n, name));
 const docItem = (n, name) => ({ Id: n * 10 + 1, DocumentId: n, DocumentUniqueId: id(n), Text: name });
 const formIn = (n, name, images = []) => ({ Activity: [{ Id: n * 10, Text: 'Do the step', ChildProcessProcedures: { Form: [docItem(n, name)], Image: images } }] });
 // Documents 230, 231, 233 and 234 were deleted: no list has them (W8d).
+const linkTo = (u, name) => ({ ProcessProcedures: { ProcessLink: [{ Id: Number(u.slice(-3)) * 10 + 1, LinkedProcessUniqueId: u, LinkedProcessName: name }] } });
 const links = {
+  [id(20)]: linkTo(id(21), 'Chain middle'),
+  [id(21)]: linkTo(id(22), 'Chain tail'),
+  [id(23)]: linkTo(id(24), 'Loop two'),
+  [id(24)]: linkTo(id(23), 'Loop one'),
   [id(5)]: {
     ProcessProcedures: {
       ProcessLink: [{ Id: 501, LinkedProcessUniqueId: id(6), LinkedProcessName: 'Old thing' }],
@@ -146,9 +162,22 @@ const links = {
   [id(3)]: { ProcessProcedures: formIn(201, 'Payables checklist') },
   [id(7)]: { Inputs: { Input: [{ Id: 701, FromProcessUniqueId: id(6), Name: 'From old thing' }] }, ProcessProcedures: { Image: [docItem(234, 'Deleted logo')] } },
 };
-const dependencies = {
-  [id(6)]: [{ Type: 'Linked Process', Dependencies: [{ Name: 'Elsewhere', UniqueId: id(5) }] }],
-  [id(5)]: [{ Type: 'Linked Process', Dependencies: [{ Name: 'Old thing', UniqueId: id(6) }] }],
+const groupClaims = {
+  [id(27)]: [{ Type: 'Linked Process Group', Dependencies: [{ Name: 'Reference Library (Group)', UniqueId: id(951) }] }],
+};
+// What a process links to in its last published revision. Removing a link counts only once
+// published (R13, measured again on 4 Nov); a never-published process has only its current one.
+const published = Object.fromEntries(Object.keys(links).filter((u) => !procs[u].version.startsWith('0.')).map((u) => [u, structuredClone(links[u])]));
+// Links the tenant enforces and no read shows: the customer run's same-name copies, and the like.
+const hiddenLinks = { [id(26)]: [id(25)] };
+const linksIn = (revision, u) => (revision?.ProcessProcedures?.ProcessLink ?? []).some((l) => l.LinkedProcessUniqueId === u);
+const linkHolders = (u) => Object.keys(procs).filter((h) => h !== u && (linksIn(links[h], u) || linksIn(published[h], u) || hiddenLinks[u]?.includes(h)));
+const dependenciesOf = (u) => {
+  const rows = linkHolders(u)
+    .filter((h) => !hiddenLinks[u]?.includes(h))
+    .flatMap((h) => (published[h] ? [{ Name: procs[h].name, UniqueId: h }, { Name: procs[h].name, UniqueId: h }] : [{ Name: procs[h].name, UniqueId: h }]));
+  const answer = [...(groupClaims[u] ?? []), ...(rows.length > 0 ? [{ Type: 'Linked Process', Dependencies: rows }] : [])];
+  return answer.length > 0 ? answer : null;
 };
 const modelOf = (u) => {
   const x = procs[u];
@@ -248,6 +277,7 @@ http.createServer(async (req, res) => {
     // R14: archiving publishes a new major version, draft included.
     x.version = `${Number(x.version.split('.')[0]) + 1}.0`;
     x.state = null;
+    published[processUniqueId] = structuredClone(links[processUniqueId]);
     if (x.mode === 'fail-but-works') return send(res, 500, { message: 'Timeout' });
     return send(res, 200, {});
   }
@@ -356,8 +386,9 @@ http.createServer(async (req, res) => {
   let dm = p.match(/^\/Api\/v1\/Processes\/([^/]+)\/CheckProcessDependencies$/);
   if (dm) {
     // The tenant answers a process with no dependencies with 200 and an empty body.
-    if (!dependencies[dm[1]]) { res.writeHead(200); return res.end(); }
-    return send(res, 200, dependencies[dm[1]]);
+    const answer = dependenciesOf(dm[1]);
+    if (!answer) { res.writeHead(200); return res.end(); }
+    return send(res, 200, answer);
   }
   if (p === '/mobile/api/v1/processes') {
     // The tenant's limit, measured after W5 phase 3.
@@ -401,17 +432,19 @@ http.createServer(async (req, res) => {
   if (p === '/Process/Edit/DeleteProcess') {
     const { processUniqueId } = JSON.parse(body);
     if (!procs[processUniqueId]) return send(res, 404, { message: 'not found' });
-    if (procs[processUniqueId].refuseDelete) {
-      // The body R14 captured, with a made-up holder name.
+    const holding = linkHolders(processUniqueId).map((h) => procs[h].name);
+    if (procs[processUniqueId].refuseDelete || holding.length > 0) {
+      // The body R14 captured. Pinned's holder is a made-up name.
       return send(res, 500, {
-        additionalInfos: { 'linked Process': ['Somewhere else'] },
+        additionalInfos: { 'linked Process': holding.length > 0 ? holding : ['Somewhere else'] },
         caption: 'Process Cannot Be Deleted',
         errorMessage: 'Process cannot be deleted as it has links to the following items',
         field: '',
       });
     }
     delete procs[processUniqueId];
-    delete dependencies[processUniqueId];
+    delete links[processUniqueId];
+    delete published[processUniqueId];
     return send(res, 200, { isValid: true });
   }
   if (p === '/Process/Edit/CreateGroup') {
@@ -446,6 +479,7 @@ http.createServer(async (req, res) => {
       x.state = 3;
       x.version = `${Number(x.version.split('.')[0]) + 1}.0`;
     }
+    published[m[1]] = structuredClone(links[m[1]]);
     x.pendingArchive = false;
     return send(res, 200, { actionUrl: '/x' });
   }
