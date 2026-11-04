@@ -13,7 +13,6 @@ import {
   MOVE_AUTOMATED_FORM,
   MOVE_LINK,
   MOVE_PENDING,
-  MOVE_TAGGED,
   moveDocument,
   type DocumentMoveAnswer,
 } from '../pm/documents.ts';
@@ -53,6 +52,7 @@ const record = (more: Record<string, unknown> = {}) => ({
   documentReview: { doOverrideDocumentReviewFreq: true, documentReviewFreqMonths: 6 },
   ...more,
 });
+const fieldOf = (form: ReadonlyArray<readonly [string, string]>, name: string) => form.find(([n]) => n === name)?.[1];
 const without = (field: string) => {
   const r: Record<string, unknown> = record();
   delete r[field];
@@ -67,7 +67,7 @@ const target = (n: number): DocumentTarget => ({ documentId: n, uniqueId: d(n), 
 
 test('the form changes the primary group and sends everything else back as it came', () => {
   assert.deepEqual(documentMoveForm(record(), 77), {
-    form: {
+    form: Object.entries({
       DoOverrideDocumentReviewFreq: 'true',
       DocumentReviewFreqMonths: '6',
       ReferenceNo: 'REF-1',
@@ -75,14 +75,14 @@ test('the form changes the primary group and sends everything else back as it ca
       DocumentType: 'Image',
       PrimaryProcessGroupId: '77',
       GroupList: '{"selected":[501]}',
-    },
+    }),
   });
 });
 
 test('a real association survives; the primary, the old primary, inherited groups and the destination do not go back', () => {
   const built = documentMoveForm(record({ associatedGroups: [{ key: 'Old', value: 500 }, { key: 'Top', value: 1 }, { key: 'A', value: 7 }, { key: 'A again', value: 7 }, { key: 'B', value: 8 }, { key: 'Forms', value: 77 }] }), 77);
   assert.ok('form' in built);
-  assert.equal(built.form['GroupList'], '{"selected":[7,8]}');
+  assert.equal(fieldOf(built.form, 'GroupList'), '{"selected":[7,8]}');
 });
 
 test('gives the form the browser sent for a captured move: no override, months kept, blank reference, nothing selected', () => {
@@ -97,7 +97,7 @@ test('gives the form the browser sent for a captured move: no override, months k
     77,
   );
   assert.deepEqual(built, {
-    form: {
+    form: Object.entries({
       DoOverrideDocumentReviewFreq: 'false',
       DocumentReviewFreqMonths: '12',
       ReferenceNo: '',
@@ -105,29 +105,29 @@ test('gives the form the browser sent for a captured move: no override, months k
       DocumentType: 'Image',
       PrimaryProcessGroupId: '77',
       GroupList: '{"selected":[]}',
-    },
+    }),
   });
 });
 
 test('an attached document: the group its process lives in is implied, and stays out of the list', () => {
   const built = documentMoveForm(record({ associatedGroups: [{ key: 'Old', value: 500 }, { key: 'Top', value: 1 }] }), 77);
   assert.ok('form' in built);
-  assert.equal(built.form['GroupList'], '{"selected":[]}');
+  assert.equal(fieldOf(built.form, 'GroupList'), '{"selected":[]}');
 });
 
 test('a group linked as well as primary is what GroupList holds, as in the captured link', () => {
   const built = documentMoveForm(record({ associatedGroups: [{ key: 'Old', value: 500 }, { key: 'Linked', value: 80 }], implicitlyAssociatedGroups: [500] }), 77);
   assert.ok('form' in built);
-  assert.equal(built.form['GroupList'], '{"selected":[80]}');
+  assert.equal(fieldOf(built.form, 'GroupList'), '{"selected":[80]}');
 });
 
 test('a blank reference and no review override are real values, not missing ones', () => {
   const built = documentMoveForm(record({ referenceNumber: '', documentReview: { doOverrideDocumentReviewFreq: false, documentReviewFreqMonths: null }, associatedGroups: [] }), 77);
   assert.ok('form' in built);
-  assert.equal(built.form['ReferenceNo'], '');
-  assert.equal(built.form['DoOverrideDocumentReviewFreq'], 'false');
-  assert.equal(built.form['DocumentReviewFreqMonths'], '');
-  assert.equal(built.form['GroupList'], '{"selected":[]}');
+  assert.equal(fieldOf(built.form, 'ReferenceNo'), '');
+  assert.equal(fieldOf(built.form, 'DoOverrideDocumentReviewFreq'), 'false');
+  assert.equal(fieldOf(built.form, 'DocumentReviewFreqMonths'), '');
+  assert.equal(fieldOf(built.form, 'GroupList'), '{"selected":[]}');
 });
 
 test('every field a save sends back refuses the move when the read did not carry it', () => {
@@ -174,10 +174,66 @@ test('archived, pending, already there and linked documents are refused by name'
   assert.deepEqual(documentMoveForm(record({ documentLocationType: 'External' }), 77), { refused: MOVE_LINK });
 });
 
-test('a tag of either kind and an automated form refuse the move: the captured form has no field for them', () => {
-  assert.deepEqual(documentMoveForm(record({ associatedTags: [{ key: 'tag', value: 1 }] }), 77), { refused: MOVE_TAGGED });
-  assert.deepEqual(documentMoveForm(record({ associatedSystemTags: [{ key: 'system', value: 2 }] }), 77), { refused: MOVE_TAGGED });
+test('an automated form refuses the move: the captured form has no field for one', () => {
   assert.deepEqual(documentMoveForm(record({ isAutomatedForm: true }), 77), { refused: MOVE_AUTOMATED_FORM });
+});
+
+// The captured shape of a document with nothing optional set, so the whole form can be compared.
+const plain = (more: Record<string, unknown> = {}) =>
+  record({
+    documentName: 'Example document',
+    documentType: 'Information',
+    referenceNumber: '',
+    documentReview: { doOverrideDocumentReviewFreq: false, documentReviewFreqMonths: 12 },
+    associatedGroups: [],
+    ...more,
+  });
+const baseForm = [
+  ['DoOverrideDocumentReviewFreq', 'false'],
+  ['DocumentReviewFreqMonths', '12'],
+  ['ReferenceNo', ''],
+  ['DocumentName', 'Example document'],
+  ['DocumentType', 'Information'],
+  ['PrimaryProcessGroupId', '77'],
+  ['GroupList', '{"selected":[]}'],
+];
+
+test('tags go back as one field per id after GroupList, in the order the browser sends them (W9b A4)', () => {
+  const built = documentMoveForm(
+    plain({ associatedTags: [{ key: 'one', value: 101 }, { key: 'two', value: 102 }], associatedSystemTags: [{ key: 'system', value: 201 }] }),
+    77,
+  );
+  assert.deepEqual(built, {
+    form: [...baseForm, ['AssociatedTags', '101'], ['AssociatedTags', '102'], ['AssociatedSystemTags', '201']],
+  });
+});
+
+test('a document with only a system tag sends only that field, as the browser did moving one', () => {
+  const built = documentMoveForm(plain({ associatedSystemTags: [{ key: 'system', value: 201 }] }), 77);
+  assert.deepEqual(built, { form: [...baseForm, ['AssociatedSystemTags', '201']] });
+});
+
+test('a document with no tags sends no tag field at all, not an empty one (W9b A6)', () => {
+  assert.deepEqual(documentMoveForm(plain(), 77), { form: baseForm });
+});
+
+test('a tag with no usable id refuses the move: sent without it, that tag would be wiped', () => {
+  for (const bad of [{ key: 'no id' }, { key: 'null', value: null }, { key: 'zero', value: 0 }, { key: 'negative', value: -1 }, { key: 'word', value: 'abc' }, { key: 'fraction', value: 1.5 }, 'just a name']) {
+    for (const list of ['associatedTags', 'associatedSystemTags']) {
+      const built = documentMoveForm(record({ [list]: [{ key: 'good', value: 5 }, bad] }), 77);
+      assert.ok('refused' in built, `${list}: ${JSON.stringify(bad)}`);
+      assert.ok(built.refused.includes('did not give the id of a tag,'), built.refused);
+    }
+  }
+});
+
+test('a tag list that is not a list refuses the move', () => {
+  for (const list of ['associatedTags', 'associatedSystemTags']) {
+    for (const value of [null, 'a tag', { key: 'tag', value: 1 }]) {
+      const built = documentMoveForm(record({ [list]: value }), 77);
+      assert.ok('refused' in built && built.refused.includes('did not give its tags,'), `${list}: ${JSON.stringify(value)}`);
+    }
+  }
 });
 
 test('moveDocument reads, saves multipart to the document, and sends no save when refused', async () => {
@@ -204,6 +260,15 @@ test('moveDocument reads, saves multipart to the document, and sends no save whe
   assert.equal(body.get('PrimaryProcessGroupId'), '77');
   assert.equal(body.get('DocumentName'), 'Expense form');
   assert.equal(calls[1]!.contentType, undefined, 'fetch sets it, with the boundary');
+
+  // The list form is what lets a name repeat; a Record would have kept only the last tag.
+  calls.length = 0;
+  answer = record({ associatedTags: [{ key: 'one', value: 101 }, { key: 'two', value: 102 }], associatedSystemTags: [{ key: 'system', value: 201 }] });
+  assert.deepEqual(await moveDocument(ctx, 41, 77), { moved: true });
+  const tagged = calls[1]!.body as FormData;
+  assert.deepEqual(tagged.getAll('AssociatedTags'), ['101', '102']);
+  assert.deepEqual(tagged.getAll('AssociatedSystemTags'), ['201']);
+  assert.deepEqual([...tagged.keys()].slice(-4), ['GroupList', 'AssociatedTags', 'AssociatedTags', 'AssociatedSystemTags']);
 
   calls.length = 0;
   answer = without('referenceNumber');
@@ -251,18 +316,24 @@ test('the plan moves what can be saved, attached or not, and says why the rest s
 });
 
 test('pending documents stay out until the operator opts in, and then only those a save can send back', async () => {
-  const docs = [entry(1), entry(2, { isPending: true }), entry(3, { isPending: true }), entry(4, { isPending: true, isArchived: true })];
-  const reads = await readForMove(docs.map(chosen), async (id) => (id === 3 ? record({ associatedTags: [{ key: 'tag', value: 1 }] }) : record()), destination);
+  const docs = [entry(1), entry(2, { isPending: true }), entry(3, { isPending: true }), entry(4, { isPending: true, isArchived: true }), entry(5, { isPending: true })];
+  const read = async (id: number) => {
+    if (id === 3) return record({ documentLocationType: 'External' });
+    if (id === 5) return record({ associatedTags: [{ key: 'tag', value: 1 }] });
+    return record();
+  };
+  const reads = await readForMove(docs.map(chosen), read, destination);
   const input = { chosen: docs.map(chosen), paths: new Map(), reads, destination };
-  assert.equal(pendingChosen(input.chosen), 2, 'an archived one is not on offer');
+  assert.equal(pendingChosen(input.chosen), 3, 'an archived one is not on offer');
 
   const off = buildDocumentMovePlan(input);
   assert.deepEqual(off.targets.map((t) => t.name), ['Doc 1']);
-  assert.deepEqual(off.skipped.map((r) => r.message), [MOVE_PENDING, MOVE_PENDING, MOVE_ARCHIVED]);
+  assert.deepEqual(off.skipped.map((r) => r.message), [MOVE_PENDING, MOVE_PENDING, MOVE_ARCHIVED, MOVE_PENDING]);
 
   const on = buildDocumentMovePlan({ ...input, includePending: true });
-  assert.deepEqual(on.targets.map((t) => [t.name, t.chosen]), [['Doc 1', CHOSEN_BY_ID], ['Doc 2', `${CHOSEN_BY_ID} (pending)`]]);
-  assert.deepEqual(on.skipped.map((r) => r.message), [MOVE_TAGGED, MOVE_ARCHIVED]);
+  // Doc 5 is the W9b change: a pending document with tags was refused for its tags until now.
+  assert.deepEqual(on.targets.map((t) => [t.name, t.chosen]), [['Doc 1', CHOSEN_BY_ID], ['Doc 2', `${CHOSEN_BY_ID} (pending)`], ['Doc 5', `${CHOSEN_BY_ID} (pending)`]]);
+  assert.deepEqual(on.skipped.map((r) => r.message), [MOVE_LINK, MOVE_ARCHIVED]);
 });
 
 test('a dead session while reading ends the plan', async () => {
