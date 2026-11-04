@@ -8,6 +8,8 @@
  * touched. They are returned as given, and the caller reads every entry.
  */
 
+import { nodeHas, nodeString, nodeValue } from '../delete/model.ts';
+import { toDocumentProperties } from '../documents/holders.ts';
 import { pmRequest, type PmContext } from './client.ts';
 
 const DOCUMENTS = '/bff/document/api/v1/documents';
@@ -128,4 +130,93 @@ export async function bulkDeleteDocuments(ctx: PmContext, documentIds: readonly 
       retry: 'write',
     }),
   );
+}
+
+export const MOVE_ARCHIVED = 'Archived. Restore it first to move it';
+export const MOVE_PENDING = 'Pending in Process Manager';
+export const MOVE_ALREADY_THERE = 'Already in that group';
+export const MOVE_LINK = 'A linked document. Its save form has not been measured, and a save without its address could lose it, so it was left alone';
+
+const moveMissing = (field: string) =>
+  `Its properties did not give ${field}, which a save has to send back unchanged, so it was left alone`;
+
+/** The first of these fields the answer carries, or null. */
+function firstField(raw: unknown, names: readonly string[]): string | null {
+  return names.find((name) => nodeHas(raw, name)) ?? null;
+}
+
+/**
+ * The form that moves one document, or why it can't be built.
+ *
+ * `POST .../{id}/properties` replaces the whole record, so everything but the primary
+ * group has to go back as it came. A field left blank would be wiped on the tenant with a
+ * success answer, and the final read can't see that: it only checks the group. So a field
+ * the read didn't carry refuses the move, rather than being sent empty. The form's names
+ * are from a browser capture (W9). The read's names for the reference and the review
+ * frequency are that form's, camel-cased, and unmeasured until R16; if they're wrong every
+ * document is skipped with this message and nothing is touched.
+ *
+ * The old primary group isn't kept as an association, and the new one is taken out of the
+ * associations, since a group can't be both. Link documents are refused until their form
+ * is captured: the spike's create call has `Url` and `NetworkPath`, which this form hasn't.
+ */
+export function documentMoveForm(raw: unknown, targetGroupId: number): { form: Record<string, string> } | { refused: string } {
+  const props = toDocumentProperties(raw);
+  if (props.isArchived === true) return { refused: MOVE_ARCHIVED };
+  if (props.isPending === true) return { refused: MOVE_PENDING };
+  if (props.primaryGroupId === null) return { refused: moveMissing('its primary group') };
+  if (props.primaryGroupId === targetGroupId) return { refused: MOVE_ALREADY_THERE };
+
+  const location = nodeString(raw, 'documentLocationType');
+  if (location === '') return { refused: moveMissing('its location type') };
+  if (!/cloud|upload/i.test(location)) return { refused: MOVE_LINK };
+
+  const name = nodeString(raw, 'documentName');
+  if (name.trim() === '') return { refused: moveMissing('its name') };
+
+  // A word, as captured ("Image"). A number here would be an enum the form doesn't take.
+  const type = nodeString(raw, 'documentType');
+  if (!/^[a-z]+$/i.test(type.trim())) return { refused: moveMissing('its document type') };
+
+  const referenceField = firstField(raw, ['referenceNo', 'referenceNumber']);
+  if (referenceField === null) return { refused: moveMissing('its reference number') };
+
+  const override = nodeValue(raw, 'doOverrideDocumentReviewFreq');
+  if (typeof override !== 'boolean') return { refused: moveMissing('its review frequency setting') };
+  if (!nodeHas(raw, 'documentReviewFreqMonths')) return { refused: moveMissing('its review frequency') };
+  const months = nodeValue(raw, 'documentReviewFreqMonths');
+  if (override && !/^\d+$/.test(String(months ?? ''))) return { refused: moveMissing('its review frequency') };
+
+  // Absent would read as "no associations", and the save would remove them all.
+  if (nodeValue(raw, 'associatedGroups') === null) return { refused: moveMissing('its associated groups') };
+  if (props.associatedGroups.some((g) => g.id === null)) return { refused: moveMissing('the id of an associated group') };
+  const selected = [...new Set(props.associatedGroups.map((g) => g.id as number))].filter(
+    (id) => id !== props.primaryGroupId && id !== targetGroupId,
+  );
+
+  return {
+    form: {
+      DoOverrideDocumentReviewFreq: String(override),
+      DocumentReviewFreqMonths: months === null ? '' : String(months),
+      ReferenceNo: nodeString(raw, referenceField),
+      DocumentName: name,
+      DocumentType: type,
+      PrimaryProcessGroupId: String(targetGroupId),
+      GroupList: JSON.stringify({ selected }),
+    },
+  };
+}
+
+export type DocumentMoveAnswer = { moved: true } | { moved: false; refused: string };
+
+/**
+ * Move one document to another primary group. Reads the record and saves it in one
+ * operation, so the browser never supplies a name or a list of groups, and the save sends
+ * back what the tenant holds now rather than what the plan saw. 204 when it lands (spike).
+ */
+export async function moveDocument(ctx: PmContext, documentId: number, targetGroupId: number): Promise<DocumentMoveAnswer> {
+  const built = documentMoveForm(await getDocumentProperties(ctx, documentId), targetGroupId);
+  if ('refused' in built) return { moved: false, refused: built.refused };
+  await pmRequest<unknown>(ctx, { path: `${DOCUMENTS}/${documentId}/properties`, method: 'POST', multipart: built.form, retry: 'write' });
+  return { moved: true };
 }

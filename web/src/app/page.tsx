@@ -69,6 +69,12 @@ const DOCUMENT_OPERATIONS: readonly OperationTile[] = [
     href: '/documents/delete',
   },
   {
+    title: 'Move documents',
+    summary: 'Move documents to another group, chosen by group, from the list, or by id or CSV. Their properties stay as they are.',
+    icon: <FolderOpen />,
+    href: '/documents/move',
+  },
+  {
     title: 'Restore documents',
     summary: 'Bring archived documents back to their groups. A results file from Archive or Delete documents undoes that run’s archiving.',
     icon: <Undo />,

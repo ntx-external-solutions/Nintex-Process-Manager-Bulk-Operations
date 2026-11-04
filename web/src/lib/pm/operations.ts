@@ -16,6 +16,8 @@
  *
  * The document writes (W8) are the one exception: Process Manager only offers them in
  * bulk. Each takes 1 to 50 numeric document ids and nothing else, and never a path.
+ * The move (W9) is one document and one group at a time, because the tenant has no bulk
+ * call for it.
  */
 
 import type { PmContext } from './client.ts';
@@ -52,6 +54,7 @@ import {
   DOCUMENT_BATCH_SIZE,
   getDocumentProperties,
   listDocuments,
+  moveDocument,
   type DocumentListType,
 } from './documents.ts';
 import { ARCHIVED_BATCH_SIZE, checkDependencies, readActiveModel, readArchivedModels } from './dependencies.ts';
@@ -168,7 +171,9 @@ export type Operation =
   /** Restore up to 50 archived documents. 200 even when some fail. */
   | { op: 'documents.restore'; documentIds: number[] }
   /** Permanently delete up to 50 archived documents. 200 even when some fail. */
-  | { op: 'documents.delete'; documentIds: number[] };
+  | { op: 'documents.delete'; documentIds: number[] }
+  /** Move one document to another primary group, everything else about it kept. */
+  | { op: 'document.move'; documentId: number; targetGroupId: number };
 
 export type OperationName = Operation['op'];
 
@@ -203,6 +208,7 @@ export const OPERATION_NAMES: readonly OperationName[] = [
   'documents.archive',
   'documents.restore',
   'documents.delete',
+  'document.move',
 ];
 
 /**
@@ -229,6 +235,9 @@ export const WRITE_OPERATIONS: readonly OperationName[] = [
   // delete. W8c's Restore documents page uses the same restore.
   'documents.restore',
   'documents.delete',
+  // W9: the only write that takes a target as well as an id. Both are numbers; the name,
+  // reference and associations it saves come from the tenant, never from the browser.
+  'document.move',
 ];
 
 /**
@@ -372,6 +381,9 @@ export async function execute(ctx: PmContext, operation: Operation): Promise<unk
 
     case 'documents.delete':
       return bulkDeleteDocuments(ctx, operation.documentIds);
+
+    case 'document.move':
+      return moveDocument(ctx, operation.documentId, operation.targetGroupId);
   }
 }
 
@@ -724,6 +736,16 @@ export function parseOperation(input: unknown): ParseResult {
         return { ok: false, error: `${op}: "documentId" must be exactly one numeric document id.` };
       }
       return { ok: true, operation: { op, documentId } };
+    }
+
+    case 'document.move': {
+      const extra = Object.keys(body).filter((key) => !['op', 'documentId', 'targetGroupId'].includes(key));
+      const documentId = body['documentId'];
+      const targetGroupId = body['targetGroupId'];
+      if (extra.length > 0 || !isDocumentId(documentId) || !isDocumentId(targetGroupId)) {
+        return { ok: false, error: `${op}: "documentId" and "targetGroupId" must each be one positive integer, and nothing else.` };
+      }
+      return { ok: true, operation: { op, documentId, targetGroupId } };
     }
 
     case 'documents.archive':

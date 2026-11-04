@@ -23,7 +23,7 @@ import type { TreeItem, ValidateActionResponse } from '../pm/types.ts';
 import type { PlanGateway } from '../plan/load.ts';
 import type { Operation, ProcessSummary } from '../pm/operations.ts';
 import type { ProcessListPage, VariationSet } from '../pm/processes.ts';
-import type { DocumentBulkAnswer, DocumentListPage, DocumentListType } from '../pm/documents.ts';
+import type { DocumentBulkAnswer, DocumentListPage, DocumentListType, DocumentMoveAnswer } from '../pm/documents.ts';
 import type { DocumentDeleteGateway } from '../documents/delete.ts';
 import type { ChildTreeItemsResponse } from '../pm/types.ts';
 import { slowCalls } from './slowCalls.ts';
@@ -256,6 +256,7 @@ export function browserDeleteGateway(): DeleteGateway {
 export function browserDocumentGateway(): DocumentDeleteGateway & {
   list(listType: DocumentListType, page: number, groupUniqueId: string | null): Promise<DocumentListPage>;
   readModel(processUniqueId: string): Promise<ActiveRead>;
+  move(documentId: number, targetGroupId: number): Promise<DocumentMoveAnswer>;
 } {
   return {
     list: (listType, page, groupUniqueId) => callPm<DocumentListPage>({ op: 'documents.list', listType, page, groupUniqueId }),
@@ -264,6 +265,7 @@ export function browserDocumentGateway(): DocumentDeleteGateway & {
     delete: (documentIds) => callPm<DocumentBulkAnswer>({ op: 'documents.delete', documentIds }),
     restore: (documentIds) => callPm<DocumentBulkAnswer>({ op: 'documents.restore', documentIds }),
     readModel: (processUniqueId) => callPm<ActiveRead>({ op: 'process.model', processUniqueId }),
+    move: (documentId, targetGroupId) => callPm<DocumentMoveAnswer>({ op: 'document.move', documentId, targetGroupId }),
   };
 }
 

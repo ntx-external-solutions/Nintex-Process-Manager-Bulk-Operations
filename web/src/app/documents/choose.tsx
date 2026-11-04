@@ -428,7 +428,7 @@ export function useRunRecord(page: DocumentPage, tenant: string) {
   useEffect(() => setInterrupted(loadRecord(store, tenant, page)), [store, tenant, page]);
   return {
     interrupted,
-    start: (rows: ResultRow[], more: Pick<DocumentRunRecord, 'delete'> = {}): Recorder =>
+    start: (rows: ResultRow[], more: Pick<DocumentRunRecord, 'delete' | 'move'> = {}): Recorder =>
       recorder(store, { page, tenant, runId: crypto.randomUUID(), startedAt: Date.now(), rows, inFlight: null, ...more }),
     resume: (record: DocumentRunRecord): Recorder => recorder(store, record),
     discard: () => {

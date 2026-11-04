@@ -93,11 +93,12 @@ test('there is no way to name a URL', () => {
   }
 });
 
-test('the only writes are archive, publish, group delete, move, ownership, the delete run\'s five, and the document archive, delete and restore', () => {
+test('the only writes are archive, publish, group delete, move, ownership, the delete run\'s five, and the document archive, delete, restore and move', () => {
   // Adding a write has to be a decision made here, not a side effect of a new case. The
   // delete run's writes arrived with the unwind (W5 phase 7), not before; the rename with
-  // F5; the document archive with W8a; the document delete and restore with W8b.
+  // F5; the document archive with W8a; the document delete and restore with W8b; the document move with W9.
   assert.deepEqual([...WRITE_OPERATIONS].sort(), [
+    'document.move',
     'documents.archive',
     'documents.delete',
     'documents.restore',
@@ -640,4 +641,25 @@ test('a group\'s document count for cleanup takes in what both lists return for 
   assert.deepEqual(answer, { total: 1, names: ['Borrowed.pdf (archived)'] });
   assert.deepEqual(h.calls.map((c) => new URL(c.url).searchParams.get('ListType')), ['All', 'Archived']);
   assert.ok(h.calls.every((c) => new URL(c.url).searchParams.get('ProcessGroupId') === OTHER_ID));
+});
+
+test('document.move takes one document and one group, as numbers, and nothing else', () => {
+  assert.deepEqual(parseOperation({ op: 'document.move', documentId: 41, targetGroupId: 77 }), {
+    ok: true,
+    operation: { op: 'document.move', documentId: 41, targetGroupId: 77 },
+  });
+  for (const bad of [
+    { op: 'document.move', documentId: 41 },
+    { op: 'document.move', targetGroupId: 77 },
+    { op: 'document.move', documentId: '41', targetGroupId: 77 },
+    { op: 'document.move', documentId: 41, targetGroupId: '77' },
+    { op: 'document.move', documentId: [41], targetGroupId: 77 },
+    { op: 'document.move', documentId: 0, targetGroupId: 77 },
+    { op: 'document.move', documentId: 41, targetGroupId: -1 },
+    // Whatever the save sends back comes from the tenant, never from the browser.
+    { op: 'document.move', documentId: 41, targetGroupId: 77, documentName: 'x' },
+    { op: 'document.move', documentId: 41, targetGroupId: 77, groupList: [] },
+  ]) {
+    assert.equal(parseOperation(bad).ok, false, JSON.stringify(bad));
+  }
 });

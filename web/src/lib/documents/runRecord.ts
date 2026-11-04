@@ -18,7 +18,7 @@ import type { CoveredGroup } from '../select/resolve.ts';
 import type { DocumentTarget } from './archive.ts';
 import type { DocumentIndex } from './list.ts';
 
-export type DocumentPage = 'archive' | 'delete' | 'restore' | 'repair';
+export type DocumentPage = 'archive' | 'delete' | 'restore' | 'repair' | 'move';
 
 /** What a call that was out when the run died was sent about. */
 export interface InFlight {
@@ -43,6 +43,8 @@ export interface DocumentRunRecord {
     /** The operator typed DELETE before the run died. */
     confirmed: boolean;
   };
+  /** Move documents only: where the run was moving them, which is what settles its rows. */
+  move?: { destination: { id: number; uniqueId: string; path: string[] } };
 }
 
 export interface RecordStore {

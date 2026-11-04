@@ -1616,6 +1616,15 @@ Not yet measured with the bearer token the app's proxy sends.
 | Upload | `POST .../documents/upload`, multipart with `File`, `DocumentType`, `GroupId` | the new document |
 | Save properties | `POST .../documents/{id}/properties`, form incl. `PrimaryProcessGroupId`, `GroupList={"selected":[ids]}` | 204 |
 
+**Moving a document (browser capture, Nov 2026, not yet measured with a bearer token).** There
+is no move or bulk call: a move is `POST .../documents/{id}/properties` with a changed
+`PrimaryProcessGroupId`, as `multipart/form-data`. For an uploaded document the form is
+`DoOverrideDocumentReviewFreq`, `DocumentReviewFreqMonths`, `ReferenceNo`, `DocumentName`,
+`DocumentType` (a word, such as `Image`), `PrimaryProcessGroupId` (numeric) and
+`GroupList={"selected":[ids]}`. It has no file, and it is the whole record, so anything sent
+blank is presumably wiped. How those fields are named in the `GET`, the form for a linked
+document, and whether a move creates a version are not measured.
+
 **The bulk calls answer 200 when items fail.** Each failure is an entry in `errors`.
 Codes seen: `NotArchived` (delete of an active document), `NotFound`, `ProcessAttachment`.
 

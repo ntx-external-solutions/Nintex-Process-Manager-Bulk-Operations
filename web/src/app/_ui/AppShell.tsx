@@ -140,6 +140,9 @@ function Sidebar() {
         <MainNav.Item asChild isCurrent={isSection('/documents/delete')} icon={<Delete />}>
           <Link href="/documents/delete">Delete documents</Link>
         </MainNav.Item>
+        <MainNav.Item asChild isCurrent={isSection('/documents/move')} icon={<FolderOpen />}>
+          <Link href="/documents/move">Move documents</Link>
+        </MainNav.Item>
         <MainNav.Item asChild isCurrent={isSection('/documents/restore')} icon={<Undo />}>
           <Link href="/documents/restore">Restore documents</Link>
         </MainNav.Item>

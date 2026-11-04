@@ -32,6 +32,9 @@
 // breadcrumb is empty, as a deleted group's is), one the bulk restore refuses inside a
 // 200, and one a Delete run archived and left archived. The restore answers NotArchived
 // for an active document.
+// For Move documents (W9): POST .../{id}/properties takes the captured multipart form and
+// replaces the record, blanks included, as the tenant does. Draft-only form's read leaves out
+// its reference, and Refused by tenant's save answers 400.
 // For Repair document references (W8d): Outright (published) points at a deleted image
 // and at an archived document, which is not dead; Needs approval's open draft points at a
 // deleted image; Elsewhere points at a deleted image and at a form that is missing at the
@@ -77,12 +80,12 @@ const docs = Object.fromEntries([
   doc(201, 'Payables checklist.xlsx', MAN, { attached: [id(3)] }),
   doc(202, 'Retired guide.pdf', MAN, { attached: [id(8)] }),
   doc(203, 'Training handout.pdf', LIB, { trainings: ['Induction'] }),
-  doc(204, 'Draft-only form.docx', LIB),
+  doc(204, 'Draft-only form.docx', LIB, { omitReference: true }),
   doc(205, 'Free notes.txt', MAN),
   doc(206, 'Pending memo.docx', LIB, { pending: true }),
   // Free when the plan reads it, attached to Outright by the time its batch re-reads it.
   doc(207, 'Late attachment.pdf', LIB, { attachOnRead: 2, attachTo: id(1) }),
-  doc(208, 'Refused by tenant.pdf', LIB, { refuseArchive: 'Locked' }),
+  doc(208, 'Refused by tenant.pdf', LIB, { refuseArchive: 'Locked', refuseSave: true }),
   doc(209, 'Shared template.docx', SHARED, { associated: [MAN] }),
   doc(210, 'Supplier link', SHARED, { location: 'External' }),
   doc(211, 'Archived manual.pdf', MAN, { archived: true }),
@@ -285,6 +288,19 @@ http.createServer(async (req, res) => {
   if (pm) {
     const d = docs[Number(pm[1])];
     if (!d) return send(res, 404, { message: 'not found' });
+    if (req.method === 'POST') {
+      if (d.refuseSave) return send(res, 400, { message: 'Could not save' });
+      const field = (name) => new RegExp(`name="${name}"\\r\\n\\r\\n(.*?)\\r\\n`).exec(body)?.[1] ?? '';
+      const primary = Object.keys(groups).find((g) => Number(g.slice(-3)) === Number(field('PrimaryProcessGroupId')));
+      if (!primary) return send(res, 400, { message: 'No such group' });
+      d.primary = primary;
+      d.associated = JSON.parse(field('GroupList')).selected.map((n) => Object.keys(groups).find((g) => Number(g.slice(-3)) === n));
+      d.name = field('DocumentName');
+      d.referenceNo = field('ReferenceNo');
+      d.reviewOverride = field('DoOverrideDocumentReviewFreq') === 'true';
+      d.reviewMonths = field('DocumentReviewFreqMonths');
+      return send(res, 204);
+    }
     d.reads++;
     if (d.attachOnRead && d.reads >= d.attachOnRead && !d.attached.includes(d.attachTo)) d.attached.push(d.attachTo);
     return send(res, 200, {
@@ -293,6 +309,8 @@ http.createServer(async (req, res) => {
       attachedProcesses: d.attached.map((u) => ({ processName: procs[u]?.name ?? '', processUniqueId: u })),
       attachedTrainings: d.trainings.map((name) => ({ name })),
       isArchived: d.archived, isPending: d.pending, documentLocationType: d.location,
+      documentName: d.name, documentType: 'Form', doOverrideDocumentReviewFreq: d.reviewOverride ?? true, documentReviewFreqMonths: d.reviewMonths ?? 12,
+      ...(d.omitReference ? {} : { referenceNo: d.referenceNo ?? `REF-${docNumber(d)}` }),
     });
   }
   if (p === '/bff/document/api/v1/documents/bulk/archive') {
