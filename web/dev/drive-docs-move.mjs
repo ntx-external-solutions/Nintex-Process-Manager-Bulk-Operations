@@ -2,7 +2,7 @@
 // associated with it, upload a CSV, move everything to Other.
 // Expect: Library's documents and the ticked Shared template move, attached ones included.
 // Left out: Pending memo; Draft-only form (its read has no reference, so a save would wipe
-// it); Supplier link (a link); Old policy (archived); an id that matches nothing. Refused by
+// it); Retired guide (tagged); Supplier link (a link); Old policy (archived); an id that matches nothing. Refused by
 // tenant fails on its own. Every save keeps the name, reference and review frequency, and
 // Shared template keeps its association with Manuals. Restart the mock first: this changes
 // its state.
@@ -49,17 +49,18 @@ await b.until(`document.body.innerText.includes('Check the plan')`, 'plan');
 await b.js(`document.querySelectorAll('details').forEach((d) => (d.open = true)); true`);
 const plan = await b.js(`document.querySelector('main').innerText`);
 console.log('--- PLAN ---\n' + plan);
-expect(/8 documents would move to Other/.test(plan), 'eight to move, to Other');
+expect(/7 documents would move to Other/.test(plan), 'seven to move, to Other');
 expect(/Payables checklist\.xlsx\s+Library \/ Manuals/.test(plan), 'an attached document is in the plan, with where it is now');
 expect(/Pending memo\.docx: Pending in Process Manager/.test(plan), 'a pending document is left out');
 expect(/Draft-only form\.docx: Its properties did not give its reference number/.test(plan), 'a record that could not be sent back whole is left out');
 expect(/Supplier link: A linked document/.test(plan), 'a link is left out');
+expect(/Retired guide\.pdf: It has tags/.test(plan), 'a tagged document is left out');
 expect(/Old policy\.pdf: Archived\. Restore it first/.test(plan), 'an archived document is left out');
 expect(plan.includes(`${UNKNOWN}: Document not found`), 'an unknown id is left out');
 expect((await b.sent()).filter((l) => l.startsWith('POST') && l.includes('/properties')).length === 0, 'the plan writes nothing');
 
-await b.js(`$btn('Move 8 documents')`);
-await b.js(`$btn('Yes, move 8 documents now')`);
+await b.js(`$btn('Move 7 documents')`);
+await b.js(`$btn('Yes, move 7 documents now')`);
 await b.until(`document.body.innerText.includes('Download the results')`, 'results');
 const results = await b.resultsCsv();
 console.log('--- RESULTS FILE ---\n' + results);
@@ -68,14 +69,15 @@ const rowOf = (n) => rows.find((r) => r.includes(id(n))) ?? '';
 expect(/"UpdateLocation","Success","Moved from Library \/ Manuals to Other\."/.test(rowOf(201)), 'an attached document moved, confirmed');
 expect(/"UpdateLocation","Success","Moved from Finance \/ Forms to Other\."/.test(rowOf(100)), 'the CSV’s document moved');
 expect(/"UpdateLocation","Failed"/.test(rowOf(208)), 'the save the tenant refused is Failed');
-for (const n of [204, 206, 210, 101]) expect(/"UpdateLocation","Skipped"/.test(rowOf(n)), `${n} has a Skipped row`);
+for (const n of [202, 204, 206, 210, 101]) expect(/"UpdateLocation","Skipped"/.test(rowOf(n)), `${n} has a Skipped row`);
 expect(rows.some((r) => r.includes(UNKNOWN) && r.includes('"Resolve","Skipped"')), 'the unknown id has a Resolve row');
 
 const saves = (await b.sent()).filter((l) => l.startsWith('POST') && l.includes('/properties'));
-expect(saves.length === 8 && saves.every((l) => l.includes('name="PrimaryProcessGroupId"\r\n\r\n903\r\n')), 'eight saves, each to Other');
+expect(saves.length === 7 && saves.every((l) => l.includes('name="PrimaryProcessGroupId"\r\n\r\n903\r\n')), 'seven saves, each to Other');
 const of = (n) => saves.find((l) => l.includes(`/documents/${n}/properties`)) ?? '';
 expect(/name="ReferenceNo"\r\n\r\nREF-205\r\n/.test(of(205)), 'the reference went back unchanged');
 expect(/name="DocumentReviewFreqMonths"\r\n\r\n12\r\n/.test(of(205)), 'the review frequency went back unchanged');
 expect(/name="DocumentName"\r\n\r\nFree notes\.txt\r\n/.test(of(205)), 'the name went back unchanged');
-expect(of(209).includes('{"selected":[908]}'), 'the association with Manuals went back, the old primary did not');
+expect(of(205).includes('{"selected":[]}'), 'groups a document only inherits do not become associations');
+expect(of(209).includes('{"selected":[908]}'), 'the association with Manuals went back; the old primary and the inherited root did not');
 b.close();

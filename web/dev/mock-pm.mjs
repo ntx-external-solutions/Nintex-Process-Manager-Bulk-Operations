@@ -34,7 +34,7 @@
 // for an active document.
 // For Move documents (W9): POST .../{id}/properties takes the captured multipart form and
 // replaces the record, blanks included, as the tenant does. Draft-only form's read leaves out
-// its reference, and Refused by tenant's save answers 400.
+// its reference, Retired guide has a tag, and Refused by tenant's save answers 400.
 // For Repair document references (W8d): Outright (published) points at a deleted image
 // and at an archived document, which is not dead; Needs approval's open draft points at a
 // deleted image; Elsewhere points at a deleted image and at a form that is missing at the
@@ -78,7 +78,7 @@ const docs = Object.fromEntries([
   doc(100, 'Expense form.docx', FORMS),
   doc(101, 'Old policy.pdf', POLICIES, { archived: true }),
   doc(201, 'Payables checklist.xlsx', MAN, { attached: [id(3)] }),
-  doc(202, 'Retired guide.pdf', MAN, { attached: [id(8)] }),
+  doc(202, 'Retired guide.pdf', MAN, { attached: [id(8)], tags: [{ key: 'internal', value: 58 }] }),
   doc(203, 'Training handout.pdf', LIB, { trainings: ['Induction'] }),
   doc(204, 'Draft-only form.docx', LIB, { omitReference: true }),
   doc(205, 'Free notes.txt', MAN),
@@ -103,6 +103,11 @@ const docs = Object.fromEntries([
   doc(232, 'Reappeared form.docx', SHARED, { appearsOnListRead: 3 }),
 ].map((d) => [Number(d.uniqueId.slice(-3)), d]));
 const docNumber = (d) => Number(d.uniqueId.slice(-3));
+const implicitOf = (g) => {
+  const out = [];
+  for (let at = g, hops = 0; at && groups[at] && hops < 64; at = groups[at].parent, hops++) out.push(at);
+  return [...out, ROOT];
+};
 const within = (g, top) => {
   for (let at = g, hops = 0; at && hops < 64; at = groups[at]?.parent, hops++) if (at === top) return true;
   return false;
@@ -305,12 +310,16 @@ http.createServer(async (req, res) => {
     if (d.attachOnRead && d.reads >= d.attachOnRead && !d.attached.includes(d.attachTo)) d.attached.push(d.attachTo);
     return send(res, 200, {
       primaryProcessGroupId: Number(d.primary.slice(-3)),
-      associatedGroups: [d.primary, ...d.associated].map((g) => ({ key: groups[g]?.title ?? '', value: Number(g.slice(-3)) })),
+      // As captured (W9): the primary, every group above it and the root come back too, and only `associated` is real.
+      associatedGroups: [...implicitOf(d.primary), ...d.associated].map((g) => ({ key: groups[g]?.title ?? 'Example Organisation', value: Number(g.slice(-3)) })),
+      implicitlyAssociatedGroups: implicitOf(d.primary).map((g) => Number(g.slice(-3))),
+      associatedTags: d.tags ?? [], associatedSystemTags: [], isAutomatedForm: false,
       attachedProcesses: d.attached.map((u) => ({ processName: procs[u]?.name ?? '', processUniqueId: u })),
       attachedTrainings: d.trainings.map((name) => ({ name })),
       isArchived: d.archived, isPending: d.pending, documentLocationType: d.location,
-      documentName: d.name, documentType: 'Form', doOverrideDocumentReviewFreq: d.reviewOverride ?? true, documentReviewFreqMonths: d.reviewMonths ?? 12,
-      ...(d.omitReference ? {} : { referenceNo: d.referenceNo ?? `REF-${docNumber(d)}` }),
+      documentName: d.name, documentType: 'Form',
+      documentReview: { doOverrideDocumentReviewFreq: d.reviewOverride ?? true, documentReviewFreqMonths: d.reviewMonths ?? 12 },
+      ...(d.omitReference ? {} : { referenceNumber: d.referenceNo ?? `REF-${docNumber(d)}` }),
     });
   }
   if (p === '/bff/document/api/v1/documents/bulk/archive') {

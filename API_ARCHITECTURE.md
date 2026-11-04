@@ -1616,14 +1616,32 @@ Not yet measured with the bearer token the app's proxy sends.
 | Upload | `POST .../documents/upload`, multipart with `File`, `DocumentType`, `GroupId` | the new document |
 | Save properties | `POST .../documents/{id}/properties`, form incl. `PrimaryProcessGroupId`, `GroupList={"selected":[ids]}` | 204 |
 
-**Moving a document (browser capture, Nov 2026, not yet measured with a bearer token).** There
-is no move or bulk call: a move is `POST .../documents/{id}/properties` with a changed
-`PrimaryProcessGroupId`, as `multipart/form-data`. For an uploaded document the form is
-`DoOverrideDocumentReviewFreq`, `DocumentReviewFreqMonths`, `ReferenceNo`, `DocumentName`,
-`DocumentType` (a word, such as `Image`), `PrimaryProcessGroupId` (numeric) and
-`GroupList={"selected":[ids]}`. It has no file, and it is the whole record, so anything sent
-blank is presumably wiped. How those fields are named in the `GET`, the form for a linked
-document, and whether a move creates a version are not measured.
+**Moving a document (browser capture of one uploaded document, Nov 2026; not yet measured
+with a bearer token).** There is no move or bulk call: a move is
+`POST .../documents/{id}/properties` with a changed `PrimaryProcessGroupId`, as
+`multipart/form-data`. It has no file, and it is the whole record. The read and the form name
+things differently:
+
+| Form field | Read from `GET .../properties` |
+|---|---|
+| `DocumentName` | `documentName` |
+| `DocumentType` (a word, such as `Image`) | `documentType` |
+| `ReferenceNo` | `referenceNumber` |
+| `DoOverrideDocumentReviewFreq` | `documentReview.doOverrideDocumentReviewFreq` |
+| `DocumentReviewFreqMonths` | `documentReview.documentReviewFreqMonths` |
+| `PrimaryProcessGroupId` | `primaryProcessGroupId` (same numeric id) |
+| `GroupList={"selected":[ids]}` | `associatedGroups`, minus the primary and `implicitlyAssociatedGroups` |
+
+`associatedGroups` also holds the primary group and the implicit ones (on the captured document,
+the primary and the root), and that document saved `{"selected":[]}`. The read also carries
+`associatedTags`, `associatedSystemTags`, `isAutomatedForm`, `stakeholdersGroupedByType`,
+`possibleDocumentTypes` (`value` is the word; `Info` is `Information`) and
+`documentReview.lastReviewDate`, `nextReviewDueDate`, `currentReviewDueDate`.
+`GET .../{id}/history?Page&PageSize` is the document's history.
+
+Not measured: the form for a linked, tagged or automated document; a document with a real
+association; whether a save restarts the review clock or adds a version; whether owners change
+with the group.
 
 **The bulk calls answer 200 when items fail.** Each failure is an entry in `errors`.
 Codes seen: `NotArchived` (delete of an active document), `NotFound`, `ProcessAttachment`.

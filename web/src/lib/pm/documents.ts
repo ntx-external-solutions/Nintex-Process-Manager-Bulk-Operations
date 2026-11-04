@@ -137,13 +137,11 @@ export const MOVE_PENDING = 'Pending in Process Manager';
 export const MOVE_ALREADY_THERE = 'Already in that group';
 export const MOVE_LINK = 'A linked document. Its save form has not been measured, and a save without its address could lose it, so it was left alone';
 
+export const MOVE_TAGGED = 'It has tags. The save form for a tagged document has not been measured, and a save could lose them, so it was left alone';
+export const MOVE_AUTOMATED_FORM = 'An automated form. Its save form has not been measured, so it was left alone';
+
 const moveMissing = (field: string) =>
   `Its properties did not give ${field}, which a save has to send back unchanged, so it was left alone`;
-
-/** The first of these fields the answer carries, or null. */
-function firstField(raw: unknown, names: readonly string[]): string | null {
-  return names.find((name) => nodeHas(raw, name)) ?? null;
-}
 
 /**
  * The form that moves one document, or why it can't be built.
@@ -151,14 +149,20 @@ function firstField(raw: unknown, names: readonly string[]): string | null {
  * `POST .../{id}/properties` replaces the whole record, so everything but the primary
  * group has to go back as it came. A field left blank would be wiped on the tenant with a
  * success answer, and the final read can't see that: it only checks the group. So a field
- * the read didn't carry refuses the move, rather than being sent empty. The form's names
- * are from a browser capture (W9). The read's names for the reference and the review
- * frequency are that form's, camel-cased, and unmeasured until R16; if they're wrong every
- * document is skipped with this message and nothing is touched.
+ * the read didn't carry refuses the move, rather than being sent empty. Field names are
+ * from a captured read and save of one uploaded document (W9). The read and the form don't
+ * match: `referenceNumber` goes out as `ReferenceNo`, and the review fields sit under
+ * `documentReview` in the read.
  *
- * The old primary group isn't kept as an association, and the new one is taken out of the
- * associations, since a group can't be both. Link documents are refused until their form
- * is captured: the spike's create call has `Url` and `NetworkPath`, which this form hasn't.
+ * `associatedGroups` in the read is not what `GroupList` takes. It also holds the primary
+ * group and the groups in `implicitlyAssociatedGroups`: the capture read two groups, both
+ * implicit, and saved `{"selected":[]}`. Sending those back would turn a group the document
+ * only inherits into a real association, so they are taken out, along with the destination.
+ * The old primary isn't kept as an association.
+ *
+ * Refused until a capture shows their form: links (the create call has `Url` and
+ * `NetworkPath`, which this form hasn't), tagged documents (the read has tags, and the
+ * captured form, for a document with none, has no field for them) and automated forms.
  */
 export function documentMoveForm(raw: unknown, targetGroupId: number): { form: Record<string, string> } | { refused: string } {
   const props = toDocumentProperties(raw);
@@ -170,6 +174,14 @@ export function documentMoveForm(raw: unknown, targetGroupId: number): { form: R
   const location = nodeString(raw, 'documentLocationType');
   if (location === '') return { refused: moveMissing('its location type') };
   if (!/cloud|upload/i.test(location)) return { refused: MOVE_LINK };
+  if (nodeValue(raw, 'isAutomatedForm') !== false) {
+    return nodeValue(raw, 'isAutomatedForm') === true ? { refused: MOVE_AUTOMATED_FORM } : { refused: moveMissing('whether it is an automated form') };
+  }
+
+  const tags = nodeValue(raw, 'associatedTags');
+  const systemTags = nodeValue(raw, 'associatedSystemTags');
+  if (!Array.isArray(tags) || !Array.isArray(systemTags)) return { refused: moveMissing('its tags') };
+  if (tags.length > 0 || systemTags.length > 0) return { refused: MOVE_TAGGED };
 
   const name = nodeString(raw, 'documentName');
   if (name.trim() === '') return { refused: moveMissing('its name') };
@@ -178,27 +190,28 @@ export function documentMoveForm(raw: unknown, targetGroupId: number): { form: R
   const type = nodeString(raw, 'documentType');
   if (!/^[a-z]+$/i.test(type.trim())) return { refused: moveMissing('its document type') };
 
-  const referenceField = firstField(raw, ['referenceNo', 'referenceNumber']);
-  if (referenceField === null) return { refused: moveMissing('its reference number') };
+  if (!nodeHas(raw, 'referenceNumber')) return { refused: moveMissing('its reference number') };
 
-  const override = nodeValue(raw, 'doOverrideDocumentReviewFreq');
+  const review = nodeValue(raw, 'documentReview');
+  const override = nodeValue(review, 'doOverrideDocumentReviewFreq');
   if (typeof override !== 'boolean') return { refused: moveMissing('its review frequency setting') };
-  if (!nodeHas(raw, 'documentReviewFreqMonths')) return { refused: moveMissing('its review frequency') };
-  const months = nodeValue(raw, 'documentReviewFreqMonths');
+  if (!nodeHas(review, 'documentReviewFreqMonths')) return { refused: moveMissing('its review frequency') };
+  const months = nodeValue(review, 'documentReviewFreqMonths');
   if (override && !/^\d+$/.test(String(months ?? ''))) return { refused: moveMissing('its review frequency') };
 
   // Absent would read as "no associations", and the save would remove them all.
   if (nodeValue(raw, 'associatedGroups') === null) return { refused: moveMissing('its associated groups') };
   if (props.associatedGroups.some((g) => g.id === null)) return { refused: moveMissing('the id of an associated group') };
-  const selected = [...new Set(props.associatedGroups.map((g) => g.id as number))].filter(
-    (id) => id !== props.primaryGroupId && id !== targetGroupId,
-  );
+  const implicit = nodeValue(raw, 'implicitlyAssociatedGroups');
+  if (!Array.isArray(implicit)) return { refused: moveMissing('its implicit groups') };
+  const notSelected = new Set<unknown>([props.primaryGroupId, targetGroupId, ...implicit]);
+  const selected = [...new Set(props.associatedGroups.map((g) => g.id as number))].filter((id) => !notSelected.has(id));
 
   return {
     form: {
       DoOverrideDocumentReviewFreq: String(override),
       DocumentReviewFreqMonths: months === null ? '' : String(months),
-      ReferenceNo: nodeString(raw, referenceField),
+      ReferenceNo: nodeString(raw, 'referenceNumber'),
       DocumentName: name,
       DocumentType: type,
       PrimaryProcessGroupId: String(targetGroupId),
