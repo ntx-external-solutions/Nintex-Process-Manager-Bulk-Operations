@@ -6,6 +6,27 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## Beta label
+
+Commit `6c2374f` on `claude/beta-label`. JB's request, 4 Nov. It has no entry in TASKS.md.
+
+**What changed for the operator.** The browser tab reads "Bulk Operations (Beta)". A Beta badge sits
+beside the Nintex logo in the side nav, on every page, and beside the title on the home page.
+
+**Functions touched.** `AppShell.tsx`: new `BetaBadge`, using Textura's `Badge`, and `Sidebar`.
+`page.tsx`: `SITE_TITLE`. `layout.tsx`: the page title. To remove it at release, delete `BetaBadge`
+and those uses.
+
+**Results-file operations.** None.
+
+**Tests.** `npm test` in `web/`: 720 tests, 720 pass, none new. Typecheck and build clean. Checked by
+screenshot in the built app against the mock: signed out, an inner page, and the nav collapsed.
+
+**Deferred.** With the nav collapsed there's no badge, as the square logo has no room, so the inner
+pages don't show it then. The tab title still does.
+
+---
+
 ## W9c. Move documents: web links
 
 Commit `1a504a6` on `claude/w9c-move-linked-documents`, branched from W9b. It has no entry in TASKS.md: it

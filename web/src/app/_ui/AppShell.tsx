@@ -6,7 +6,7 @@
  * Mirrors Tango's and ntx-proc-demo's AppShell so the tools read as one product.
  */
 
-import { ActionHeader, Breadcrumbs, Header, MainNav, PageLayout } from '@exp-textura/react';
+import { ActionHeader, Badge, Breadcrumbs, Header, MainNav, PageLayout } from '@exp-textura/react';
 import { Archive, ArchiveBoxSolid, Delete, Documents, DocumentsSolid, FolderOpen, Home, HomeSolid, ScrewdriverWrench, Undo, Users } from '@exp-textura/icons';
 import { NintexLogo, NintexLogoSquare } from '@exp-textura/icons/brand';
 import Link from 'next/link';
@@ -14,6 +14,9 @@ import { usePathname } from 'next/navigation';
 import type { ReactNode } from 'react';
 
 const PAGE_CONTENT_ID = 'page-content';
+
+/** The app is still changing, so it says so wherever it names itself. Remove at release. */
+export const BetaBadge = () => <Badge variant="warning">Beta</Badge>;
 
 export interface Crumb {
   label: string;
@@ -103,9 +106,17 @@ function Sidebar() {
     <MainNav>
       <MainNav.Header>
         <MainNav.Brand
-          aria-label="Bulk Operations home"
+          aria-label="Bulk Operations (Beta) home"
           href="/"
-          brandImg={<NintexLogo style={{ height: 20, width: 80, display: 'block' }} />}
+          brandImg={
+            <>
+              <NintexLogo style={{ height: 20, width: 80, display: 'block', flex: 'none' }} />
+              {/* Inline, as MainNav.Brand resets the first child of each type, so a class wouldn't hold. */}
+              <span style={{ flex: 'none', marginLeft: 8 }}>
+                <BetaBadge />
+              </span>
+            </>
+          }
           squareBrandImg={<NintexLogoSquare style={{ height: 24, width: 24, display: 'block' }} />}
         />
         <MainNav.CollapseTrigger />
