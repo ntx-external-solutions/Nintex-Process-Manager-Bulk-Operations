@@ -135,7 +135,7 @@ export async function bulkDeleteDocuments(ctx: PmContext, documentIds: readonly 
 export const MOVE_ARCHIVED = 'Archived. Restore it first to move it';
 export const MOVE_PENDING = 'Pending in Process Manager';
 export const MOVE_ALREADY_THERE = 'Already in that group';
-export const MOVE_LINK = 'A linked document. Its save form has not been measured, and a save without its address could lose it, so it was left alone';
+export const MOVE_OTHER_LOCATION = 'A network file link, or a location type not seen before. Its save form has not been measured, and a save could lose its address, so it was left alone';
 
 export const MOVE_AUTOMATED_FORM = 'An automated form. Its save form has not been measured, so it was left alone';
 
@@ -176,8 +176,11 @@ const tagIds = (tags: readonly unknown[]): string[] | null => {
  * answers 204, and the UI's "remove every tag" is that same form, so the tenant has no way to
  * say "leave them as they are". A list that's empty sends no field: there's no empty value.
  *
- * Refused until a capture shows their form: links (the create call has `Url` and
- * `NetworkPath`, which this form hasn't) and automated forms.
+ * A web link (`External`) saves with this same form, with no address field, and keeps its
+ * address: `documentPath` was unchanged on the read after a captured move (W9c, 4 Nov).
+ *
+ * Refused until a capture shows their form: network file links (the create call's
+ * `NetworkPath`, and none exists on the demo tenant) and automated forms.
  */
 export function documentMoveForm(raw: unknown, targetGroupId: number): { form: Array<[string, string]> } | { refused: string } {
   const props = toDocumentProperties(raw);
@@ -187,7 +190,7 @@ export function documentMoveForm(raw: unknown, targetGroupId: number): { form: A
 
   const location = nodeString(raw, 'documentLocationType');
   if (location === '') return { refused: moveMissing('its location type') };
-  if (!/cloud|upload/i.test(location)) return { refused: MOVE_LINK };
+  if (!/cloud|upload|external/i.test(location)) return { refused: MOVE_OTHER_LOCATION };
   if (nodeValue(raw, 'isAutomatedForm') !== false) {
     return nodeValue(raw, 'isAutomatedForm') === true ? { refused: MOVE_AUTOMATED_FORM } : { refused: moveMissing('whether it is an automated form') };
   }

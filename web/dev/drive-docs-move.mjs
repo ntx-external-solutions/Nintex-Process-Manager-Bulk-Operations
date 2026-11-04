@@ -2,10 +2,11 @@
 // associated with it, upload a CSV, move everything to Other.
 // Expect: Library's documents and the ticked Shared template move, attached ones included.
 // Left out: Pending memo, until its tick; Draft-only form (its read has no reference, so a save would wipe
-// it); Supplier link (a link); Old policy (archived); an id that matches nothing. Refused by
+// it); Old policy (archived); an id that matches nothing. Refused by
 // tenant fails on its own. Every save keeps the name, reference and review frequency,
 // Shared template keeps its association with Manuals, and Retired guide moves with its two
-// tags and its system tag (W9b). Restart the mock first: this changes its state.
+// tags and its system tag (W9b), and Supplier link, a web link, moves with its address (W9c).
+// Restart the mock first: this changes its state.
 
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -50,23 +51,23 @@ await b.until(`document.body.innerText.includes('Check the plan')`, 'plan');
 await b.js(`document.querySelectorAll('details').forEach((d) => (d.open = true)); true`);
 const plan = await b.js(`document.querySelector('main').innerText`);
 console.log('--- PLAN ---\n' + plan);
-expect(/8 documents would move to Other/.test(plan), 'eight to move, to Other');
+expect(/9 documents would move to Other/.test(plan), 'nine to move, to Other');
 expect(/Payables checklist\.xlsx\s+Library \/ Manuals/.test(plan), 'an attached document is in the plan, with where it is now');
 expect(/Pending memo\.docx: Pending in Process Manager/.test(plan), 'a pending document is left out');
 expect(/Draft-only form\.docx: Its properties did not give its reference number/.test(plan), 'a record that could not be sent back whole is left out');
-expect(/Supplier link: A linked document/.test(plan), 'a link is left out');
+expect(plan.includes('Supplier link') && !/Supplier link:/.test(plan), 'a web link is in the plan and not left out');
 expect(/Retired guide\.pdf\s+Library \/ Manuals/.test(plan) && !/Retired guide\.pdf:/.test(plan), 'a tagged document is in the plan and not left out');
 expect(/Old policy\.pdf: Archived\. Restore it first/.test(plan), 'an archived document is left out');
 expect(plan.includes(`${UNKNOWN}: Document not found`), 'an unknown id is left out');
 expect((await b.sent()).filter((l) => l.startsWith('POST') && l.includes('/properties')).length === 0, 'the plan writes nothing');
 
 await b.js(`$check('Also move the pending documents')`);
-await b.until(`document.body.innerText.includes('9 documents would move to Other')`, 'the plan with the pending document');
+await b.until(`document.body.innerText.includes('10 documents would move to Other')`, 'the plan with the pending document');
 const ticked = await b.js(`document.querySelector('main').innerText`);
 expect(/Pending memo\.docx\s+Library\s+\S+\s+From the tree \(pending\)/.test(ticked), 'ticked, the pending document moves and the plan says it is pending');
 
-await b.js(`$btn('Move 9 documents')`);
-await b.js(`$btn('Yes, move 9 documents now')`);
+await b.js(`$btn('Move 10 documents')`);
+await b.js(`$btn('Yes, move 10 documents now')`);
 await b.until(`document.body.innerText.includes('Download the results')`, 'results');
 const results = await b.resultsCsv();
 console.log('--- RESULTS FILE ---\n' + results);
@@ -77,11 +78,12 @@ expect(/"UpdateLocation","Success","Moved from Finance \/ Forms to Other\."/.tes
 expect(/"UpdateLocation","Failed"/.test(rowOf(208)), 'the save the tenant refused is Failed');
 expect(/"UpdateLocation","Success"/.test(rowOf(206)), 'the pending document moved once ticked');
 expect(/"UpdateLocation","Success"/.test(rowOf(202)), 'the tagged document moved');
-for (const n of [204, 210, 101]) expect(/"UpdateLocation","Skipped"/.test(rowOf(n)), `${n} has a Skipped row`);
+expect(/"UpdateLocation","Success"/.test(rowOf(210)), 'the web link moved');
+for (const n of [204, 101]) expect(/"UpdateLocation","Skipped"/.test(rowOf(n)), `${n} has a Skipped row`);
 expect(rows.some((r) => r.includes(UNKNOWN) && r.includes('"Resolve","Skipped"')), 'the unknown id has a Resolve row');
 
 const saves = (await b.sent()).filter((l) => l.startsWith('POST') && l.includes('/properties'));
-expect(saves.length === 9 && saves.every((l) => l.includes('name="PrimaryProcessGroupId"\r\n\r\n903\r\n')), 'nine saves, each to Other');
+expect(saves.length === 10 && saves.every((l) => l.includes('name="PrimaryProcessGroupId"\r\n\r\n903\r\n')), 'ten saves, each to Other');
 const of = (n) => saves.find((l) => l.includes(`/documents/${n}/properties`)) ?? '';
 expect(/name="ReferenceNo"\r\n\r\nREF-205\r\n/.test(of(205)), 'the reference went back unchanged');
 expect(/name="DocumentReviewFreqMonths"\r\n\r\n12\r\n/.test(of(205)), 'the review frequency went back unchanged');
@@ -95,4 +97,7 @@ expect(!of(205).includes('AssociatedTags') && !of(205).includes('AssociatedSyste
 const after = await (await fetch('http://localhost:4999/tenant/bff/document/api/v1/documents/202/properties', { headers: { Authorization: 'Bearer tok' } })).json();
 expect(JSON.stringify(after.associatedTags) === JSON.stringify([{ key: 'internal', value: 58 }, { key: 'legacy', value: 59 }]), 'both tags read back unchanged');
 expect(JSON.stringify(after.associatedSystemTags) === JSON.stringify([{ key: 'Payroll', value: 71 }]), 'the system tag reads back unchanged');
+const link = await (await fetch('http://localhost:4999/tenant/bff/document/api/v1/documents/210/properties', { headers: { Authorization: 'Bearer tok' } })).json();
+expect(link.documentPath === 'https://example.test/supplier' && link.documentLocationType === 'External' && link.primaryProcessGroupId === 903, 'the web link is in Other with its address');
+expect(!/name="(Url|NetworkPath)"/.test(of(210)), 'the save carries no address field, as the browser’s did');
 b.close();

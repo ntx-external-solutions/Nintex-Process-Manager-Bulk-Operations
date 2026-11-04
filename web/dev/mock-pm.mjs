@@ -95,7 +95,7 @@ const docs = Object.fromEntries([
   doc(207, 'Late attachment.pdf', LIB, { attachOnRead: 2, attachTo: id(1) }),
   doc(208, 'Refused by tenant.pdf', LIB, { refuseArchive: 'Locked', refuseSave: true }),
   doc(209, 'Shared template.docx', SHARED, { associated: [MAN] }),
-  doc(210, 'Supplier link', SHARED, { location: 'External' }),
+  doc(210, 'Supplier link', SHARED, { location: 'External', url: 'https://example.test/supplier' }),
   doc(211, 'Archived manual.pdf', MAN, { archived: true }),
   doc(212, 'Obsolete form.docx', OLDF),
   // Free at the plan and at the archive's re-check; attached to Elsewhere by the delete's.
@@ -351,7 +351,7 @@ http.createServer(async (req, res) => {
       associatedTags: d.tags ?? [], associatedSystemTags: d.systemTags ?? [], isAutomatedForm: false,
       attachedProcesses: d.attached.map((u) => ({ processName: procs[u]?.name ?? '', processUniqueId: u })),
       attachedTrainings: d.trainings.map((name) => ({ name })),
-      isArchived: d.archived, isPending: d.pending, documentLocationType: d.location,
+      isArchived: d.archived, isPending: d.pending, documentLocationType: d.location, documentPath: d.url ?? null,
       documentName: d.name, documentType: 'Form',
       documentReview: { doOverrideDocumentReviewFreq: d.reviewOverride ?? true, documentReviewFreqMonths: d.reviewMonths ?? 12 },
       ...(d.omitReference ? {} : { referenceNumber: d.referenceNo ?? `REF-${docNumber(d)}` }),

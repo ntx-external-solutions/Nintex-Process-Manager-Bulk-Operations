@@ -11,7 +11,7 @@ import {
   MOVE_ALREADY_THERE,
   MOVE_ARCHIVED,
   MOVE_AUTOMATED_FORM,
-  MOVE_LINK,
+  MOVE_OTHER_LOCATION,
   MOVE_PENDING,
   moveDocument,
   type DocumentMoveAnswer,
@@ -168,10 +168,10 @@ test('values a save could not send back faithfully refuse it too', () => {
   }
 });
 
-test('archived, pending, already there and linked documents are refused by name', () => {
+test('archived, already there and network-linked documents are refused by name', () => {
   assert.deepEqual(documentMoveForm(record({ isArchived: true }), 77), { refused: MOVE_ARCHIVED });
   assert.deepEqual(documentMoveForm(record({ primaryProcessGroupId: 77 }), 77), { refused: MOVE_ALREADY_THERE });
-  assert.deepEqual(documentMoveForm(record({ documentLocationType: 'External' }), 77), { refused: MOVE_LINK });
+  assert.deepEqual(documentMoveForm(record({ documentLocationType: 'Network' }), 77), { refused: MOVE_OTHER_LOCATION });
 });
 
 test('an automated form refuses the move: the captured form has no field for one', () => {
@@ -211,6 +211,18 @@ test('tags go back as one field per id after GroupList, in the order the browser
 test('a document with only a system tag sends only that field, as the browser did moving one', () => {
   const built = documentMoveForm(plain({ associatedSystemTags: [{ key: 'system', value: 201 }] }), 77);
   assert.deepEqual(built, { form: [...baseForm, ['AssociatedSystemTags', '201']] });
+});
+
+test('a web link saves the same form as an upload, with no address field (W9c)', () => {
+  const link = plain({ documentLocationType: 'External', documentPath: 'https://example.test/page', documentExtension: '', documentType: 'Guide' });
+  const expected = baseForm.map(([name, value]) => [name, name === 'DocumentType' ? 'Guide' : value]);
+  assert.deepEqual(documentMoveForm(link, 77), { form: expected });
+});
+
+test('a web link keeps its tags too: the tag fields do not depend on the location', () => {
+  const built = documentMoveForm(plain({ documentLocationType: 'External', associatedTags: [{ key: 'one', value: 101 }] }), 77);
+  assert.ok('form' in built);
+  assert.equal(fieldOf(built.form, 'AssociatedTags'), '101');
 });
 
 test('a document with no tags sends no tag field at all, not an empty one (W9b A6)', () => {
@@ -293,7 +305,7 @@ test('the plan moves what can be saved, attached or not, and says why the rest s
     [3, record()],
     [4, record()],
     [5, without('referenceNumber')],
-    [7, record({ documentLocationType: 'External' })],
+    [7, record({ documentLocationType: 'Network' })],
   ]);
   const reads = await readForMove(docs.map(chosen), async (id) => {
     if (!answers.has(id)) throw new Error('500');
@@ -308,7 +320,7 @@ test('the plan moves what can be saved, attached or not, and says why the rest s
     ['Doc 4', 'UpdateLocation', 'Skipped', MOVE_ALREADY_THERE],
     ['Doc 5', 'UpdateLocation', 'Skipped', 'Its properties did not giv'],
     ['Doc 6', 'UpdateLocation', 'Skipped', 'Could not read it (500), s'],
-    ['Doc 7', 'UpdateLocation', 'Skipped', MOVE_LINK.slice(0, 26)],
+    ['Doc 7', 'UpdateLocation', 'Skipped', MOVE_OTHER_LOCATION.slice(0, 26)],
   ]);
   const preview = movePreviewRows(plan).at(-1)!;
   assert.equal(preview.status, 'Preview');
@@ -318,7 +330,7 @@ test('the plan moves what can be saved, attached or not, and says why the rest s
 test('pending documents stay out until the operator opts in, and then only those a save can send back', async () => {
   const docs = [entry(1), entry(2, { isPending: true }), entry(3, { isPending: true }), entry(4, { isPending: true, isArchived: true }), entry(5, { isPending: true })];
   const read = async (id: number) => {
-    if (id === 3) return record({ documentLocationType: 'External' });
+    if (id === 3) return record({ documentLocationType: 'Network' });
     if (id === 5) return record({ associatedTags: [{ key: 'tag', value: 1 }] });
     return record();
   };
@@ -333,7 +345,7 @@ test('pending documents stay out until the operator opts in, and then only those
   const on = buildDocumentMovePlan({ ...input, includePending: true });
   // Doc 5 is the W9b change: a pending document with tags was refused for its tags until now.
   assert.deepEqual(on.targets.map((t) => [t.name, t.chosen]), [['Doc 1', CHOSEN_BY_ID], ['Doc 2', `${CHOSEN_BY_ID} (pending)`], ['Doc 5', `${CHOSEN_BY_ID} (pending)`]]);
-  assert.deepEqual(on.skipped.map((r) => r.message), [MOVE_LINK, MOVE_ARCHIVED]);
+  assert.deepEqual(on.skipped.map((r) => r.message), [MOVE_OTHER_LOCATION, MOVE_ARCHIVED]);
 });
 
 test('a dead session while reading ends the plan', async () => {
