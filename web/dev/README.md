@@ -28,6 +28,7 @@ node dev/drive-delete-resume.mjs  # the session dies mid-run; sign in again and 
 node dev/drive-delete-group.mjs    # delete by group: a checked group's archived processes too, then delete the emptied group
 node dev/drive-delete-archived.mjs # the archived list and ids as ways in, as a dry run: writes nothing
 node dev/drive-delete-refused.mjs  # the tenant refuses an active target's delete: Archive row, versions, active again
+node dev/drive-delete-links.mjs    # link order (F8): a backwards chain, a cycle edited first, a hidden link retried, a group-tied target held back
 node dev/drive-docs-archive.mjs    # Archive documents by group, list and CSV: holders skipped, re-check, errors in a 200 (W8a)
 node dev/drive-docs-delete.mjs     # Delete documents: archive first, typed DELETE, re-check, put back, cleanup (W8b)
 node dev/drive-docs-restore.mjs    # Restore documents from the archived list and a Delete results file (W8c)

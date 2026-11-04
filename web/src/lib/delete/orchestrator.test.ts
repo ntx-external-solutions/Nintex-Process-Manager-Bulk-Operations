@@ -574,7 +574,7 @@ test('an archived target the tenant refuses to delete goes home archived, with t
   });
   const { rows } = await run(tenant);
 
-  assert.match(rowsOf(rows, 'Delete')[0]?.message ?? '', /Still referenced by: Order intake/);
+  assert.match(rowsOf(rows, 'Delete')[0]?.message ?? '', /Still referenced by: processes: Order intake/);
   assert.equal(rowsOf(rows, 'Delete')[0]?.statusCode, '500');
   assert.equal(tenant.callsTo('deleteProcess').length, 1);
   assert.equal(tenant.isArchived(T1), true);

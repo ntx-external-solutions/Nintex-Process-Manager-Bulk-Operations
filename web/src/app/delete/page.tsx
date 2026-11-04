@@ -41,7 +41,7 @@ import { confirmArchivedOrphans, findOrphanedGroupProcesses, groupExistsCoverage
 import { orphanedTargetWarningLines } from '@/lib/delete/holdingGroup.ts';
 import { parsePlan, serializePlan, type DependencyPlan, type DraftHolder } from '@/lib/delete/ledger.ts';
 import type { DeleteIndex } from '@/lib/delete/model.ts';
-import { buildDeletePlan, loadDeleteIndex, planSummaryLines } from '@/lib/delete/planner.ts';
+import { buildDeletePlan, linkPlanLines, loadDeleteIndex, planSummaryLines } from '@/lib/delete/planner.ts';
 import {
   applyVariationSets,
   deletePlacements,
@@ -118,6 +118,7 @@ const STAGE_TEXT: Record<DeleteStage, string> = {
   'checking-collateral': 'Checking the tenant for processes that changed without being targets',
   'building-plan': 'Building the plan, with the archive restored',
   'removing-references': 'Checking each holder for open drafts, then removing references from the processes that hold them',
+  'breaking-link-cycles': 'Removing the links between targets that link to each other in a loop',
   verifying: 'Reading each edited process back to check nothing is left',
   'archiving-targets': 'Archiving the active targets before deleting them',
   'deleting-targets': 'Deleting the targets',
@@ -685,6 +686,7 @@ function PlanView({
   const deleteOnly = selection.targets.filter((t) => t.phase === 'delete');
   const needsReview = variations.length > 0 || unreadSets.length > 0;
   const holders = previewHolders(plan, preview.index);
+  const linkLines = linkPlanLines(plan, preview.index);
   const toggleSet = (setId: number, on: boolean) => {
     const next = new Set(preview.include);
     if (on) next.add(setId);
@@ -763,6 +765,13 @@ function PlanView({
               </li>
             ))}
           </ul>
+        </div>
+      )}
+
+      {linkLines.length > 0 && (
+        <div className="panel">
+          <h2>Links between targets, and to groups</h2>
+          <pre className="plan-text">{linkLines.join('\n')}</pre>
         </div>
       )}
 

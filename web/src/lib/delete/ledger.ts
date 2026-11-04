@@ -17,6 +17,7 @@ import type { ResultRow } from '../exec/report.ts';
 import type { DependencyClaim, HolderWorkItem, Reconciliation } from './claims.ts';
 import type { CollateralChange } from './collateral.ts';
 import type { GroupRef } from './gateway.ts';
+import type { GroupBlock, LinkEdge } from './linkOrder.ts';
 import { nodeInt, nodeString, type DeleteIndex, type ProcessModel } from './model.ts';
 import type { ReferenceSite } from './references.ts';
 import { readGroupExists } from '../select/archived.ts';
@@ -382,6 +383,20 @@ export interface DependencyPlan {
    * read; this is what the preview asks the operator about. Absent in older plan files.
    */
   draftHolders?: DraftHolder[];
+  /**
+   * The order to send the deletes in: holders before what they link to (F8), recorded so a
+   * run working from a saved plan uses the same one. Absent in older plan files, which
+   * delete in `targetUniqueIds` order.
+   */
+  deleteOrder?: string[];
+  /** The links between targets `deleteOrder` was worked out from, without those a cycle edit removes. */
+  linkEdges?: LinkEdge[];
+  /** Groups of targets linking to each other in a loop (F8). */
+  linkCycles?: string[][];
+  /** Each cycle member and the links to other members it has removed before the archive pass. */
+  cycleWorkItems?: HolderWorkItem[];
+  /** Targets the dependency check ties to a process group (F8). */
+  groupBlocks?: GroupBlock[];
 }
 
 /** An empty `Draft` plan. Port of `New-DependencyPlan`. */

@@ -301,6 +301,9 @@ export interface DraftCheck {
 
 const draftReason = (name: string) => `${name} has an unpublished draft; removing its reference would publish it`;
 
+const groupHoldReason = (groups: readonly string[]) =>
+  `The tenant ties it to the process group ${groups.join(', ')}, and it holds no group link itself, so the link is somewhere this run can't edit (a group overview is the likely place)`;
+
 /**
  * Every holder's write state, reads only (Cowork's review of W5 phase 6). Deciding at
  * edit time meant a clean holder earlier in the list lost its link to a target that a
@@ -310,7 +313,7 @@ const draftReason = (name: string) => `${name} has an unpublished draft; removin
  */
 export async function checkHolderDrafts(
   gateway: Pick<DeleteGateway, 'readModel'>,
-  plan: Pick<DependencyPlan, 'workItems' | 'ledger' | 'claims'>,
+  plan: Pick<DependencyPlan, 'workItems' | 'ledger' | 'claims'> & Partial<Pick<DependencyPlan, 'groupBlocks' | 'linkEdges'>>,
   options: EngineOptions & { publishDrafts?: readonly string[] | undefined; onEvent?: DeleteEventSink | undefined } = {},
 ): Promise<DraftCheck> {
   const isFatal = options.isFatal ?? defaultIsFatal;
@@ -319,7 +322,15 @@ export async function checkHolderDrafts(
   const nameOf = (uniqueId: string) => recordOf(uniqueId)?.name || resolveClaimName(plan.claims, uniqueId);
   const heldBack: HeldBackTarget[] = [];
   const held = new Set<string>();
+  const hold = (target: string, holderUniqueId: string, reason: string) => {
+    if (held.has(target.toLowerCase())) return;
+    held.add(target.toLowerCase());
+    heldBack.push({ targetUniqueId: target, holderUniqueId, reason });
+  };
   const refused: string[] = [];
+  for (const block of plan.groupBlocks ?? []) {
+    if (block.linkInModel === false) hold(block.targetUniqueId, '', groupHoldReason(block.groups));
+  }
   for (const [i, item] of plan.workItems.entries()) {
     options.onEvent?.({ kind: 'progress', label: 'Checking holders for open drafts', done: i + 1, total: plan.workItems.length });
     if (ticked.has(item.holderUniqueId.toLowerCase())) continue;
@@ -345,10 +356,18 @@ export async function checkHolderDrafts(
     }
     if (!openDraft) continue;
     refused.push(item.holderUniqueId);
-    for (const target of item.targetsAffected) {
-      if (held.has(target.toLowerCase())) continue;
-      held.add(target.toLowerCase());
-      heldBack.push({ targetUniqueId: target, holderUniqueId: item.holderUniqueId, reason: draftReason(nameOf(item.holderUniqueId)) });
+    for (const target of item.targetsAffected) hold(target, item.holderUniqueId, draftReason(nameOf(item.holderUniqueId)));
+  }
+
+  // A kept target still links to whatever it links to, so the tenant will refuse those as
+  // well. Holding them now spares each one the archive and restore, and spares anything
+  // holding them the removal of a reference to a process that is staying (W5 phase 6).
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const { holderUniqueId: holder, targetUniqueId: target } of plan.linkEdges ?? []) {
+      if (!held.has(holder.toLowerCase()) || held.has(target.toLowerCase())) continue;
+      hold(target, holder, `${nameOf(holder)} links to it and is being kept`);
+      grew = true;
     }
   }
   return { heldBack, refusedHolderIds: refused };
@@ -538,6 +557,117 @@ export async function removePlanReferences(
   return { results, verificationFailed, heldBack };
 }
 
+/** A cycle member whose links to other members were removed, as far as the save got. */
+export interface CycleEdit {
+  uniqueId: string;
+  stage: SaveStage;
+}
+
+export interface CycleBreakRun {
+  /** One `RemoveReferences` row per cycle member. */
+  results: ResultRow[];
+  edited: CycleEdit[];
+}
+
+/**
+ * Removes the links between targets that link to each other in a loop, so the delete order
+ * works (F8). One read, one save and one publish per member, as for a holder, and only
+ * the links inside the loop. Run after the verification gate, so a run that stops there
+ * has edited no target.
+ *
+ * Not verified as holders are: a link left here can't dangle, because the tenant refuses
+ * the delete and the row says why. An open draft goes live without asking, since the
+ * process is about to be deleted, and the row says so. What a member still links to that
+ * is being kept is left, as the link goes with this process.
+ */
+export async function breakLinkCycles(
+  gateway: DeleteGateway,
+  plan: DependencyPlan,
+  options: EngineOptions & {
+    changeDescription?: string | undefined;
+    heldBack?: readonly HeldBackTarget[] | undefined;
+    onEvent?: DeleteEventSink | undefined;
+  } = {},
+): Promise<CycleBreakRun> {
+  const isFatal = options.isFatal ?? defaultIsFatal;
+  const results = reportingRows(options.onRow);
+  const edited: CycleEdit[] = [];
+  const work = plan.cycleWorkItems ?? [];
+  if (work.length === 0) return { results, edited };
+  options.onEvent?.({ kind: 'stage', stage: 'breaking-link-cycles' });
+
+  const kept = new Set((options.heldBack ?? []).map((h) => h.targetUniqueId.toLowerCase()));
+  const recordOf = (uniqueId: string) => plan.ledger.find((r) => r.uniqueId.toLowerCase() === uniqueId.toLowerCase());
+  const nameOf = (uniqueId: string) => recordOf(uniqueId)?.name || resolveClaimName(plan.claims, uniqueId);
+  // "May": one member's links gone can be enough, and the retry finds that out.
+  const CYCLE_STANDS = 'Its links remain, so the tenant may refuse the targets in this cycle';
+
+  for (const [i, item] of work.entries()) {
+    options.onEvent?.({ kind: 'progress', label: 'Breaking link cycles', done: i + 1, total: work.length });
+    const id = item.holderUniqueId;
+    const record = recordOf(id);
+    const row = (status: string, message: string, statusCode?: number | null) =>
+      resultRow({ objectId: id, name: nameOf(id), operation: 'RemoveReferences', status, message, groupId: record?.originalGroupId ?? null, statusCode });
+
+    const deleting = item.targetsAffected.filter((t) => !kept.has(t.toLowerCase()));
+    if (deleting.length === 0) {
+      results.push(row('Skipped', 'Not edited to break a link cycle: the targets it links to in the cycle are being kept'));
+      continue;
+    }
+
+    // Read fresh for the edit, as for a holder.
+    let read: ActiveRead | null = null;
+    let reason = 'it is archived';
+    let status = 0;
+    try {
+      read = await gateway.readModel(id);
+    } catch (error) {
+      if (isFatal(error)) throw error;
+      const failure = failureOf(error);
+      reason = failure.detail ?? failure.error;
+      status = failure.status;
+    }
+    if (read?.kind !== 'model') {
+      results.push(row('Failed', `Could not fetch process to break a link cycle (${reason}). ${CYCLE_STANDS}`, status));
+      continue;
+    }
+
+    const removal = removeProcessReferences(read.model, deleting);
+    if (removal.referencesRemoved === 0 || !removal.cleaned) {
+      results.push(row('Skipped', 'No links to the other targets found at edit time (already removed?)'));
+      continue;
+    }
+
+    // The Hold phase's restore opened this revision, as for a restored holder (R13).
+    // Archiving publishes (R14), so what it sits over is published.
+    const restored = record?.restoredByThisRun ? (record.revisionBeforeRestore ?? { openDraft: false, publishedVersionExists: true }) : undefined;
+    const save = await saveProcessModel(gateway, id, removal.cleaned, {
+      processActions: read.processActions,
+      changeDescription: options.changeDescription,
+      approvalsEnabled: options.approvalsEnabled ?? true,
+      publishOpenDraft: true,
+      restoredWithoutDraft: restored && !restored.openDraft ? restored : undefined,
+      suppressChangeNotification: true,
+      isFatal,
+    });
+    if (!save.success) {
+      const what = save.stage === 'Refused' ? `Not saved: ${save.error ?? ''}` : `${save.stage} failed: ${save.error ?? ''}`.trimEnd();
+      results.push(row('Failed', `${what}. ${CYCLE_STANDS}`, save.statusCode));
+      continue;
+    }
+    edited.push({ uniqueId: id, stage: save.stage });
+    const staying = kept.has(id.toLowerCase());
+    const draft = save.draftPublished ? `; its open draft went live with the removal${staying ? '' : ', which is fine as it is about to be deleted'}` : '';
+    results.push(
+      row(
+        'Success',
+        `Edited to break a link cycle between targets: removed ${removal.referencesRemoved} reference(s) to ${deleting.map(nameOf).join(', ')}, ${save.stage}${draft}${staying ? '. It is being kept, so it stays without those links' : ''}`,
+      ),
+    );
+  }
+  return { results, edited };
+}
+
 export type { CollateralGate } from './collateral.ts';
 
 export interface TargetDeletionOptions extends EngineOptions {
@@ -554,7 +684,22 @@ export interface TargetDeletionOptions extends EngineOptions {
   acceptanceAuthority?: string | undefined;
   /** From `removePlanReferences`: targets neither archived nor deleted, each with its reason. */
   heldBack?: readonly HeldBackTarget[] | undefined;
+  /** From `breakLinkCycles`: a member that then isn't deleted has its row say what it lost. */
+  cycleEdited?: readonly CycleEdit[] | undefined;
   onEvent?: DeleteEventSink | undefined;
+}
+
+/** How many times the deletes go round: the first, then each pass that follows a delete (F8). */
+export const MAX_DELETE_PASSES = 5;
+
+/** A delete the tenant refused, as last answered. */
+interface DeleteRefusal {
+  target: string;
+  error: unknown;
+  status: number;
+  attempts: number;
+  /** How many deletes the run had made when this came back: only a later one can have freed it. */
+  deletionsBefore: number;
 }
 
 export const PRE_DELETE_ARCHIVE_COMMENT = 'Pre-delete archive';
@@ -576,31 +721,22 @@ export async function deletePlanTargets(
   const isFatal = options.isFatal ?? defaultIsFatal;
   const results = reportingRows(options.onRow);
   const targets = plan.targetUniqueIds;
+  const order = deleteOrderOf(plan);
   const recordOf = (uniqueId: string) => plan.ledger.find((r) => r.uniqueId.toLowerCase() === uniqueId.toLowerCase());
   const nameOf = (uniqueId: string) => recordOf(uniqueId)?.name || resolveClaimName(plan.claims, uniqueId);
   const heldBack = new Map((options.heldBack ?? []).map((h) => [h.targetUniqueId.toLowerCase(), h]));
+  const cycleEdits = new Map((options.cycleEdited ?? []).map((e) => [e.uniqueId.toLowerCase(), e]));
+  // It survives without those links, and nothing puts them back, so its row has to say so.
+  const cycleNote = (target: string): string => {
+    const edit = cycleEdits.get(target.toLowerCase());
+    if (!edit) return '';
+    return `Its links to the other targets in the cycle were removed and ${edit.stage === 'Published' ? 'published' : 'saved, not published'}, and it stays without them`;
+  };
   const archiveOptions: ArchiveOptions = { approvalOverride: options.approvalsEnabled ?? true, isFatal };
   const log = (line: string) => {
     plan.log.push(line);
     options.onEvent?.({ kind: 'log', line });
   };
-
-  options.onEvent?.({ kind: 'stage', stage: 'archiving-targets' });
-  for (const [i, target] of targets.entries()) {
-    options.onEvent?.({ kind: 'progress', label: 'Archiving targets', done: i + 1, total: targets.length });
-    const record = recordOf(target);
-    if (heldBack.has(target.toLowerCase())) continue;
-    if (record?.wasArchived && !record.restoredByThisRun) continue;
-    const archive = await archiveOne(gateway, target, PRE_DELETE_ARCHIVE_COMMENT, archiveOptions);
-    // An unwind path is where a silent failure does the most damage, so the reason is
-    // logged. The delete still goes ahead and the checkpoint reads the tenant, because
-    // ArchiveProcess can report failure and take effect anyway.
-    if (!archive.success) log(`${nameOf(target)} (${target}) could not be archived before deletion: ${archive.message}`);
-    // An active target gets its own row for the archive (R14: it had only a Delete row,
-    // and archiving publishes a new major version). A target the Hold restored is going
-    // back to the state the run found it in, so its Delete row is the whole story.
-    if (record && !record.wasArchived) results.push(preDeleteArchiveRow(target, nameOf(target), record.originalGroupId, archive));
-  }
 
   // Everything the run changed on purpose: the targets, and every holder it restored.
   const expected = [...targets, ...plan.ledger.filter((r) => r.restoredByThisRun).map((r) => r.uniqueId)];
@@ -621,63 +757,155 @@ export async function deletePlanTargets(
     return found;
   };
 
-  if (options.tenantBaseline) {
-    options.onEvent?.({ kind: 'stage', stage: 'checking-collateral' });
-    // The script dropped a failed holding-group read here without a word. Logged now.
-    const collateral = await checkpoint('after archive phase', (error) =>
-      log(`Could not list what the run left in the holding group before deleting: ${failureOf(error).error}`),
-    );
-    if (collateral.length > 0) {
-      options.onEvent?.({ kind: 'collateral', phase: PRE_DELETE_PHASE, collateral });
-      const decision = await decideCollateral(collateral, PRE_DELETE_PHASE, { gate: options.onCollateral });
-      const authority = options.acceptanceAuthority ?? ACCEPTANCE_AUTHORITY.atGate;
-      options.onEvent?.({
-        kind: 'collateralDecision',
-        phase: PRE_DELETE_PHASE,
-        accepted: decision.proceed,
-        authority: decision.proceed ? authority : null,
-        count: collateral.length,
-      });
-      // An unwanted archive can be undone; a delete cannot. So no gate means stop.
-      if (!decision.proceed) {
-        results.push(...decision.rows);
-        return results;
-      }
-      results.push(...collateralAcceptanceRows(collateral, PRE_DELETE_PHASE, authority));
-    }
-  }
-
-  options.onEvent?.({ kind: 'stage', stage: 'deleting-targets' });
-  for (const [i, target] of targets.entries()) {
-    options.onEvent?.({ kind: 'progress', label: 'Deleting targets', done: i + 1, total: targets.length });
+  /**
+   * Row words for a refused delete. Worked out when it is written, not when it was
+   * refused: the ids a name can mean depend on what the run has deleted by then.
+   */
+  const refusalMessage = (refusal: DeleteRefusal, label: (name: string) => string): string => {
+    const words = deleteRefusalText(refusal.error, label);
+    const resent = refusal.attempts > 1 ? `. Sent ${refusal.attempts} times, refused each time` : '';
+    const cycle = cycleNote(refusal.target);
+    return `Delete failed (HTTP ${refusal.status})${words ? `: ${words}` : ''}${resent}${cycle ? `. ${cycle}` : ''}`;
+  };
+  const deleteRow = (target: string, status: string, message: string, statusCode?: number | null) => {
     const record = recordOf(target);
-    const row = (status: string, message: string, statusCode?: number | null) =>
-      resultRow({ objectId: target, name: nameOf(target), operation: 'Delete', status, message, groupId: record?.originalGroupId ?? null, statusCode });
+    return resultRow({ objectId: target, name: nameOf(target), operation: 'Delete', status, message, groupId: record?.originalGroupId ?? null, statusCode });
+  };
 
-    const held = heldBack.get(target.toLowerCase());
-    if (held) {
-      results.push(row('Skipped', `Not deleted: ${held.reason}`));
-      continue;
-    }
+  /** An archive that failed gets its row once the delete has answered: see `preDeleteArchiveRow`. */
+  const unsettledArchives = new Map<string, ArchiveOutcome>();
+  const settleArchive = (target: string, delete_: DeleteAfterArchive) => {
+    const archive = unsettledArchives.get(target.toLowerCase());
+    if (!archive) return;
+    unsettledArchives.delete(target.toLowerCase());
+    results.push(preDeleteArchiveRow(target, nameOf(target), recordOf(target)?.originalGroupId ?? null, archive, delete_));
+  };
+  const settleArchives = (delete_: DeleteAfterArchive) => {
+    for (const target of targets) settleArchive(target, delete_);
+  };
+
+  const refused = new Map<string, DeleteRefusal>();
+  let deletions = 0;
+  const sendDelete = async (target: string, pass: number) => {
+    const record = recordOf(target);
+    const key = target.toLowerCase();
     try {
       await gateway.deleteProcess(target, record?.originalGroupUniqueId || null);
     } catch (error) {
       if (isFatal(error)) throw error;
-      // Never resent (the write policy): a refusal is the tenant's answer, not a fault.
-      const status = failureOf(error).status;
-      const refusal = deleteRefusalText(error);
-      let message = `Delete failed (HTTP ${status})${refusal ? `: ${refusal}` : ''}`;
-      // The tenant answered, so it is still there. An archived target goes home with the
-      // unwind as a held-back one does; an active one the archive pass archived is made
-      // active again in its own group, which is where a held-back active target stays.
-      if (status > 0 && record && !record.wasArchived) message += await returnActiveTarget(gateway, target, record.originalGroupId, isFatal);
-      results.push(row('Failed', message, status > 0 ? status : null));
-      continue;
+      refused.set(key, {
+        target,
+        error,
+        status: failureOf(error).status,
+        attempts: (refused.get(key)?.attempts ?? 0) + 1,
+        deletionsBefore: deletions,
+      });
+      return;
     }
+    refused.delete(key);
+    deletions++;
     // So the unwind does not try to re-archive something that no longer exists: before
     // the Hold phase a target IS an archived process this run restored.
     if (record) record.deleted = true;
-    results.push(row('Success', 'Deleted'));
+    settleArchive(target, 'deleted');
+    results.push(deleteRow(target, 'Success', pass === 1 ? 'Deleted' : `Deleted on pass ${pass}, after the processes linking to it were deleted`));
+  };
+
+  try {
+    options.onEvent?.({ kind: 'stage', stage: 'archiving-targets' });
+    for (const [i, target] of targets.entries()) {
+      options.onEvent?.({ kind: 'progress', label: 'Archiving targets', done: i + 1, total: targets.length });
+      const record = recordOf(target);
+      if (heldBack.has(target.toLowerCase())) continue;
+      if (record?.wasArchived && !record.restoredByThisRun) continue;
+      const archive = await archiveOne(gateway, target, PRE_DELETE_ARCHIVE_COMMENT, archiveOptions);
+      // An unwind path is where a silent failure does the most damage, so the reason is
+      // logged. The delete still goes ahead and the checkpoint reads the tenant, because
+      // ArchiveProcess can report failure and take effect anyway.
+      if (!archive.success) log(`${nameOf(target)} (${target}) could not be archived before deletion: ${archive.message}`);
+      // An active target gets its own row for the archive (R14: it had only a Delete row,
+      // and archiving publishes a new major version). A target the Hold restored is going
+      // back to the state the run found it in, so its Delete row is the whole story.
+      if (!record || record.wasArchived) continue;
+      if (archive.success) results.push(preDeleteArchiveRow(target, nameOf(target), record.originalGroupId, archive, 'sent'));
+      else unsettledArchives.set(target.toLowerCase(), archive);
+    }
+
+    if (options.tenantBaseline) {
+      options.onEvent?.({ kind: 'stage', stage: 'checking-collateral' });
+      // The script dropped a failed holding-group read here without a word. Logged now.
+      const collateral = await checkpoint('after archive phase', (error) =>
+        log(`Could not list what the run left in the holding group before deleting: ${failureOf(error).error}`),
+      );
+      if (collateral.length > 0) {
+        options.onEvent?.({ kind: 'collateral', phase: PRE_DELETE_PHASE, collateral });
+        const decision = await decideCollateral(collateral, PRE_DELETE_PHASE, { gate: options.onCollateral });
+        const authority = options.acceptanceAuthority ?? ACCEPTANCE_AUTHORITY.atGate;
+        options.onEvent?.({
+          kind: 'collateralDecision',
+          phase: PRE_DELETE_PHASE,
+          accepted: decision.proceed,
+          authority: decision.proceed ? authority : null,
+          count: collateral.length,
+        });
+        // An unwanted archive can be undone; a delete cannot. So no gate means stop.
+        if (!decision.proceed) {
+          settleArchives('not-sent');
+          results.push(...decision.rows);
+          return results;
+        }
+        results.push(...collateralAcceptanceRows(collateral, PRE_DELETE_PHASE, authority));
+      }
+    }
+
+    options.onEvent?.({ kind: 'stage', stage: 'deleting-targets' });
+    for (const [i, target] of order.entries()) {
+      options.onEvent?.({ kind: 'progress', label: 'Deleting targets', done: i + 1, total: order.length });
+      const held = heldBack.get(target.toLowerCase());
+      if (held) {
+        const cycle = cycleNote(target);
+        results.push(deleteRow(target, 'Skipped', `Not deleted: ${held.reason}${cycle ? `. ${cycle}` : ''}`));
+        continue;
+      }
+      await sendDelete(target, 1);
+    }
+
+    // A refusal is the tenant's answer, so the write policy says never to resend one, but
+    // that answer was about a tenant that has since changed: every process deleted after
+    // it may have been what held it. This is the safety net for links the plan could not
+    // see (same-name copies, hidden Inputs and Outputs, variations). Status 0 is left out,
+    // since nothing says the tenant ever answered.
+    for (let pass = 2; pass <= MAX_DELETE_PASSES; pass++) {
+      const due = [...refused.values()].filter((r) => r.status > 0 && r.deletionsBefore < deletions);
+      if (due.length === 0) break;
+      for (const [i, refusal] of due.entries()) {
+        options.onEvent?.({ kind: 'progress', label: `Sending refused deletes again, pass ${pass}`, done: i + 1, total: due.length });
+        await sendDelete(refusal.target, pass);
+      }
+    }
+  } catch (error) {
+    // The run is over, and a row is all that is left to say what the delete got to.
+    const label = refusalLabeller(plan, options.tenantBaseline);
+    settleArchives('not-sent');
+    for (const refusal of refused.values()) {
+      const status = refusal.status;
+      results.push(deleteRow(refusal.target, 'Failed', `${refusalMessage(refusal, label)}. The run ended before it could be sent again or put back`, status > 0 ? status : null));
+    }
+    throw error;
+  }
+
+  // Only now is a refusal final, so only now does a target go back where it was.
+  const label = refusalLabeller(plan, options.tenantBaseline);
+  for (const refusal of refused.values()) {
+    const { target, status } = refusal;
+    const record = recordOf(target);
+    settleArchive(target, 'refused');
+    let message = refusalMessage(refusal, label);
+    // The tenant answered, so it is still there. An archived target goes home with the
+    // unwind as a held-back one does; an active one the archive pass archived is made
+    // active again in its own group, which is where a held-back active target stays.
+    if (status > 0 && record && !record.wasArchived) message += await returnActiveTarget(gateway, target, record.originalGroupId, isFatal);
+    results.push(deleteRow(target, 'Failed', message, status > 0 ? status : null));
   }
 
   // The variation coupling fires on DELETE, not on restore or archive (measured), so the
@@ -700,14 +928,55 @@ export async function deletePlanTargets(
   return results;
 }
 
+/** The plan's targets in delete order. A plan from before F8, or a target the order doesn't list, keeps its place. */
+function deleteOrderOf(plan: Pick<DependencyPlan, 'targetUniqueIds' | 'deleteOrder'>): string[] {
+  const left = new Map(plan.targetUniqueIds.map((id) => [id.toLowerCase(), id]));
+  const ordered: string[] = [];
+  for (const id of plan.deleteOrder ?? []) {
+    const target = left.get(id.toLowerCase());
+    if (!target) continue;
+    left.delete(id.toLowerCase());
+    ordered.push(target);
+  }
+  return [...ordered, ...left.values()];
+}
+
+/**
+ * A process name from a refusal, with its id when only one process still has that name,
+ * and said to be ambiguous when several do: the tenant gives names only, and 125 of 196
+ * target names in the customer run belonged to more than one process. The whole tenant is
+ * searched where the run has it, since the plan alone can't see a copy it never touched.
+ */
+function refusalLabeller(plan: Pick<DependencyPlan, 'ledger' | 'claims'>, baseline: ProcessIndex | null | undefined): (name: string) => string {
+  const gone = new Set(plan.ledger.filter((r) => r.deleted).map((r) => r.uniqueId.toLowerCase()));
+  const byName = new Map<string, Map<string, string>>();
+  const add = (uniqueId: string, name: string) => {
+    const key = name.trim().toLowerCase();
+    if (!uniqueId || !key || gone.has(uniqueId.toLowerCase())) return;
+    if (!byName.has(key)) byName.set(key, new Map());
+    byName.get(key)!.set(uniqueId.toLowerCase(), uniqueId);
+  };
+  for (const entry of baseline?.values() ?? []) add(entry.uniqueId, entry.name);
+  for (const row of plan.ledger) add(row.uniqueId, row.name);
+  for (const claim of plan.claims) if (claim.category !== 'Group') add(claim.relatedUniqueId, claim.relatedName);
+  return (name) => {
+    const found = [...(byName.get(name.trim().toLowerCase())?.values() ?? [])];
+    if (found.length === 0) return name;
+    return found.length === 1 ? `${name} (${found[0]})` : `${name} (name matches more than one process)`;
+  };
+}
+
 /**
  * Why the tenant refused a delete, in words for the row. A still-referenced target is
  * answered HTTP 500 "Process Cannot Be Deleted" with `additionalInfos` naming what holds
- * it (R13, measured from the browser; shape not captured). So the names are read from
- * any strings under `additionalInfos`, or the `name`/`Name`/`title` of objects there,
- * with the raw body as the fallback and the tenant's message before both.
+ * it: an object keyed by category, each a list of names (captured in R14). The category
+ * is kept, because it is the only sign of whether a name is a process at all: 13
+ * refusals in the customer run named something that isn't (F8). Any other shape is read
+ * for strings, or the `name`/`Name`/`title` of objects, with the raw body as the fallback
+ * and the tenant's message before both. `labelProcess` words a name in a process
+ * category; a group's name is left as it came.
  */
-export function deleteRefusalText(error: unknown): string {
+export function deleteRefusalText(error: unknown, labelProcess: (name: string) => string = (name) => name): string {
   const record = (typeof error === 'object' && error !== null ? error : {}) as Record<string, unknown>;
   const message = failureOf(error).detail ?? '';
   const raw = typeof record['detail'] === 'string' ? record['detail'].trim() : '';
@@ -718,38 +987,64 @@ export function deleteRefusalText(error: unknown): string {
     body = null;
   }
   const infos = typeof body === 'object' && body !== null ? (body as Record<string, unknown>)['additionalInfos'] : undefined;
-  const names: string[] = [];
-  const collect = (value: unknown, depth: number) => {
+  const LABEL_KEYS = ['name', 'Name', 'title', 'processName'];
+  const labelOf = (item: Record<string, unknown>) => LABEL_KEYS.map((k) => item[k]).find((v) => typeof v === 'string' && v.trim());
+  const collect = (value: unknown, depth: number, names: string[]) => {
     if (depth > 4 || value === null || value === undefined) return;
     if (typeof value === 'string') {
       if (value.trim()) names.push(value.trim());
     } else if (Array.isArray(value)) {
-      for (const item of value) collect(item, depth + 1);
+      for (const item of value) collect(item, depth + 1, names);
     } else if (typeof value === 'object') {
       const item = value as Record<string, unknown>;
-      const label = ['name', 'Name', 'title', 'processName'].map((k) => item[k]).find((v) => typeof v === 'string' && v.trim());
+      const label = labelOf(item);
       if (typeof label === 'string') names.push(label.trim());
-      else for (const v of Object.values(item)) collect(v, depth + 1);
+      else for (const v of Object.values(item)) collect(v, depth + 1, names);
     }
   };
-  collect(infos, 0);
-  const unique = [...new Set(names)].filter((n) => n !== message);
-  if (unique.length > 0) return `${message || 'refused'}. Still referenced by: ${unique.join('; ')}`;
+  const namesIn = (value: unknown) => {
+    const names: string[] = [];
+    collect(value, 1, names);
+    return [...new Set(names)].filter((n) => n !== message);
+  };
+
+  const keyed = typeof infos === 'object' && infos !== null && !Array.isArray(infos) && !labelOf(infos as Record<string, unknown>);
+  const parts = keyed
+    ? Object.entries(infos as Record<string, unknown>).flatMap(([category, value]) => {
+        const names = namesIn(value);
+        const worded = /group/i.test(category) ? names : names.map(labelProcess);
+        return names.length > 0 ? [`${category}: ${worded.join(', ')}`] : [];
+      })
+    : namesIn(infos).map(labelProcess);
+  if (parts.length > 0) return `${message || 'refused'}. Still referenced by: ${parts.join('; ')}`;
   if (message) return message;
   return raw.slice(0, 500);
 }
 
-/** The archive pass's row for an active target: archived before its delete, or why not. */
-function preDeleteArchiveRow(target: string, name: string, groupId: number | null, archive: ArchiveOutcome): ResultRow {
+/** What became of the delete an archive came before, once it is known. */
+type DeleteAfterArchive = 'sent' | 'deleted' | 'refused' | 'not-sent';
+
+/**
+ * The archive pass's row for an active target: archived before its delete, or why not.
+ * Skipped when the delete went ahead and took (F8): the customer run's 101 such rows said
+ * Failed about processes that were gone, which read as something wrong with them, when
+ * the archive was only ever a step on the way (the failures were links to processes that
+ * no longer exist, measured 4 Nov).
+ */
+function preDeleteArchiveRow(target: string, name: string, groupId: number | null, archive: ArchiveOutcome, delete_: DeleteAfterArchive): ResultRow {
   const overridden = archive.outcome === 'Overridden' ? ', after the pending-approval override' : '';
+  const notArchived =
+    delete_ === 'deleted'
+      ? `Not archived first: ${archive.message}. Deleted directly.`
+      : delete_ === 'not-sent'
+        ? `Could not be archived before the delete: ${archive.message}. The delete was not sent`
+        : `Could not be archived before the delete: ${archive.message}. The delete was still sent; its row says what happened`;
   return resultRow({
     objectId: target,
     name,
     operation: 'Archive',
-    status: archive.success ? 'Success' : 'Failed',
-    message: archive.success
-      ? `Archived before the delete${overridden}`
-      : `Could not be archived before the delete: ${archive.message}. The delete was still sent; its row says what happened`,
+    status: archive.success ? 'Success' : delete_ === 'deleted' ? 'Skipped' : 'Failed',
+    message: archive.success ? `Archived before the delete${overridden}` : notArchived,
     groupId,
     statusCode: archive.statusCode > 0 ? archive.statusCode : null,
   });

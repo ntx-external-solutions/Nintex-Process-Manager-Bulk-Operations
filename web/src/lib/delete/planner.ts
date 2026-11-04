@@ -43,6 +43,7 @@ import {
   type ProcessStateSnapshot,
   type UnreadProcess,
 } from './ledger.ts';
+import { groupBlocksOf, hasProcessGroupLink, planLinkOrder } from './linkOrder.ts';
 import { nodeArray, nodeInt, nodeString, nodeValue, type DeleteIndex, type DeleteIndexEntry, type ProcessModel } from './model.ts';
 import { resolveClaimName } from './names.ts';
 import { findInputOutputReferenceSites, findProcessReferenceSites, type ReferenceSite } from './references.ts';
@@ -284,6 +285,31 @@ export async function findHiddenInputOutputReferences(
   return { sites, unread };
 }
 
+/**
+ * The group-category claims of the archived targets a run should not restore: those whose
+ * own model has no group link, so the link is held somewhere no edit here can reach. Asked
+ * before the Hold phase, because that is the restore F8 exists to save: 13 targets in the
+ * customer run were restored, archived, refused and archived again for nothing. A failed
+ * read decides nothing, and the plan asks again.
+ */
+export async function groupClaimsToHoldArchived(
+  gateway: Pick<DeleteGateway, 'checkDependencies' | 'readArchivedModels'>,
+  archivedTargetIds: readonly string[],
+  options: { isFatal?: FatalCheck | undefined; onEvent?: DeleteEventSink | undefined } = {},
+): Promise<DependencyClaim[]> {
+  const isFatal = options.isFatal ?? defaultIsFatal;
+  const held: DependencyClaim[] = [];
+  for (const [i, target] of archivedTargetIds.entries()) {
+    options.onEvent?.({ kind: 'progress', label: 'Checking archived targets for process group links', done: i + 1, total: archivedTargetIds.length });
+    const check = await checkProcessDependencies(gateway, target, isFatal);
+    const claims = check.claims.filter((c) => c.category === 'Group');
+    if (claims.length === 0) continue;
+    const model = await readArchived(gateway, target, isFatal);
+    if (model && !hasProcessGroupLink(model)) held.push(...claims);
+  }
+  return held;
+}
+
 export interface DeletePlanOptions {
   siteUrl: string;
   targetUniqueIds: readonly string[];
@@ -312,6 +338,11 @@ export interface DeletePlanOptions {
    * otherwise leaves restored holders on no record (W5 phase 7).
    */
   onRestored?: ((ledger: PlanLedgerRow[]) => Promise<void>) | undefined;
+  /**
+   * From `groupClaimsToHoldArchived`: archived targets to leave in the archive, because
+   * the tenant would refuse their delete whatever this run did (F8).
+   */
+  heldArchivedGroupClaims?: readonly DependencyClaim[] | undefined;
   cache?: ModelCache | null | undefined;
   onEvent?: DeleteEventSink | undefined;
   isFatal?: FatalCheck | undefined;
@@ -356,6 +387,7 @@ export async function buildDeletePlan(gateway: PlanningGateway, options: DeleteP
   // Which entries are the run's own targets. Everything else is a dependency holder, which
   // survives the run and needs a different results row.
   const targetLookupForRole = new Set(targetIds.map((t) => t.toLowerCase()));
+  const heldArchived = new Set((options.heldArchivedGroupClaims ?? []).map((c) => c.queriedUniqueId.toLowerCase()));
 
   const addLedgerEntry = async (uniqueId: string): Promise<ParticipantRecord | null> => {
     const key = uniqueId.toLowerCase();
@@ -580,7 +612,7 @@ export async function buildDeletePlan(gateway: PlanningGateway, options: DeleteP
     if (allowRestore && holdingGroupId !== null) {
       for (const candidate of candidates) {
         const record = ledger.get(candidate.toLowerCase());
-        if (!record || !record.wasArchived || record.restoredByThisRun) continue;
+        if (!record || !record.wasArchived || record.restoredByThisRun || heldArchived.has(candidate.toLowerCase())) continue;
         const outcome = await restoreForReading(record, holdingGroupId, 'for discovery');
         if (outcome === 'restored') restoredThisPass++;
         if (typeof outcome === 'object') orphanedHolders.push(outcome);
@@ -662,13 +694,31 @@ export async function buildDeletePlan(gateway: PlanningGateway, options: DeleteP
     }
   }
 
+  // ---- Group links: named before anything else is decided about the targets ----
+  const groupBlocks = groupBlocksOf(targetIds, [...allClaims, ...(options.heldArchivedGroupClaims ?? [])], (id) => ledger.get(id.toLowerCase())?.model);
+  for (const block of groupBlocks) if (heldArchived.has(block.targetUniqueId.toLowerCase())) block.linkInModel = false;
+  const heldForGroups = new Set(groupBlocks.filter((b) => b.linkInModel === false).map((b) => b.targetUniqueId.toLowerCase()));
+
   // ---- Filter: self-references and target-held sites are not work ----
+  // A target held back for a group link is not going anywhere, so nothing is edited for it.
   const workSites = allSites.filter(
     (s) =>
       s.holderUniqueId.toLowerCase() !== s.targetUniqueId.toLowerCase() &&
       !targetLookup.has(s.holderUniqueId.toLowerCase()) &&
-      targetLookup.has(s.targetUniqueId.toLowerCase()),
+      targetLookup.has(s.targetUniqueId.toLowerCase()) &&
+      !heldForGroups.has(s.targetUniqueId.toLowerCase()),
   );
+
+  // ---- Target-held sites are ordering, and inside a loop they are work after all ----
+  const links = planLinkOrder(targetIds, allSites, allClaims, heldForGroups);
+  plan.deleteOrder = links.order;
+  plan.linkEdges = links.edges;
+  plan.linkCycles = links.cycles;
+  plan.cycleWorkItems = links.cycleWork;
+  plan.groupBlocks = groupBlocks;
+  if (links.edges.length + links.cycles.length > 0) {
+    log(`Delete order follows ${links.edges.length} link(s) between targets; ${links.cycles.length} link cycle(s) to break first`);
+  }
 
   // ---- Reconcile per pair ----
   const reconciliation: Reconciliation[] = [];
@@ -765,6 +815,50 @@ export function planProcessName(plan: DependencyPlan, index: DeleteIndex | null,
   return resolveClaimName(plan.claims, uniqueId);
 }
 
+/** What a plan says about links between targets and links to groups, for the preview. */
+export function linkPlanLines(plan: DependencyPlan, index: DeleteIndex | null): string[] {
+  const lines: string[] = [];
+  const name = (id: string) => `${planProcessName(plan, index, id)}  (${id})`;
+
+  const edges = plan.linkEdges ?? [];
+  if (edges.length > 0) {
+    lines.push(`Delete order: ${edges.length} link(s) between targets, so the process holding each link is deleted first. Nothing is edited for these.`);
+  }
+
+  const cycleWork = plan.cycleWorkItems ?? [];
+  if (cycleWork.length > 0) {
+    lines.push(`TARGETS EDITED FIRST, TO BREAK A LINK CYCLE (${cycleWork.length}):`);
+    lines.push(
+      `${plan.linkCycles?.length ?? 0} group(s) of targets link to each other in a loop, so the tenant would refuse every one of them. Only the links inside the loop are removed, and each target is published, open draft included, before it is archived and deleted. A target that then cannot be deleted stays without those links.`,
+    );
+    for (const item of cycleWork) {
+      lines.push(`  ${name(item.holderUniqueId)}`);
+      for (const t of item.targetsAffected) lines.push(`      link to ${planProcessName(plan, index, t)} removed`);
+    }
+  }
+
+  const blocks = plan.groupBlocks ?? [];
+  const inModel = blocks.filter((b) => b.linkInModel !== false);
+  if (inModel.length > 0) {
+    lines.push(`LINKS TO PROCESS GROUPS THAT WILL BLOCK THE DELETE (${inModel.length}):`);
+    lines.push('Not removed automatically: a group link written through the process save was dropped on the demo tenant, so a removal may not stick. Remove these in Process Manager, or the tenant will refuse the delete.');
+    for (const b of inModel) {
+      lines.push(`  ${name(b.targetUniqueId)}`);
+      lines.push(`      ${b.linkInModel === null ? 'may link' : 'links'} to group ${b.groups.join(', ')}${b.linkInModel === null ? ' (its model could not be read)' : ''}`);
+    }
+  }
+  const held = blocks.filter((b) => b.linkInModel === false);
+  if (held.length > 0) {
+    lines.push(`HELD BACK, TIED TO A PROCESS GROUP (${held.length}):`);
+    lines.push("Each is named against a process group, but holds no group link itself, so the link is held somewhere this run can't edit (a group overview is the likely place). These are left alone: not restored, archived or deleted.");
+    for (const b of held) {
+      lines.push(`  ${name(b.targetUniqueId)}`);
+      lines.push(`      group ${b.groups.join(', ')}`);
+    }
+  }
+  return lines;
+}
+
 /**
  * The plan preview as the operator reads it. A preview restores nothing, so it says so
  * rather than claiming restores it never made. Port of `Show-ProcessDeletePlan`'s text.
@@ -773,6 +867,7 @@ export function planSummaryLines(plan: DependencyPlan, index: DeleteIndex | null
   const lines: string[] = [];
   lines.push(`Targets to delete: ${plan.targetUniqueIds.length}`);
   lines.push(`Processes to edit: ${plan.workItems.length}`);
+  if ((plan.cycleWorkItems?.length ?? 0) > 0) lines.push(`Targets edited first, to break a link cycle: ${plan.cycleWorkItems?.length}`);
   lines.push(`Reference sites: ${plan.sites.length}`);
 
   // One line with every reconciliation outcome, near the top: the across-categories count
@@ -818,6 +913,8 @@ export function planSummaryLines(plan: DependencyPlan, index: DeleteIndex | null
   }
 
   const ledgerRow = (id: string) => plan.ledger.find((r) => r.uniqueId.toLowerCase() === id.toLowerCase());
+  lines.push(...linkPlanLines(plan, index));
+
   if (plan.workItems.length > 0) {
     lines.push('References to remove, by holding process:');
     for (const item of plan.workItems) {
