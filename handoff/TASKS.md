@@ -106,7 +106,7 @@ change, write that as a `Ready` task. If not, say so and S4 is done.
 
 ## F9. Recognise "Approval Required" as pending in a read
 
-Status: Ready
+Status: Done (c9fd1aa)
 
 - Treat a caption of "Upload Pending Approval" or "Approval Required" as pending in
   `pendingFromRead`. Anything else still returns null so the list decides.
