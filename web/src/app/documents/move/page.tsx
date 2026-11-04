@@ -18,10 +18,12 @@ import {
   DOCUMENT_MOVE_STATUSES,
   moveInFlightRows,
   movePreviewRows,
+  pendingChosen,
   readForMove,
   runDocumentMove,
   settleDocumentMove,
   type DocumentMovePlan,
+  type DocumentMovePlanInput,
   type MoveDestination,
 } from '@/lib/documents/move.ts';
 import { inFlightOf, type DocumentRunRecord } from '@/lib/documents/runRecord.ts';
@@ -31,16 +33,18 @@ import { groupPathOf } from '@/lib/select/browse.ts';
 import { datedFilename, downloadCsv } from '@/lib/ui/download.ts';
 import { browserDocumentGateway, browserGateway, PmRequestError, type SessionInfo } from '@/lib/ui/gateway.ts';
 import { Notice, Progress } from '../../_ui/kit.tsx';
+import { Checkbox } from '../../components/Checkbox.tsx';
 import { DestinationPicker } from '../../components/DestinationPicker.tsx';
 import { ResultsSummary } from '../../components/ResultsSummary.tsx';
 import { SessionGate } from '../../components/SessionGate.tsx';
 import { useBrowseTree } from '../../components/TreeBrowser.tsx';
-import { InterruptedRun, isSignedOut, LeftOut, useDocumentChoice, useRunRecord } from '../choose.tsx';
+import { AssociatedDecision, InterruptedRun, isSignedOut, LeftOut, useDocumentChoice, useRunRecord } from '../choose.tsx';
 
 type Stage =
   | { kind: 'select' }
+  | { kind: 'decide' }
   | { kind: 'planning'; progress: string }
-  | { kind: 'plan'; plan: DocumentMovePlan }
+  | { kind: 'plan'; input: DocumentMovePlanInput }
   | { kind: 'running'; progress: string }
   | { kind: 'done'; rows: ResultRow[]; warning: string | null };
 
@@ -68,6 +72,7 @@ function MoveDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; onS
   const [stage, setStage] = useState<Stage>({ kind: 'select' });
   const [error, setError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
+  const [includePending, setIncludePending] = useState(false);
   const abort = useRef<AbortController | null>(null);
 
   const fail = (cause: unknown) => {
@@ -98,7 +103,7 @@ function MoveDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; onS
       const progress = (text: string) => setStage({ kind: 'planning', progress: text });
       const collected = await choice.collect(progress);
       if (collected === null) {
-        setStage({ kind: 'select' });
+        setStage({ kind: 'decide' });
         return;
       }
       if ('empty' in collected) {
@@ -111,15 +116,15 @@ function MoveDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; onS
         errorText: errorMessage,
         onProgress: (done, total) => progress(`Reading each document… ${done} of ${total}`),
       });
-      const plan = buildDocumentMovePlan({ chosen: collected.chosen, resolveSkipped: collected.resolveSkipped, paths: collected.paths, reads, destination });
-      setStage({ kind: 'plan', plan });
+      setIncludePending(false);
+      setStage({ kind: 'plan', input: { chosen: collected.chosen, resolveSkipped: collected.resolveSkipped, paths: collected.paths, reads, destination } });
     } catch (cause) {
       fail(cause);
       setStage({ kind: 'select' });
     }
   }
 
-  async function apply(plan: DocumentMovePlan) {
+  async function apply(plan: DocumentMovePlan, input: DocumentMovePlanInput) {
     setError(null);
     setConfirming(false);
     setStage({ kind: 'running', progress: 'Moving the first documents…' });
@@ -148,7 +153,7 @@ function MoveDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; onS
       setStage({ kind: 'done', rows: [...plan.skipped, ...rows], warning });
     } catch (cause) {
       fail(cause);
-      setStage({ kind: 'plan', plan });
+      setStage({ kind: 'plan', input });
     } finally {
       abort.current = null;
     }
@@ -182,7 +187,9 @@ function MoveDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; onS
     setStage({ kind: 'select' });
   }
 
-  const plan = stage.kind === 'plan' ? stage.plan : null;
+  const input = stage.kind === 'plan' ? stage.input : null;
+  const plan = input === null ? null : buildDocumentMovePlan({ ...input, includePending });
+  const pending = input === null ? 0 : pendingChosen(input.chosen);
   const n = plan?.targets.length ?? 0;
   const noun = `document${n === 1 ? '' : 's'}`;
 
@@ -230,9 +237,18 @@ function MoveDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; onS
         </>
       )}
 
+      {stage.kind === 'decide' && (
+        <AssociatedDecision
+          decision={choice.decision}
+          previewLabel="Preview what would move"
+          onPreview={() => void buildPlan()}
+          onBack={() => setStage({ kind: 'select' })}
+        />
+      )}
+
       {stage.kind === 'planning' && <Progress>{stage.progress}</Progress>}
 
-      {plan !== null && (
+      {plan !== null && input !== null && (
         <>
           <div className="panel">
             <h2>3. Check the plan. Nothing has been changed.</h2>
@@ -281,11 +297,31 @@ function MoveDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; onS
 
           <LeftOut rows={plan.skipped} open={n === 0} />
 
+          {pending > 0 && (
+            <div className="panel">
+              <label className="inline">
+                <Checkbox
+                  state={includePending ? 'checked' : 'unchecked'}
+                  label="Also move the pending documents"
+                  onChange={() => {
+                    setConfirming(false);
+                    setIncludePending(!includePending);
+                  }}
+                />{' '}
+                Also move the {pending} pending document{pending === 1 ? '' : 's'}
+              </label>
+              <p className="small">
+                Pending here means Process Manager has an upload awaiting approval. A document in this state can be moved by
+                hand, but what happens to its pending upload has not been checked, so these are left out unless you tick this.
+              </p>
+            </div>
+          )}
+
           <div className="panel">
             <h2>4. Move</h2>
             {confirming ? (
               <div className="row">
-                <Button onClick={() => void apply(plan)}>
+                <Button onClick={() => void apply(plan, input)}>
                   Yes, move {n} {noun} now
                 </Button>
                 <Button buttonType="secondary" onClick={() => setConfirming(false)}>

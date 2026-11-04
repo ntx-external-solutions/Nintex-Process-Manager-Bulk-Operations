@@ -205,6 +205,17 @@ export function useDocumentChoice(options: {
     setSource(sources[0]!);
   }
 
+  /** The associated-only documents to decide about, for the step `collect` stops at. */
+  const decision =
+    treeDocsCurrent === null ? null : (
+      <TreeDocumentsPanel
+        read={treeDocsCurrent}
+        paths={paths}
+        withArchived={treeLists.includes('Archived')}
+        onTick={(next) => setTreeDocs({ ...treeDocsCurrent, ticked: next })}
+      />
+    );
+
   const count = (treeChosen ? 1 : 0) + ticked.All.size + ticked.Archived.size + ids.length;
 
   const labels: Record<DocumentSource, string> = {
@@ -239,14 +250,7 @@ export function useDocumentChoice(options: {
           </div>
           <TreeBrowser state={browse} groupsOnly />
           {treeReading !== null && <Progress>{treeReading}</Progress>}
-          {treeDocsCurrent !== null && (
-            <TreeDocumentsPanel
-              read={treeDocsCurrent}
-              paths={paths}
-              withArchived={treeLists.includes('Archived')}
-              onTick={(next) => setTreeDocs({ ...treeDocsCurrent, ticked: next })}
-            />
-          )}
+          {decision}
         </>
       )}
 
@@ -267,7 +271,7 @@ export function useDocumentChoice(options: {
     </>
   );
 
-  return { tabs, body, collect, reset, count, busy: treeReading !== null };
+  return { tabs, body, decision, collect, reset, count, busy: treeReading !== null };
 }
 
 function TreeDocumentsPanel({
@@ -324,6 +328,44 @@ function TreeDocumentsPanel({
         </>
       )}
     </div>
+  );
+}
+
+/**
+ * The step between choosing and the plan when a checked group lists documents that live
+ * elsewhere. It has the page to itself: JB's test of Move documents found that sending the
+ * operator back to the selection, with the question somewhere up the page and the preview
+ * button to press again, read as nothing having happened.
+ */
+export function AssociatedDecision({
+  decision,
+  previewLabel,
+  onPreview,
+  onBack,
+}: {
+  decision: ReactNode;
+  previewLabel: string;
+  onPreview: () => void;
+  onBack: () => void;
+}) {
+  // Braces matter: scrollTo returns a promise in current Chrome, and React would call it as the cleanup.
+  useEffect(() => {
+    window.scrollTo({ top: 0 });
+  }, []);
+  return (
+    <>
+      <div className="panel">
+        <h2>Some documents only link to a checked group</h2>
+        <p>Tick any you want to include, then carry on to the preview. Nothing has been changed.</p>
+      </div>
+      {decision}
+      <div className="row">
+        <Button onClick={onPreview}>{previewLabel}</Button>
+        <Button buttonType="secondary" onClick={onBack}>
+          Back to the selection
+        </Button>
+      </div>
+    </>
   );
 }
 

@@ -163,6 +163,9 @@ const moveMissing = (field: string) =>
  * association. A group that is both real and implied can't be told apart in the read; the
  * browser's own save drops it too, if it builds its list the same way.
  *
+ * Pending isn't refused here: the read doesn't say, so the list decides at the plan, where
+ * the operator can opt in (W9a).
+ *
  * Refused until a capture shows their form: links (the create call has `Url` and
  * `NetworkPath`, which this form hasn't), tagged documents (the read has tags, and the
  * captured form, for a document with none, has no field for them) and automated forms.
@@ -170,7 +173,6 @@ const moveMissing = (field: string) =>
 export function documentMoveForm(raw: unknown, targetGroupId: number): { form: Record<string, string> } | { refused: string } {
   const props = toDocumentProperties(raw);
   if (props.isArchived === true) return { refused: MOVE_ARCHIVED };
-  if (props.isPending === true) return { refused: MOVE_PENDING };
   if (props.primaryGroupId === null) return { refused: moveMissing('its primary group') };
   if (props.primaryGroupId === targetGroupId) return { refused: MOVE_ALREADY_THERE };
 

@@ -47,7 +47,7 @@ import { CleanupPanel } from '../../components/CleanupPanel.tsx';
 import { ResultsSummary } from '../../components/ResultsSummary.tsx';
 import { SessionGate } from '../../components/SessionGate.tsx';
 import { useBrowseTree } from '../../components/TreeBrowser.tsx';
-import { InterruptedRun, isSignedOut, LeftOut, readWhatHolds, UnreadProcesses, useDocumentChoice, useRunRecord } from '../choose.tsx';
+import { AssociatedDecision, InterruptedRun, isSignedOut, LeftOut, readWhatHolds, UnreadProcesses, useDocumentChoice, useRunRecord } from '../choose.tsx';
 
 /** What the done screen needs to offer the group cleanup, or why it can't. */
 type CleanupOffer =
@@ -73,6 +73,7 @@ const EMPTY_PLAN: DocumentDeletePlan = { toArchive: [], alreadyArchived: [], ski
 
 type Stage =
   | { kind: 'select' }
+  | { kind: 'decide' }
   | { kind: 'planning'; progress: string }
   | { kind: 'plan'; run: Run }
   | { kind: 'running'; title: string; progress: string }
@@ -132,7 +133,7 @@ function DeleteDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; o
       const progress = (text: string) => setStage({ kind: 'planning', progress: text });
       const collected = await choice.collect(progress);
       if (collected === null) {
-        setStage({ kind: 'select' });
+        setStage({ kind: 'decide' });
         return;
       }
       if ('empty' in collected) {
@@ -361,6 +362,15 @@ function DeleteDocumentsFlow({ session, onSignedOut }: { session: SessionInfo; o
             </Button>
           </div>
         </>
+      )}
+
+      {stage.kind === 'decide' && (
+        <AssociatedDecision
+          decision={choice.decision}
+          previewLabel="Preview what would be deleted"
+          onPreview={() => void buildPlan()}
+          onBack={() => setStage({ kind: 'select' })}
+        />
       )}
 
       {stage.kind === 'planning' && <Progress>{stage.progress}</Progress>}
