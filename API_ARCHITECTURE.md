@@ -1649,11 +1649,77 @@ upload pending approval has `action.caption` "Upload Pending Approval", and the 
 
 `stakeholdersGroupedByType` differs between groups, so owners look like they come from the group.
 
-Not measured: the form for a linked-file or tagged document or an automated form; the read of a
-document with a real association; whether a save changes `currentReviewDueDate` or adds a version.
+Not measured: the form for a linked-file document or an automated form; the read of a document
+with a real association. The tagged form, `currentReviewDueDate` and history are in "Document
+tags" below.
 
 **The bulk calls answer 200 when items fail.** Each failure is an entry in `errors`.
 Codes seen: `NotArchived` (delete of an active document), `NotFound`, `ProcessAttachment`.
+
+### Document tags (4 Nov 2026)
+
+Measured on one uploaded `ZZ` document and two `ZZ` groups, created for this and removed
+after. Saves A1 to A6 were made in the Process Manager UI and captured from the page. The
+part B saves were sent from the same signed-in browser session (cookie plus
+`__RequestVerificationToken`), not with a bearer token: the app's proxy has no operation that
+takes a caller's form, so a tag-less form can't be sent through it.
+
+**The read.** `associatedTags` and `associatedSystemTags` are lists of
+`{key: <name>, value: <numeric id>}`. `possibleTags` and `possibleSystemTags`, same shape, are
+what can be picked: the tenant's search tags and its systems (a system tag links the document
+to an entry in Systems). The document list's `tags` field is a display string, not ids.
+
+**The form.** Each tag is its own multipart field carrying the numeric id, repeated once per
+tag, after `GroupList`. No tags of a kind means the field is left out. There is no empty
+value and no list syntax.
+
+```
+AssociatedTags=101
+AssociatedTags=102
+AssociatedSystemTags=201
+```
+
+| Save (UI) | Tag fields the browser sent | Status | Tags after |
+|---|---|---|---|
+| A1. No tags, saved unchanged | none (form exactly as in "Moving a document") | 204 | none |
+| A2. One tag added | `AssociatedTags` once | 204 | 1 tag |
+| A3. One system tag added | `AssociatedTags`, `AssociatedSystemTags` | 204 | 1 and 1 |
+| A4. Moved, both kinds on | both, plus the new `PrimaryProcessGroupId` | 204 | both kept, group changed |
+| A5. Both on, nothing changed | both, sent anyway | 204 | both kept |
+| Extra. A second tag added | `AssociatedTags` twice | 204 | 2 and 1 |
+| A6. Every tag removed | none; the form is identical to A1 | 204 | none |
+
+**B. A save without the tag fields wipes the tags.** On a document with two tags and one
+system tag, the A4 form with every tag field left out answered 204, and the read afterwards had
+both lists empty. A no-change save without them did the same. Only the document's links go:
+the tags and systems themselves stay on the tenant, and no other document changed. Since
+leaving the fields out is also how the UI says "no tags" (A6), the server can't tell
+"unchanged" from "remove them all". So a save has to send every tag back. Doing that (the same
+form plus the tag fields) moved the document and kept all three.
+
+**What else the saves showed.**
+
+- **`currentReviewDueDate` doesn't move.** It stayed at the upload time plus 12 months across
+  every save, four of them moves. `lastReviewDate` and `nextReviewDueDate` changed between two
+  reads three seconds apart with no save between, so they are computed at read time.
+- **History:** a move adds one entry, `type` 6, comment `Group changed from "<old>" to "<new>"`.
+  Tag changes and no-change saves add nothing. No version is added.
+- **Group ids:** the tree's numeric `id` from `GetChildProcessGroupTreeItems` is the value the
+  UI sends as `PrimaryProcessGroupId`, and the read's `primaryProcessGroupId` matches it.
+- **Bearer token:** through the app's proxy, `document.properties` returned the same 23 fields
+  as the browser read with the same values, and `document.move` (bearer, multipart) moved the
+  untagged document with everything else kept. With tags on, `document.move` refused with the
+  tagged-document reason, as built.
+- **Cookie-session writes need `X-Requested-With: XMLHttpRequest`** as well as the token. Without
+  it this save answers 500 with an empty problem body, even for a correct form. The bearer proxy
+  doesn't send it and doesn't need it.
+- **The UI uploads in two calls:** `POST .../documents/uploadstandalone` with only `file`, then
+  `POST .../documents/updatestandalones` with `ReferenceNumber`, `GroupId` (numeric),
+  `DocumentType` (`Information`) and `StandAloneDocumentIds`. A direct `POST .../documents/upload`
+  from the browser session answered 500, but that attempt also lacked `X-Requested-With`, so it
+  says nothing against the call documented above.
+- The document list shows an upload's name with its file extension; the properties read and
+  the form carry it without.
 
 ### How processes hold documents
 
