@@ -3,7 +3,7 @@
 Written by the Cowork session. The product is now a web app; read `handoff/SPEC-WEB.md`
 before starting any task here. Work every task marked `Status: Ready`, in order, one PR
 per task against `claude/main`. Tasks marked `Queued` are waiting on a spike or an
-earlier task; don't start them.
+earlier task, and tasks marked `For Cowork` need the tenant; don't start them.
 
 The R11 tasks for the PowerShell (old T1 and T2) are superseded. They're folded into W5.
 The PowerShell is frozen at v4.11: don't change it.
@@ -48,6 +48,55 @@ Demo tenant, group `ZZ Link Order (Claude test, safe to delete)`:
 
 Pass: everything except N1 deleted in one run, C1 and C2 each with a cycle row, N1 edited (save
 only) and left active. Then delete N1 and both groups.
+
+---
+
+## S4. What "pending" means on a document (Cowork spike)
+
+Status: For Cowork. Claude Code: don't start this; it needs the tenant. A build task follows from it.
+
+**Why.** The app's idea of pending comes from one field, and a 4 Nov capture shows that field can
+miss. A real document's read had `action.caption` "Upload Pending Approval", while its list row had
+`isPending: false` and `hasUpdatesPending: true`. A UI move of it worked and it stayed pending.
+
+- **Move documents** decides from the list's `isPending`, so that document would move without the
+  tick and without being marked pending.
+- **Archive and Delete documents** use `props?.isPending ?? c.entry.isPending` in the plan and
+  `props.isPending === true` in the re-check before each batch. The read has no `isPending`, so the
+  plan falls back to the list and the re-check can never fire.
+- The 30 Oct spike found `enableDocumentApprovals: false` with 13 documents `isPending: true`, and
+  left that unexplained. Whether a document is pending at all with approvals off is part of this.
+
+**Measure.** The census is read-only. Use only `ZZ` content for anything that writes, remove it
+after, and give the document counts before and after. Don't change the approvals setting without
+asking JB.
+
+1. **Census.** Read `/bff/document/api/v1/configuration` again. Then, for every active document,
+   read the list row and the properties, and tabulate `isPending`, `hasUpdatesPending`, `isDeclined`
+   and `action.caption` against each other, with counts. Which combinations exist, and does any
+   field agree with the caption every time?
+2. **Cause.** For a few documents of each combination, read the history. What put them there? In
+   particular, is `hasUpdatesPending` a new upload waiting on an older approved one, or something
+   else, like a change of details?
+3. **Bearer.** Through the app's proxy, do `documents.list` and `document.properties` carry the same
+   fields and values as the browser? The app only ever sees the bearer's answer.
+4. **Effect of acting on one.** If the census shows a way to make each state on `ZZ` content, then
+   for each state try move, archive, restore and delete. Does the call succeed? Does the
+   pending upload survive, and can it still be approved or declined afterwards? Does the UI refuse
+   anything the API allows?
+
+**Answer wanted.** Add a section to `API_ARCHITECTURE.md` that says:
+
+- which field or fields mean "pending" for the app's purposes, and whether a read alone can tell
+  (the re-check has only a read to go on);
+- what each state risks, if anything, so we can see whether skipping is even the right default on
+  Archive and Delete, and whether Move's tick should cover these documents.
+
+Then write the build task in this file as `Ready`, covering the Move plan, the Archive and Delete
+plans and both re-checks. If it turns out the mismatch is harmless, say so and write only the fix for
+the re-checks that can't fire.
+
+**Keep out of the handoff:** tenant ids, account names and document names, as usual.
 
 ---
 
