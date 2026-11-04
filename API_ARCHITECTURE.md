@@ -1643,8 +1643,8 @@ yet saved, and `nextReviewDueDate` is that moment plus the frequency. `currentRe
 like the stored one, and it stayed in the past across a captured move. The read also carries
 `associatedTags`, `associatedSystemTags`, `isAutomatedForm`, `stakeholdersGroupedByType`,
 and `possibleDocumentTypes` (`value` is the word; `Info` is `Information`). A document with its
-upload pending approval has `action.caption` "Upload Pending Approval", and the read has no
-`isPending`.
+upload pending approval has `action.caption` "Upload Pending Approval" or "Approval Required", and
+the read has no `isPending`: see "What pending means (S4, 4 Nov 2026)".
 `GET .../{id}/history?Page&PageSize` is the document's history.
 
 `stakeholdersGroupedByType` differs between groups, so owners look like they come from the group.
@@ -1786,9 +1786,44 @@ saved and published normally.
 - **An archived document blocks deleting every group it's associated with,** primary or
   not: `DeleteGroup` answers 409 `AssociatedContents`, naming it "(archived)".
 
+### What pending means (S4, 4 Nov 2026)
+
+Cowork's spike, with approvals turned on for a short window on `ZZ` content. The full write-up is
+in the Bulk Operations project (`claude/bulk-ops-s4-pending-spike-2026-11-04.md`), not in this repo.
+
+**On the list.** `isPending` means never approved. `hasUpdatesPending` means any upload is waiting,
+so it also covers a new version on an approved document. Of 212 active documents, 13 had both
+flags, 8 had `hasUpdatesPending` only, 2 were declined, and 6 links had no `action`. The app counts
+either flag as pending. The flags didn't change with approvals on. `documents.list` and
+`document.properties` through the app's proxy matched the browser.
+
+**On a read.** There's no pending field, and the caption is the only sign. It depends on the reader
+and the approvals setting:
+
+| Read of a pending document | `action.caption` |
+|---|---|
+| Approvals on, the caller can approve | "Approval Required"; `subActions` include Approve and Decline |
+| Approvals on, the caller can't approve | "Upload Pending Approval" |
+| Approvals off | "Upload Pending Approval" |
+
+`subActions` alone can't decide it: with approvals off, a pending document and a declined one both
+offer only View and Replace.
+
+**Acting on one.** A pending upload survives move, archive and restore, for a first upload and for
+a new version on an approved document, and can still be declined afterwards. **An archived pending
+document deletes with no refusal, and the waiting upload goes with it**, so the app's skip is the
+only guard on Delete. The defaults stand: Move keeps its tick, Archive and Delete keep skipping.
+
+**Calls.**
+
+| What | Call | Answer |
+|---|---|---|
+| Replace a version | `POST .../documents/{id}/upload`, multipart: `File`, `DocumentType`, `GroupId` required, plus `Description` and `DoNotSendChangeNotification` | 400 naming the missing field |
+| Decline a waiting upload | `POST .../documents/{id}/decline` | 204 |
+| Approve a waiting upload | `POST .../documents/{id}/approve` | 204, and does nothing when the caller is the uploader |
+
 ### Not measured
 
 - Whether a training unit's use of a document blocks its delete.
 - Any of the document endpoints with a bearer token.
-- What `isPending` means with approvals off.
 

@@ -6,6 +6,45 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ---
 
+## F9. Recognise "Approval Required" as pending in a read
+
+Commit `c9fd1aa` on `claude/f9-approval-required`, on top of PR #92 with the S4 branch merged in, so it
+needs nothing else to apply.
+
+**What changed for the operator.** With approvals on, Archive and Delete documents now skip a
+pending document when the operator can approve it. Before this, the plan and the re-check read
+"Approval Required", didn't recognise it, and left the plan to the list. The re-check, which has only
+the read to go on, passed such a document through. That matters most on Delete: S4 found an
+archived pending document deletes with no refusal and takes the waiting upload with it.
+
+**Functions touched.** `pendingFromRead` in `web/src/lib/documents/holders.ts`, which now matches
+either caption. Anything else still gives null, so the list decides. `subActions` isn't used, as F9
+says. No new or renamed results-file operations: the skip keeps its `Pending in Process Manager`
+message.
+
+**`API_ARCHITECTURE.md`.** F9 says to add to the S4 section, but no such section was in the repo:
+Cowork's write-up is in the Bulk Operations project. So I wrote "What pending means (S4, 4 Nov
+2026)" under the documents spike, from Cowork's readbacks: F9's four points, plus the list flags,
+the census counts, the caption table and the defaults. It points at the write-up and doesn't replace
+it, and Cowork should correct it if its wording goes further than the write-up. I also removed "What
+`isPending` means with approvals off" from Not measured, as S4 answers it.
+
+**Tests.** 727 of 727 pass, up two from 725. `archive.test.ts`: "Approval Required" reads as pending,
+and "Approval Declined" still doesn't. The Archive and Delete re-check tests now run for both
+captions. `npm run typecheck` and `npm run build` clean. All seven document drivers pass against the
+built app and the mock: `drive-docs-move` 34, `drive-docs-archive` 29, `drive-docs-delete` 32,
+`drive-docs-restore` 16, `drive-docs-repair` 20, `drive-docs-archive-resume` 5,
+`drive-docs-delete-resume` 19. The mock still only answers "Upload Pending Approval", so the new
+caption is covered by the unit tests, not the drivers. `Tests/Run-AllTests.ps1` not run: `pwsh` isn't
+installed here and no PowerShell changed.
+
+**Not measured, for Cowork.** Nothing here was run live. With approvals on and an approver as the
+operator, a run of Archive and Delete documents should skip a pending `ZZ` document. Whether an
+archived document's list row and read keep their pending signs isn't in the readback; Delete's
+skip depends on that for a document archived earlier, so it's worth a check in that run.
+
+---
+
 ## Pending uploads (from S4 steps 1 to 3)
 
 Commit `a9f015c` on `claude/pending-uploads`, branched from the link type label, so it needs

@@ -47,12 +47,15 @@ function groupsOf(value: unknown): DocumentProperties['associatedGroups'] {
 
 /**
  * Whether a read shows an upload waiting. The read has no pending field, and the caption is the
- * only sign (S4, 4 Nov): `actionType` is the same on a declined document. It can only add to what
- * the list says: anything else gives null and the list decides, so a reworded caption loses the
- * re-check rather than clearing a pending document.
+ * only sign (S4, 4 Nov): `actionType` is the same on a declined document, and with approvals off
+ * a pending and a declined document offer the same `subActions`. The caption depends on who reads:
+ * with approvals on, someone who can approve gets "Approval Required" and anyone else "Upload
+ * Pending Approval" (S4 step 4), so an operator who is an approver only ever sees the first. It
+ * can only add to what the list says: anything else gives null and the list decides, so a reworded
+ * caption loses the re-check rather than clearing a pending document.
  */
 function pendingFromRead(raw: unknown): boolean | null {
-  if (/pending approval/i.test(nodeString(nodeValue(raw, 'action'), 'caption'))) return true;
+  if (/pending approval|approval required/i.test(nodeString(nodeValue(raw, 'action'), 'caption'))) return true;
   return bool(nodeValue(raw, 'isPending'));
 }
 
