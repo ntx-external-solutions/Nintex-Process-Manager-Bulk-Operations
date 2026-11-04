@@ -14,7 +14,7 @@ import Link from 'next/link';
 import { useEffect, useState, type ReactNode } from 'react';
 
 import { currentSession, type SessionInfo } from '@/lib/ui/gateway.ts';
-import { AppShell } from './_ui/AppShell.tsx';
+import { AppShell, BetaBadge } from './_ui/AppShell.tsx';
 import { Notice, SignedInAs } from './_ui/kit.tsx';
 import { SignInForm } from './SignInForm.tsx';
 
@@ -25,6 +25,12 @@ interface OperationTile {
   /** Null while the operation is not built yet. */
   href: string | null;
 }
+
+const SITE_TITLE = (
+  <span className="site-title">
+    Bulk Operations <BetaBadge />
+  </span>
+);
 
 const OPERATIONS: readonly OperationTile[] = [
   {
@@ -111,13 +117,13 @@ export default function Home() {
   }
 
   if (checking) {
-    return <AppShell title="Bulk Operations" meta={<span className="muted">Checking your session…</span>} pageWidth="default" />;
+    return <AppShell title={SITE_TITLE} meta={<span className="muted">Checking your session…</span>} pageWidth="default" />;
   }
 
   if (session === null) {
     return (
       <AppShell
-        title="Bulk Operations"
+        title={SITE_TITLE}
         description="Sign in with your Process Manager username and password. They are exchanged for a token and are not stored."
         pageWidth="default"
       >
@@ -132,7 +138,7 @@ export default function Home() {
 
   return (
     <AppShell
-      title="Bulk Operations"
+      title={SITE_TITLE}
       meta={<SignedInAs username={session.username} tenant={session.tenant} />}
       description="Archive, delete, move and update ownership across many processes at once, and archive documents."
       actions={

@@ -248,6 +248,12 @@ pre.plan-text {
   font-size: 13px;
 }
 
+.site-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
 /* A short label beside a name, drawn as Textura's small Badge. */
 .tag {
   display: inline-block;

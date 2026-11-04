@@ -7,7 +7,7 @@ import './globals.css';
 import { Providers } from './providers.tsx';
 
 export const metadata: Metadata = {
-  title: 'Bulk Operations',
+  title: 'Bulk Operations (Beta)',
   description:
     'Bulk archive, delete, move and ownership updates for Nintex Process Manager.',
   robots: { index: false, follow: false },
