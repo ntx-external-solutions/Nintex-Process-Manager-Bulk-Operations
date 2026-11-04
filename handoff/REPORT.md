@@ -8,8 +8,8 @@ tests added and assertion count, anything deferred or disputed and why.
 
 ## W9. Move documents
 
-Commits `98d363b` and `0bdc148` on `claude/w9-move-documents`. JB asked for this directly, with a browser
-capture of the save call and then of the read, so it has no entry in TASKS.md and no spike behind it. **Don't run
+Commits `98d363b`, `0bdc148` and `7da2320` on `claude/w9-move-documents`. JB asked for this directly, with a browser
+captures of the reads and saves, so it has no entry in TASKS.md and no spike behind it. **Don't run
 it on real content until the checks below pass.**
 
 **What changed.** A new page, `/documents/move`, in the side nav and on the home page.
@@ -35,8 +35,8 @@ blank. The save reads the record itself, so it sends what the tenant holds at th
 **Results-file operations.** `UpdateLocation` with `ObjectType` `Document`, the name the
 process Move uses. One row per document, including skips. `GroupId` is the group it left.
 
-**Tests.** `npm test`: 658 tests, 658 pass (18 new, was 640). Typecheck and build clean.
-New: `documents/move.test.ts` (17) and one allowlist test. `Tests/Run-AllTests.ps1` not run:
+**Tests.** `npm test`: 660 tests, 660 pass (20 new, was 640). Typecheck and build clean.
+New: `documents/move.test.ts` (19) and one allowlist test. `Tests/Run-AllTests.ps1` not run:
 `pwsh` isn't on this machine and no PowerShell changed. `$script:ScriptVersion` not bumped:
 the script is frozen at v4.11. New driver `drive-docs-move`: every check passes against the
 mock. The six older document drivers still pass after the mock changes. Nothing was run
@@ -44,9 +44,9 @@ against a tenant, and the capture's cookies and token were not used.
 
 **What the captured read changed (`0bdc148`).** The first commit guessed the read's field names.
 - **A real defect:** `associatedGroups` also holds the primary and the groups in
-  `implicitlyAssociatedGroups`. The first commit would have saved inherited groups, the root
-  among them, as real associations on every move. They are now taken out, and a read without
-  `implicitlyAssociatedGroups` refuses the move.
+  `implicitlyAssociatedGroups`. The first commit would have saved implied groups as real
+  associations. They are now taken out, and a read without `implicitlyAssociatedGroups` refuses
+  the move.
 - **Names:** the review fields sit under `documentReview`, and the reference is `referenceNumber`
   in the read and `ReferenceNo` in the form. The first commit would have skipped every document.
 - **New refusals:** a tagged document and an automated form. The read has tags, and the captured
@@ -55,32 +55,45 @@ against a tenant, and the capture's cookies and token were not used.
   read and the form share an id. `documentType` is the word the form takes. `isPending` is not in
   the read; the plan takes it from the list, and the save at run time can't re-check it.
 
+**What JB's second capture changed (`7da2320`).** Reads and saves of two more documents, one moved
+and one linked to a group without moving.
+- **My review-clock alarm in `0bdc148` rested on bad evidence.** `lastReviewDate` and
+  `nextReviewDueDate` look computed at read time: seven decimal places, and today's time on a
+  document not yet saved as well as on one just saved. `currentReviewDueDate` looks stored, with
+  three decimals, and it's still in 2025 on the document read after its move.
+- **JB says any property update shifts the review date.** So the capture points one way and JB's
+  experience the other, which item 1 settles. Either way a move is the save the UI makes, and the
+  plan page now says so. JB raised no objection, so I've treated it as acceptable, not a blocker.
+- **Implicit groups aren't ancestors, as I reported.** A document in a top-level group has only its
+  primary there. The attached document alone had a second one, so it looks like the attached
+  processes' groups. The code didn't change; the comments, the mock and the docs did.
+- **The move form is confirmed** against a second document, with no override and months kept.
+  That closes the old "no override with no months" concern for the usual case.
+- **`GroupList` is confirmed**: linking puts the group's id in `selected` and leaves the primary.
+- **Owners look like they come from the group:** the lists differ by group. The plan page says so.
+- **`isPending` may be explained:** the second document reads "Upload Pending Approval", and JB
+  moved it by hand. Pending documents are still skipped here; lifting that is one line if the
+  tenant takes the save.
+
 **Unmeasured. Cowork, please check these first, on `ZZ` content, one document at a time.**
 
-1. **Whether a save restarts the review clock. This one could stop the feature.** On the captured
-   document `lastReviewDate` is seconds after the session's last activity in the capture, and
-   `nextReviewDueDate` is exactly the frequency later, while `currentReviewDueDate` is long past.
-   That fits a save marking the document reviewed, though someone signing it off by hand would
-   look the same. If it's the save, a bulk move marks every document reviewed. Compare
-   `documentReview` before and after a move.
+1. **Does a save change `currentReviewDueDate`?** Compare it before and after a move, and read
+   twice to confirm `lastReviewDate` changes between reads.
 2. **The tree's numeric group id has to be what `PrimaryProcessGroupId` takes.** Still assumed, and
    the one assumption that wouldn't fail safely: a wrong id could land a document in the wrong
    group. The final read would show it as Failed, but only after it moved.
-3. **A document with a real association.** The capture had none. A group that is both real and
-   implicit can't be told apart in the read, so that association is dropped by a move. Check that
-   a real association survives, and whether the overlap can happen.
+3. **A document with a real association, read and moved.** Check it comes back in
+   `associatedGroups`, outside `implicitlyAssociatedGroups`, and survives. A group that is both
+   can't be told apart, so a move drops that association. Check what the UI does in that case.
 4. **Compare the whole record before and after a move**, including `.../{id}/history`: version,
-   implicit groups, and `stakeholdersGroupedByType`. Owners aren't in the form, so they may follow
-   the group.
-5. **No override with no months:** this sends `DocumentReviewFreqMonths` blank, which is a guess. If
-   the tenant refuses it, the row is Failed and nothing changes.
-6. **The bearer token on this call, and multipart with it.**
-7. **A document attached to a process, a training unit and a draft** still opens from each after
+   implicit groups, owners.
+5. **The bearer token on this call, and multipart with it.**
+6. **A document attached to a process, a training unit and a draft** still opens from each after
    moving.
 
 **Decisions to check.**
 - **Attached documents move.** Holders point at the document, not at its group, so W8 decision
-  1 (never archive or delete) doesn't apply. Item 7 tests that.
+  1 (never archive or delete) doesn't apply. Item 6 tests that.
 - **Linked documents are skipped.** External and network documents get a Skipped row. The create
   call takes `Url` and `NetworkPath` and this form has neither, so a save could lose the address.
   12 of the demo tenant's documents are links. A capture of saving one would let this open up.
